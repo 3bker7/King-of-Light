@@ -3,6 +3,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { THEMES } from '../game/constants';
 import {
   canPlaceThemeOnCube,
+  getCubePurchasePrice,
   isPurchasableNeutralCube,
   makeSlotKey,
 } from '../game/production';
@@ -17,9 +18,12 @@ import {
   updateFarmCropGrowth,
   updateProgressRing,
 } from './buildings';
+import { type CitizenInfo, PeopleAgentsManager } from './peopleAgents';
 import {
   createAwningTexture,
+  createBlobShadowTexture,
   createFootprintDecalTexture,
+  createPriceTagTexture,
   createSandBumpTexture,
   createSandTexture,
   createSkyTexture,
@@ -49,7 +53,11 @@ import {
 export interface WorldSyncPayload {
   cubes: Cube[];
   level: 1 | 2;
+  population: number;
+  satisfaction: number;
   selectedCubeId: number | null;
+  selectedCitizenId: number | null;
+  followCitizenId: number | null;
   activeBuildTheme: ThemeId | null;
   staffedSlots: Set<string>;
 }
@@ -107,9 +115,16 @@ function detectSoftwareWebGL(): boolean {
   }
 }
 
+interface PurchasableTagItem {
+  sprite: THREE.Sprite;
+  baseY: number;
+  phase: number;
+}
+
 export class WorldEngine {
   private readonly container: HTMLElement;
   private readonly onCubeClick: (cubeId: number) => void;
+  private readonly onCitizenClick?: (agentId: number) => void;
   private readonly isSoftwareGl: boolean;
 
   private readonly renderer: THREE.WebGLRenderer;
@@ -125,9 +140,11 @@ export class WorldEngine {
   private readonly dustTexture: THREE.CanvasTexture;
   private readonly unstaffedTexture: THREE.CanvasTexture;
   private readonly footprintTexture: THREE.CanvasTexture;
+  private readonly blobShadowTexture: THREE.CanvasTexture;
 
   private readonly buildingLib: BuildingLibrary;
   private readonly wilderness: WildernessProps;
+  private readonly peopleAgents: PeopleAgentsManager;
 
   private readonly terrainGeometry: THREE.PlaneGeometry;
   private readonly terrainMaterial: THREE.MeshStandardMaterial;
@@ -136,10 +153,15 @@ export class WorldEngine {
   private readonly boundaryGroup = new THREE.Group();
   private readonly waterGroup = new THREE.Group();
   private readonly buildingsGroup = new THREE.Group();
+  private readonly purchasableGroup = new THREE.Group();
   private readonly fxGroup = new THREE.Group();
 
   private readonly waterMaterial: THREE.MeshStandardMaterial;
   private readonly foamMaterial: THREE.MeshBasicMaterial;
+  private readonly purchasableShimmerGeo: THREE.PlaneGeometry;
+  private readonly purchasableShimmerMat: THREE.MeshBasicMaterial;
+  private readonly priceTagCache = new Map<number, THREE.CanvasTexture>();
+  private purchasableSprites: PurchasableTagItem[] = [];
 
   private readonly hoverDecalMesh: THREE.Mesh;
   private readonly hoverDecalMat: THREE.MeshBasicMaterial;
@@ -154,6 +176,7 @@ export class WorldEngine {
   private seaCoords: Array<{ x: number; z: number }> = [];
   private lastSeaSignature = '';
   private lastOwnedSignature = '';
+  private lastVillageSignature = '';
   private initialSyncDone = false;
 
   // Camera pan/zoom state (damped)
@@ -163,6 +186,8 @@ export class WorldEngine {
   private desiredFrustumHeight = 64;
   private viewportWidth = 1;
   private viewportHeight = 1;
+  private followAgentId: number | null = null;
+  private readonly scratchFollowPos = new THREE.Vector3();
 
   // Input / interaction state
   private readonly raycaster = new THREE.Raycaster();
@@ -193,10 +218,12 @@ export class WorldEngine {
   constructor(
     container: HTMLElement,
     initialPayload: WorldSyncPayload,
-    onCubeClick: (cubeId: number) => void
+    onCubeClick: (cubeId: number) => void,
+    onCitizenClick?: (agentId: number) => void
   ) {
     this.container = container;
     this.onCubeClick = onCubeClick;
+    this.onCitizenClick = onCitizenClick;
     this.isSoftwareGl = detectSoftwareWebGL();
 
     this.renderer = new THREE.WebGLRenderer({
@@ -260,11 +287,13 @@ export class WorldEngine {
     this.dustTexture = createSoftCircleTexture();
     this.unstaffedTexture = createUnstaffedBadgeTexture();
     this.footprintTexture = createFootprintDecalTexture();
+    this.blobShadowTexture = createBlobShadowTexture();
 
     this.buildingLib = createBuildingLibrary(
       this.awningTexture,
       this.unstaffedTexture
     );
+    this.peopleAgents = new PeopleAgentsManager(this.blobShadowTexture);
 
     // Continuous smooth desert terrain mesh
     this.terrainGeometry = new THREE.PlaneGeometry(
@@ -346,12 +375,28 @@ export class WorldEngine {
     this.selectionRingMesh.visible = false;
     this.selectionRingMesh.renderOrder = 12;
 
+    // Element 3: Shared golden shimmer geometry & material for purchasable adjacent land
+    this.purchasableShimmerGeo = new THREE.PlaneGeometry(9.6, 9.6);
+    this.purchasableShimmerGeo.rotateX(-Math.PI / 2);
+    this.purchasableShimmerMat = new THREE.MeshBasicMaterial({
+      map: this.footprintTexture,
+      color: 0xf4c859,
+      transparent: true,
+      opacity: 0.28,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    });
+
     this.wilderness = new WildernessProps();
     this.scene.add(
       this.wilderness.group,
       this.waterGroup,
       this.boundaryGroup,
+      this.purchasableGroup,
       this.buildingsGroup,
+      this.peopleAgents.group,
       this.fxGroup,
       this.hoverDecalMesh,
       this.selectionRingMesh
@@ -377,6 +422,7 @@ export class WorldEngine {
   }
 
   public frameOwnedTerritory(cubes: Cube[], immediate = false): void {
+    this.followAgentId = null;
     const bounds = getOwnedTerritoryBounds(cubes);
     this.desiredTarget.set(bounds.centerX, 0, bounds.centerZ);
     const desiredFrustum = THREE.MathUtils.clamp(
@@ -389,6 +435,22 @@ export class WorldEngine {
       this.currentTarget.copy(this.desiredTarget);
       this.currentFrustumHeight = desiredFrustum;
     }
+  }
+
+  public focusOnCube(cubeId: number): void {
+    const cube = this.latestState?.cubes[cubeId];
+    if (!cube) return;
+    this.followAgentId = null;
+    const pos = cellToWorldCenter(cube.row, cube.col);
+    this.desiredTarget.set(
+      THREE.MathUtils.clamp(pos.x, -PAN_LIMIT, PAN_LIMIT),
+      0,
+      THREE.MathUtils.clamp(pos.z, -PAN_LIMIT, PAN_LIMIT)
+    );
+  }
+
+  public getCitizenInfo(agentId: number): CitizenInfo | null {
+    return this.peopleAgents.getAgentInfo(agentId);
   }
 
   public zoomBy(factor: number): void {
@@ -404,10 +466,14 @@ export class WorldEngine {
 
     const seaCells: Cube[] = [];
     const ownedCells: Cube[] = [];
+    const villageIds: number[] = [];
     const seaSet = new Set<string>();
     const ownedSet = new Set<string>();
 
     for (const c of payload.cubes) {
+      if (c.isVillage) {
+        villageIds.push(c.id);
+      }
       if (c.owner === 'player') {
         ownedCells.push(c);
         ownedSet.add(`${c.row},${c.col}`);
@@ -420,8 +486,10 @@ export class WorldEngine {
 
     const seaSignature = seaCells.map((c) => c.id).join(',');
     const ownedSignature = ownedCells.map((c) => c.id).join(',');
+    const villageSignature = villageIds.join(',');
     const seaChanged = seaSignature !== this.lastSeaSignature;
     const ownedChanged = ownedSignature !== this.lastOwnedSignature;
+    const villageChanged = villageSignature !== this.lastVillageSignature;
 
     if (seaChanged || ownedChanged) {
       this.seaCoords = seaCells.map((c) => cellToWorldCenter(c.row, c.col));
@@ -440,9 +508,84 @@ export class WorldEngine {
       }
     }
 
+    // Element 3.2: Rebuild purchasable land markers ONLY when owned-set or village-set changes
+    if (ownedChanged || villageChanged) {
+      this.rebuildPurchasableMarkers(payload.cubes);
+      this.lastVillageSignature = villageSignature;
+    }
+
     this.syncBuildings(payload);
+    this.peopleAgents.sync(
+      payload.cubes,
+      payload.population,
+      payload.satisfaction,
+      payload.staffedSlots,
+      this.seaCoords
+    );
+    this.peopleAgents.setSelectedAgent(payload.selectedCitizenId);
+    this.followAgentId = payload.followCitizenId;
+
     this.updateSelectionRing();
     this.updateHoverDecal();
+  }
+
+  private getOrCreatePriceTagTexture(price: number): THREE.CanvasTexture {
+    const cached = this.priceTagCache.get(price);
+    if (cached) return cached;
+    const created = createPriceTagTexture(price, true);
+    this.priceTagCache.set(price, created);
+    return created;
+  }
+
+  private rebuildPurchasableMarkers(cubes: Cube[]): void {
+    while (this.purchasableGroup.children.length > 0) {
+      const child = this.purchasableGroup.children[0];
+      this.purchasableGroup.remove(child);
+      if ((child as THREE.Sprite).isSprite) {
+        (child as THREE.Sprite).material.dispose();
+      }
+    }
+    this.purchasableSprites = [];
+
+    for (let i = 0; i < cubes.length; i++) {
+      const cube = cubes[i];
+      if (!isPurchasableNeutralCube(cubes, cube)) continue;
+
+      const pos = cellToWorldCenter(cube.row, cube.col);
+      const groundY = getTerrainHeightAt(pos.x, pos.z, this.seaCoords);
+
+      // Soft golden shimmer plane (reuses feathered footprint decal — no square border)
+      const shimmer = new THREE.Mesh(
+        this.purchasableShimmerGeo,
+        this.purchasableShimmerMat
+      );
+      shimmer.position.set(pos.x, groundY + 0.12, pos.z);
+      shimmer.renderOrder = 4;
+      shimmer.userData.cubeId = cube.id;
+      this.purchasableGroup.add(shimmer);
+
+      // Cached floating price-tag sprite facing camera automatically
+      const price = getCubePurchasePrice(cubes, cube);
+      const tagTex = this.getOrCreatePriceTagTexture(price);
+      const spriteMat = new THREE.SpriteMaterial({
+        map: tagTex,
+        transparent: true,
+        depthTest: false,
+      });
+      const sprite = new THREE.Sprite(spriteMat);
+      const baseY = groundY + 2.65;
+      sprite.position.set(pos.x, baseY, pos.z);
+      sprite.scale.set(4.6, 1.92, 1);
+      sprite.renderOrder = 20;
+      sprite.userData.cubeId = cube.id;
+      this.purchasableGroup.add(sprite);
+
+      this.purchasableSprites.push({
+        sprite,
+        baseY,
+        phase: cube.id * 0.75,
+      });
+    }
   }
 
   private rebuildTerrainVerticesAndColors(
@@ -845,13 +988,49 @@ export class WorldEngine {
     this.camera.lookAt(this.currentTarget);
   }
 
-  private raycastCellAtClient(clientX: number, clientY: number): number | null {
+  private setRayFromClient(clientX: number, clientY: number): boolean {
     const rect = this.renderer.domElement.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return null;
+    if (rect.width <= 0 || rect.height <= 0) return false;
     this.pointerNdc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
     this.pointerNdc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
-
     this.raycaster.setFromCamera(this.pointerNdc, this.camera);
+    return true;
+  }
+
+  private raycastCitizenAtClient(clientX: number, clientY: number): number | null {
+    if (!this.setRayFromClient(clientX, clientY)) return null;
+    const hits = this.raycaster.intersectObjects(
+      this.peopleAgents.group.children,
+      true
+    );
+    for (let i = 0; i < hits.length; i++) {
+      let obj: THREE.Object3D | null = hits[i].object;
+      while (obj) {
+        if (typeof obj.userData.agentId === 'number') {
+          return obj.userData.agentId;
+        }
+        obj = obj.parent;
+      }
+    }
+    return null;
+  }
+
+  private raycastPurchasableTagAtClient(
+    clientX: number,
+    clientY: number
+  ): number | null {
+    if (this.purchasableSprites.length === 0) return null;
+    if (!this.setRayFromClient(clientX, clientY)) return null;
+    const sprites = this.purchasableSprites.map((item) => item.sprite);
+    const hits = this.raycaster.intersectObjects(sprites, false);
+    if (hits.length > 0 && typeof hits[0].object.userData.cubeId === 'number') {
+      return hits[0].object.userData.cubeId;
+    }
+    return null;
+  }
+
+  private raycastCellAtClient(clientX: number, clientY: number): number | null {
+    if (!this.setRayFromClient(clientX, clientY)) return null;
     const hit = this.raycaster.ray.intersectPlane(
       this.groundPlane,
       this.scratchHit
@@ -973,6 +1152,21 @@ export class WorldEngine {
     this.isDragging = false;
 
     if (wasClick) {
+      // If not placing a building, test citizens first, then floating price tags, then ground cells
+      if (!this.latestState?.activeBuildTheme && this.onCitizenClick) {
+        const agentId = this.raycastCitizenAtClient(e.clientX, e.clientY);
+        if (agentId !== null) {
+          this.onCitizenClick(agentId);
+          return;
+        }
+      }
+
+      const tagCubeId = this.raycastPurchasableTagAtClient(e.clientX, e.clientY);
+      if (tagCubeId !== null) {
+        this.onCubeClick(tagCubeId);
+        return;
+      }
+
       const cellId = this.raycastCellAtClient(e.clientX, e.clientY);
       if (cellId !== null) {
         this.onCubeClick(cellId);
@@ -1060,6 +1254,27 @@ export class WorldEngine {
 
   private stepSimulation(dt: number): void {
     this.elapsedTime += dt;
+
+    // Element 2.1: Update living people agents on delta time
+    this.peopleAgents.update(dt);
+
+    // Element 2.3: Smooth camera follow target for followed citizen
+    if (this.followAgentId !== null) {
+      if (
+        this.peopleAgents.getAgentPosition(
+          this.followAgentId,
+          this.scratchFollowPos
+        )
+      ) {
+        this.desiredTarget.set(
+          THREE.MathUtils.clamp(this.scratchFollowPos.x, -PAN_LIMIT, PAN_LIMIT),
+          0,
+          THREE.MathUtils.clamp(this.scratchFollowPos.z, -PAN_LIMIT, PAN_LIMIT)
+        );
+      } else {
+        this.followAgentId = null;
+      }
+    }
 
     // Keyboard WASD / Arrow camera pan
     if (this.pressedKeys.size > 0) {
@@ -1199,6 +1414,17 @@ export class WorldEngine {
       p.sprite.material.opacity = (1 - progress) * 0.72;
     }
 
+    // Element 3.1: Gentle shimmer pulse + subtle float on purchasable land markers
+    if (this.purchasableSprites.length > 0) {
+      this.purchasableShimmerMat.opacity =
+        0.22 + Math.sin(this.elapsedTime * 2.4) * 0.08;
+      for (let i = 0; i < this.purchasableSprites.length; i++) {
+        const item = this.purchasableSprites[i];
+        item.sprite.position.y =
+          item.baseY + Math.sin(this.elapsedTime * 2.1 + item.phase) * 0.16;
+      }
+    }
+
     // Gentle pulse on organic hover decal and selection ground ring
     if (this.hoverDecalMesh.visible) {
       this.hoverDecalMat.opacity = 0.28 + Math.sin(this.elapsedTime * 4.2) * 0.08;
@@ -1269,6 +1495,16 @@ export class WorldEngine {
     this.buildingsMap.clear();
     this.buildingLib.dispose();
     this.wilderness.dispose();
+    this.peopleAgents.dispose();
+
+    for (const item of this.purchasableSprites) {
+      item.sprite.material.dispose();
+    }
+    this.purchasableSprites = [];
+    this.priceTagCache.forEach((tex) => tex.dispose());
+    this.priceTagCache.clear();
+    this.purchasableShimmerGeo.dispose();
+    this.purchasableShimmerMat.dispose();
 
     for (const p of this.dustParticles) {
       p.sprite.material.dispose();
@@ -1297,6 +1533,7 @@ export class WorldEngine {
     this.dustTexture.dispose();
     this.unstaffedTexture.dispose();
     this.footprintTexture.dispose();
+    this.blobShadowTexture.dispose();
     this.envTexture.dispose();
 
     this.renderer.dispose();

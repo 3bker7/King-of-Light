@@ -1,6 +1,6 @@
 import {
-  ChevronDown,
   Coins,
+  Crown,
   Hammer,
   Heart,
   Lock,
@@ -10,7 +10,6 @@ import {
   Wheat,
   X,
 } from 'lucide-react';
-import { useState } from 'react';
 import { CATEGORY_ORDER, CATEGORY_THEMES, THEMES } from '../game/constants';
 import { checkMaterialCosts } from '../game/production';
 import { STRINGS } from '../game/strings';
@@ -23,17 +22,21 @@ import type {
 import { ThemeIcon } from './ResourceIcon';
 
 interface BuildDockProps {
-  variant: 'desktop' | 'mobile';
   gold: number;
   level: 1 | 2;
   warehouse: Warehouse;
   activeBuildTheme: ThemeId | null;
-  onSelectTheme: (themeId: ThemeId | null) => void;
+  openCategory: ThemeCategory | null;
+  pulsingTheme: ThemeId | null;
+  kingdomOpen: boolean;
+  onToggleCategory: (cat: ThemeCategory | null) => void;
+  onSelectTheme: (themeId: ThemeId | null, closePanel?: boolean) => void;
+  onToggleKingdom: () => void;
 }
 
 function CategoryIcon({
   category,
-  className = 'w-4 h-4',
+  className = 'w-5 h-5',
 }: {
   category: ThemeCategory;
   className?: string;
@@ -53,275 +56,291 @@ function CategoryIcon({
 }
 
 export function BuildDock({
-  variant,
   gold,
   level,
   warehouse,
   activeBuildTheme,
+  openCategory,
+  pulsingTheme,
+  kingdomOpen,
+  onToggleCategory,
   onSelectTheme,
+  onToggleKingdom,
 }: BuildDockProps) {
-  // User-click controlled category state (never auto-switched by game ticks or state updates)
-  const [openCategory, setOpenCategory] = useState<ThemeCategory | null>('food');
-  const [mobileCategory, setMobileCategory] = useState<ThemeCategory>('food');
-
-  const toggleTheme = (id: ThemeId) => {
-    onSelectTheme(activeBuildTheme === id ? null : id);
-  };
-
   const getUnlockedThemes = (cat: ThemeCategory): ThemeId[] =>
     CATEGORY_THEMES[cat].filter((id) => THEMES[id].unlockLevel <= level);
 
-  if (variant === 'mobile') {
-    const activeThemes = getUnlockedThemes(mobileCategory);
+  const handlePickTheme = (id: ThemeId) => {
+    const next = activeBuildTheme === id ? null : id;
+    // Element 1.2: choosing a theme collapses the panel back to the rail
+    onSelectTheme(next, true);
+  };
 
-    return (
-      <div className="w-full bg-[#FBF3DF] border-t border-[#E3D3AC] px-2 py-1.5 space-y-1.5 shrink-0">
-        {/* Category selector strip */}
-        <div className="flex items-center gap-1 overflow-x-auto parchment-scroll">
+  const openUnlockedThemes = openCategory ? getUnlockedThemes(openCategory) : [];
+
+  const renderThemeCards = () => (
+    <div className="space-y-1.5">
+      {openUnlockedThemes.map((id) => {
+        const def = THEMES[id];
+        const matCheck = checkMaterialCosts(warehouse, id);
+        const affordable = gold >= def.cost && matCheck.ok;
+        const isSelected = activeBuildTheme === id;
+        const isPulsing = pulsingTheme === id;
+        const matEntries = def.materialCosts
+          ? (Object.entries(def.materialCosts) as Array<
+              [TradedResourceKey, number]
+            >)
+          : [];
+
+        return (
+          <button
+            key={id}
+            type="button"
+            disabled={!affordable}
+            onClick={() => handlePickTheme(id)}
+            className={`w-full text-right p-2.5 rounded-xl border transition-all duration-150 space-y-1.5 ${
+              isPulsing
+                ? 'bg-[#F5E0AC] border-[#C9962E] ring-2 ring-[#C9962E] animate-pulse'
+                : isSelected
+                  ? 'bg-[#F3E2BD] border-[#C9962E] ring-2 ring-[#C9962E]/60'
+                  : affordable
+                    ? 'bg-[#FDF8EC] border-[#E3D3AC] hover:border-[#C9962E] hover:bg-[#F7EBD0]'
+                    : 'bg-[#EFE6D2] border-[#DFD2B6] opacity-55 grayscale'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-8 h-8 rounded-lg bg-[#14524A]/10 text-[#14524A] flex items-center justify-center shrink-0">
+                  <ThemeIcon themeId={id} className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs font-extrabold text-[#2B2118] truncate">
+                    {STRINGS.themes[id].name}
+                  </div>
+                  <div className="text-[10px] font-semibold text-[#6F5C43]">
+                    {STRINGS.footprint[def.footprint]} ·{' '}
+                    {STRINGS.buildDock.workersNeeded(def.workers)}
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-0.5 text-xs font-extrabold text-[#8A5F12] shrink-0">
+                <Coins className="w-3.5 h-3.5 text-[#C9962E]" />
+                <span className="tabular-nums-latin">{def.cost}</span>
+              </div>
+            </div>
+
+            {(matEntries.length > 0 || def.rockyOnly) && (
+              <div className="flex items-center flex-wrap gap-2 pt-1 border-t border-[#EFE3C5] text-[10px] font-bold">
+                {matEntries.map(([res, amt]) => (
+                  <span
+                    key={res}
+                    className={`tabular-nums-latin ${
+                      warehouse[res] < amt ? 'text-[#A83629]' : 'text-[#4F3F2B]'
+                    }`}
+                  >
+                    {STRINGS.resources[res]}: {amt}
+                  </span>
+                ))}
+                {def.rockyOnly && (
+                  <span className="flex items-center gap-0.5 text-[#6F5C43]">
+                    <Mountain className="w-3 h-3 shrink-0" />
+                    <span>{STRINGS.buildDock.rockyOnlyTag}</span>
+                  </span>
+                )}
+              </div>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+
+  return (
+    <>
+      {/* Desktop Slim Icon Rail (56px wide, right edge in RTL) */}
+      <nav
+        aria-label={STRINGS.buildDock.title}
+        className="hidden lg:flex flex-col items-center justify-between w-[56px] shrink-0 py-2.5 bg-[#0E3A34] border-l border-[#1C5B52] z-30"
+      >
+        <div className="flex flex-col items-center gap-2">
+          {/* Kingdom / Palace summary button */}
+          <button
+            type="button"
+            onClick={onToggleKingdom}
+            title={STRINGS.inspector.palaceTitle}
+            aria-label={STRINGS.inspector.palaceTitle}
+            className={`w-10 h-10 rounded-xl flex items-center justify-center transition-colors border ${
+              kingdomOpen
+                ? 'bg-[#C9962E] border-[#F2CA6B] text-[#2B2118] shadow-md'
+                : 'bg-[#14524A] border-[#1F6A60] text-[#F2CA6B] hover:bg-[#1B685E]'
+            }`}
+          >
+            <Crown className="w-5 h-5" />
+          </button>
+
+          <div className="w-7 h-px bg-[#1E5E55]" />
+
+          {/* 5 Build Category Icons */}
           {CATEGORY_ORDER.map((cat) => {
             const unlocked = getUnlockedThemes(cat);
             const locked = unlocked.length === 0;
-            const selected = mobileCategory === cat && !locked;
+            const isOpen = openCategory === cat && !locked;
 
             return (
               <button
                 key={cat}
                 type="button"
                 disabled={locked}
-                onClick={() => setMobileCategory(cat)}
-                className={`flex items-center gap-1 px-2.5 py-1 rounded-lg border text-[11px] font-extrabold whitespace-nowrap shrink-0 transition-colors ${
-                  selected
-                    ? 'bg-[#14524A] border-[#14524A] text-white'
+                onClick={() => onToggleCategory(isOpen ? null : cat)}
+                title={
+                  locked
+                    ? `${STRINGS.categories[cat]} (${STRINGS.buildDock.level2LockedCat})`
+                    : STRINGS.categories[cat]
+                }
+                aria-label={STRINGS.categories[cat]}
+                className={`relative w-10 h-10 rounded-xl flex items-center justify-center transition-colors border ${
+                  isOpen
+                    ? 'bg-[#FBF3DF] border-[#C9962E] text-[#14524A] shadow-md'
                     : locked
-                      ? 'bg-[#EFE6D2] border-[#DFD2B6] text-[#8E7D63] opacity-65'
-                      : 'bg-[#FDF8EC] border-[#E3D3AC] text-[#2B2118]'
+                      ? 'bg-[#0B2E29] border-[#16463F] text-[#5F8A82] opacity-60'
+                      : 'bg-[#14524A] border-[#1E6259] text-[#FBF3DF] hover:bg-[#1C6A60]'
                 }`}
               >
-                {locked ? (
-                  <Lock className="w-3 h-3" />
-                ) : (
-                  <CategoryIcon category={cat} className="w-3.5 h-3.5" />
+                <CategoryIcon category={cat} className="w-5 h-5" />
+                {locked && (
+                  <Lock className="w-2.5 h-2.5 absolute bottom-1 left-1 text-[#C9962E]" />
                 )}
-                <span>{STRINGS.categories[cat]}</span>
               </button>
             );
           })}
         </div>
 
-        {/* Horizontal strip of unlocked themes in active category */}
-        <div className="flex items-center gap-1.5 overflow-x-auto parchment-scroll">
-          {activeThemes.map((id) => {
-            const def = THEMES[id];
-            const matCheck = checkMaterialCosts(warehouse, id);
-            const affordable = gold >= def.cost && matCheck.ok;
-            const isSelected = activeBuildTheme === id;
-            const matEntries = def.materialCosts
-              ? (Object.entries(def.materialCosts) as Array<
-                  [TradedResourceKey, number]
-                >)
-              : [];
+        {activeBuildTheme && (
+          <button
+            type="button"
+            onClick={() => onSelectTheme(null, true)}
+            title={STRINGS.buildDock.cancelBuild}
+            aria-label={STRINGS.buildDock.cancelBuild}
+            className="w-10 h-10 rounded-xl bg-[#C44536] hover:bg-[#D45242] text-white flex items-center justify-center shadow-md transition-colors"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        )}
+      </nav>
 
-            return (
-              <button
-                key={id}
-                type="button"
-                disabled={!affordable}
-                onClick={() => toggleTheme(id)}
-                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border shrink-0 transition-all duration-150 ${
-                  isSelected
-                    ? 'bg-[#F3E2BD] border-[#C9962E] ring-2 ring-[#C9962E]/50'
-                    : affordable
-                      ? 'bg-[#FDF8EC] border-[#E3D3AC]'
-                      : 'bg-[#EFE6D2] border-[#DFD2B6] opacity-55 grayscale'
-                }`}
-              >
-                <ThemeIcon themeId={id} className="w-4 h-4 text-[#14524A]" />
-                <div className="text-right leading-tight">
-                  <div className="text-xs font-extrabold text-[#2B2118] whitespace-nowrap">
-                    {STRINGS.themes[id].name}
-                  </div>
-                  <div className="flex items-center gap-1.5 text-[10px] font-bold tabular-nums-latin">
-                    <span className="text-[#8A5F12]">
-                      {def.cost} {STRINGS.buildDock.goldUnit}
-                    </span>
-                    {matEntries.map(([res, amt]) => (
-                      <span
-                        key={res}
-                        className={
-                          warehouse[res] < amt
-                            ? 'text-[#A83629]'
-                            : 'text-[#6F5C43]'
-                        }
-                      >
-                        {STRINGS.resources[res]} {amt}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <aside className="flex flex-col w-[220px] shrink-0 p-2.5 bg-[#0C332D] border-l border-[#1A5047]">
-      <div className="parchment-panel flex-1 flex flex-col overflow-hidden p-3">
-        <div className="flex items-center justify-between pb-2.5 mb-2.5 border-b border-[#E3D3AC]">
-          <div className="flex items-center gap-1.5 text-[#2B2118]">
-            <Hammer className="w-4 h-4 text-[#14524A]" />
-            <h2 className="text-sm font-extrabold">{STRINGS.buildDock.title}</h2>
-          </div>
-          {activeBuildTheme && (
+      {/* Desktop Slide-Out Category Overlay Panel (260px, overlays map right edge, does NOT shrink canvas) */}
+      {openCategory && openUnlockedThemes.length > 0 && (
+        <aside
+          aria-label={STRINGS.categories[openCategory]}
+          className="hidden lg:flex flex-col absolute top-2 bottom-3 right-[64px] w-[260px] z-30 parchment-panel border border-[#C9962E] shadow-2xl overflow-hidden"
+        >
+          <div className="flex items-center justify-between px-3 py-2.5 bg-[#F4E7C8] border-b border-[#E3D3AC]">
+            <div className="flex items-center gap-2 text-[#2B2118] min-w-0">
+              <CategoryIcon
+                category={openCategory}
+                className="w-4 h-4 text-[#14524A] shrink-0"
+              />
+              <h2 className="text-xs font-extrabold truncate">
+                {STRINGS.categories[openCategory]}
+              </h2>
+            </div>
             <button
               type="button"
-              onClick={() => onSelectTheme(null)}
-              className="text-[11px] font-bold text-[#14524A] hover:underline flex items-center gap-0.5"
+              onClick={() => onToggleCategory(null)}
+              aria-label={STRINGS.modals.close}
+              className="w-7 h-7 rounded-lg hover:bg-[#E7D5AE] text-[#4F3F2B] flex items-center justify-center transition-colors"
             >
-              <X className="w-3 h-3" />
-              <span>{STRINGS.buildDock.cancelBuild}</span>
+              <X className="w-4 h-4" />
             </button>
-          )}
-        </div>
+          </div>
+          <div className="flex-1 overflow-y-auto parchment-scroll p-2.5">
+            {renderThemeCards()}
+          </div>
+        </aside>
+      )}
 
-        <div className="flex-1 overflow-y-auto parchment-scroll space-y-2 pl-0.5">
-          {CATEGORY_ORDER.map((cat) => {
-            const unlockedThemes = getUnlockedThemes(cat);
-            const isLocked = unlockedThemes.length === 0;
-            const isOpen = !isLocked && openCategory === cat;
-
-            return (
-              <div
-                key={cat}
-                className="rounded-xl border border-[#E3D3AC] bg-[#F7ECD4] overflow-hidden"
-              >
-                <button
-                  type="button"
-                  disabled={isLocked}
-                  onClick={() =>
-                    setOpenCategory((prev) => (prev === cat ? null : cat))
-                  }
-                  className={`w-full flex items-center justify-between gap-2 px-2.5 py-2 text-right transition-colors ${
-                    isLocked
-                      ? 'opacity-65 cursor-not-allowed bg-[#EFE4CC]'
-                      : isOpen
-                        ? 'bg-[#14524A] text-white'
-                        : 'hover:bg-[#EFE2C2] text-[#2B2118]'
-                  }`}
-                >
-                  <div className="flex items-center gap-1.5 min-w-0">
-                    {isLocked ? (
-                      <Lock className="w-3.5 h-3.5 shrink-0 text-[#7C684C]" />
-                    ) : (
-                      <CategoryIcon
-                        category={cat}
-                        className={`w-3.5 h-3.5 shrink-0 ${
-                          isOpen ? 'text-[#F2CA6B]' : 'text-[#14524A]'
-                        }`}
-                      />
-                    )}
-                    <span className="text-xs font-extrabold truncate">
-                      {STRINGS.categories[cat]}
-                    </span>
-                  </div>
-
-                  {isLocked ? (
-                    <span className="text-[10px] font-bold text-[#7C684C] shrink-0">
-                      {STRINGS.buildDock.level2LockedCat}
-                    </span>
-                  ) : (
-                    <ChevronDown
-                      className={`w-3.5 h-3.5 shrink-0 transition-transform duration-150 ${
-                        isOpen ? 'rotate-180 text-white' : 'text-[#6F5C43]'
-                      }`}
-                    />
-                  )}
-                </button>
-
-                {isOpen && (
-                  <div className="p-1.5 space-y-1.5 bg-[#FBF3DF]">
-                    {unlockedThemes.map((id) => {
-                      const def = THEMES[id];
-                      const matCheck = checkMaterialCosts(warehouse, id);
-                      const affordable = gold >= def.cost && matCheck.ok;
-                      const isSelected = activeBuildTheme === id;
-                      const matEntries = def.materialCosts
-                        ? (Object.entries(def.materialCosts) as Array<
-                            [TradedResourceKey, number]
-                          >)
-                        : [];
-
-                      return (
-                        <button
-                          key={id}
-                          type="button"
-                          disabled={!affordable}
-                          onClick={() => toggleTheme(id)}
-                          className={`w-full text-right p-2 rounded-xl border transition-all duration-150 space-y-1.5 ${
-                            isSelected
-                              ? 'bg-[#F3E2BD] border-[#C9962E] ring-2 ring-[#C9962E]/50'
-                              : affordable
-                                ? 'bg-[#FDF8EC] border-[#E3D3AC] hover:border-[#C9962E] hover:bg-[#F7EBD0]'
-                                : 'bg-[#EFE6D2] border-[#DFD2B6] opacity-55 grayscale'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between gap-1.5">
-                            <div className="flex items-center gap-2 min-w-0">
-                              <div className="w-7 h-7 rounded-lg bg-[#14524A]/10 text-[#14524A] flex items-center justify-center shrink-0">
-                                <ThemeIcon themeId={id} className="w-4 h-4" />
-                              </div>
-                              <div className="min-w-0">
-                                <div className="text-xs font-extrabold text-[#2B2118] truncate">
-                                  {STRINGS.themes[id].name}
-                                </div>
-                                <div className="text-[10px] font-semibold text-[#6F5C43]">
-                                  {STRINGS.footprint[def.footprint]} ·{' '}
-                                  {STRINGS.buildDock.workersNeeded(def.workers)}
-                                </div>
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-0.5 text-xs font-extrabold text-[#8A5F12] shrink-0">
-                              <Coins className="w-3 h-3 text-[#C9962E]" />
-                              <span className="tabular-nums-latin">
-                                {def.cost}
-                              </span>
-                            </div>
-                          </div>
-
-                          {(matEntries.length > 0 || def.rockyOnly) && (
-                            <div className="flex items-center flex-wrap gap-1.5 pt-1 border-t border-[#EFE3C5] text-[10px] font-bold">
-                              {matEntries.map(([res, amt]) => (
-                                <span
-                                  key={res}
-                                  className={`tabular-nums-latin ${
-                                    warehouse[res] < amt
-                                      ? 'text-[#A83629]'
-                                      : 'text-[#4F3F2B]'
-                                  }`}
-                                >
-                                  {STRINGS.resources[res]}: {amt}
-                                </span>
-                              ))}
-                              {def.rockyOnly && (
-                                <span className="flex items-center gap-0.5 text-[#6F5C43]">
-                                  <Mountain className="w-3 h-3 shrink-0" />
-                                  <span>{STRINGS.buildDock.rockyOnlyTag}</span>
-                                </span>
-                              )}
-                            </div>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
+      {/* Mobile Bottom Sheet for Open Build Category (max 45% height, above 56px bottom rail) */}
+      {openCategory && openUnlockedThemes.length > 0 && (
+        <div className="lg:hidden fixed inset-x-0 bottom-[56px] z-30 px-2 pb-1.5 pointer-events-none">
+          <div className="pointer-events-auto w-full max-h-[45dvh] bg-[#FBF3DF] border-2 border-[#C9962E] rounded-2xl shadow-2xl flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between px-3 py-2 bg-[#F4E7C8] border-b border-[#E3D3AC]">
+              <div className="flex items-center gap-1.5 text-[#2B2118]">
+                <CategoryIcon
+                  category={openCategory}
+                  className="w-4 h-4 text-[#14524A]"
+                />
+                <span className="text-xs font-extrabold">
+                  {STRINGS.categories[openCategory]}
+                </span>
               </div>
-            );
-          })}
+              <button
+                type="button"
+                onClick={() => onToggleCategory(null)}
+                aria-label={STRINGS.modals.close}
+                className="w-7 h-7 rounded-lg bg-[#E7D5AE]/60 text-[#2B2118] flex items-center justify-center"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto parchment-scroll p-2.5">
+              {renderThemeCards()}
+            </div>
+          </div>
         </div>
-      </div>
-    </aside>
+      )}
+
+      {/* Mobile Bottom Icon Bar (56px tall) */}
+      <nav
+        aria-label={STRINGS.buildDock.title}
+        className="lg:hidden h-[56px] w-full bg-[#0E3A34] border-t border-[#1C5B52] px-2 flex items-center justify-around gap-1 shrink-0 z-30"
+      >
+        <button
+          type="button"
+          onClick={onToggleKingdom}
+          title={STRINGS.inspector.palaceTitle}
+          aria-label={STRINGS.inspector.palaceTitle}
+          className={`w-11 h-11 rounded-xl flex items-center justify-center transition-colors border ${
+            kingdomOpen
+              ? 'bg-[#C9962E] border-[#F2CA6B] text-[#2B2118]'
+              : 'bg-[#14524A] border-[#1F6A60] text-[#F2CA6B]'
+          }`}
+        >
+          <Crown className="w-5 h-5" />
+        </button>
+
+        {CATEGORY_ORDER.map((cat) => {
+          const unlocked = getUnlockedThemes(cat);
+          const locked = unlocked.length === 0;
+          const isOpen = openCategory === cat && !locked;
+
+          return (
+            <button
+              key={cat}
+              type="button"
+              disabled={locked}
+              onClick={() => onToggleCategory(isOpen ? null : cat)}
+              title={
+                locked
+                  ? `${STRINGS.categories[cat]} (${STRINGS.buildDock.level2LockedCat})`
+                  : STRINGS.categories[cat]
+              }
+              aria-label={STRINGS.categories[cat]}
+              className={`relative w-11 h-11 rounded-xl flex items-center justify-center transition-colors border ${
+                isOpen
+                  ? 'bg-[#FBF3DF] border-[#C9962E] text-[#14524A]'
+                  : locked
+                    ? 'bg-[#0B2E29] border-[#16463F] text-[#5F8A82] opacity-60'
+                    : 'bg-[#14524A] border-[#1E6259] text-[#FBF3DF]'
+              }`}
+            >
+              <CategoryIcon category={cat} className="w-5 h-5" />
+              {locked && (
+                <Lock className="w-2.5 h-2.5 absolute bottom-1 left-1 text-[#C9962E]" />
+              )}
+            </button>
+          );
+        })}
+      </nav>
+    </>
   );
 }

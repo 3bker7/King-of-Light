@@ -37,74 +37,67 @@ export function TopBar({ state, onOpenBourse, onOpenSettings }: TopBarProps) {
         : 'text-[#F27A6E]';
 
   return (
-    <header className="min-h-[56px] w-full bg-[#14524A] text-white border-b border-[#0D3C36] px-2.5 sm:px-4 py-1.5 flex items-center justify-between gap-2 sm:gap-3 shrink-0 shadow-sm">
-      {/* Right side (RTL start): Game Logo */}
+    <header className="h-12 w-full bg-[#14524A] text-white border-b border-[#0D3C36] px-2.5 sm:px-3.5 flex items-center justify-between gap-2 shrink-0 shadow-sm">
+      {/* Right side (RTL start): Compact Game Logo */}
       <div className="flex items-center gap-2 shrink-0">
-        <div className="w-8 h-8 rounded-lg bg-[#C9962E]/20 border border-[#C9962E]/50 flex items-center justify-center text-[#F2CA6B]">
-          <Sun className="w-5 h-5" />
+        <div className="w-7 h-7 rounded-lg bg-[#C9962E]/20 border border-[#C9962E]/50 flex items-center justify-center text-[#F2CA6B]">
+          <Sun className="w-4 h-4" />
         </div>
-        <div className="leading-tight">
-          <h1 className="text-sm sm:text-base font-extrabold tracking-tight text-[#FBF3DF] whitespace-nowrap">
-            {STRINGS.appName}
-          </h1>
-          <span className="hidden xl:block text-[11px] font-semibold text-[#C9E2DC] whitespace-nowrap">
-            {STRINGS.levelTitles[state.level]}
-          </span>
-        </div>
+        <h1 className="text-sm font-extrabold tracking-tight text-[#FBF3DF] whitespace-nowrap">
+          {STRINGS.appName}
+        </h1>
       </div>
 
-      {/* Center: Resource readout */}
-      <div className="flex items-center gap-2 sm:gap-3 overflow-x-auto parchment-scroll py-0.5">
-        {/* Gold */}
+      {/* Center: Horizontally scrollable resource chips */}
+      <div className="flex-1 min-w-0 flex items-center gap-1.5 overflow-x-auto parchment-scroll py-0.5">
+        {/* Gold chip */}
         <div
-          className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-[#0E3A34]/75 text-[#F6D377] shrink-0"
+          className="flex items-center gap-1 px-2 py-0.5 rounded-lg bg-[#0E3A34]/80 text-[#F6D377] shrink-0"
           title={STRINGS.goldLabel}
         >
-          <ResourceIcon resource="gold" className="w-4 h-4 text-[#E6B64B]" />
-          <span className="text-xs sm:text-sm font-extrabold tabular-nums-latin">
+          <ResourceIcon resource="gold" className="w-3.5 h-3.5 text-[#E6B64B]" />
+          <span className="text-xs font-extrabold tabular-nums-latin">
             {state.gold}
           </span>
         </div>
 
-        {/* Warehouse traded resources */}
-        <div className="flex items-center gap-2 sm:gap-2.5 px-2 py-1 rounded-lg bg-[#0E3A34]/50 shrink-0">
-          {TRADED_RESOURCES.map((key) => (
-            <div
-              key={key}
-              className="flex items-center gap-1 text-[#FBF3DF]"
-              title={STRINGS.resources[key]}
-            >
-              <ResourceIcon
-                resource={key}
-                className="w-3.5 h-3.5 text-[#A7D8CE] shrink-0"
-              />
-              <span className="text-xs sm:text-sm font-bold tabular-nums-latin">
-                {state.warehouse[key]}
-              </span>
-            </div>
-          ))}
-        </div>
-
-        {/* Population quick readout */}
+        {/* Population chip */}
         <div
-          className="hidden md:flex items-center gap-1.5 px-2 py-1 rounded-lg bg-[#0E3A34]/50 text-[#FBF3DF] shrink-0"
+          className="flex items-center gap-1 px-2 py-0.5 rounded-lg bg-[#0E3A34]/65 text-[#FBF3DF] shrink-0"
           title={STRINGS.populationLabel}
         >
           <Users className="w-3.5 h-3.5 text-[#F2CA6B]" />
-          <span className="text-xs sm:text-sm font-bold tabular-nums-latin">
+          <span className="text-xs font-bold tabular-nums-latin">
             {state.population}
           </span>
         </div>
+
+        {/* Scrollable traded warehouse resource chips */}
+        {TRADED_RESOURCES.map((key) => (
+          <div
+            key={key}
+            className="flex items-center gap-1 px-2 py-0.5 rounded-lg bg-[#0E3A34]/50 text-[#FBF3DF] shrink-0"
+            title={STRINGS.resources[key]}
+          >
+            <ResourceIcon
+              resource={key}
+              className="w-3.5 h-3.5 text-[#A7D8CE] shrink-0"
+            />
+            <span className="text-xs font-bold tabular-nums-latin">
+              {state.warehouse[key]}
+            </span>
+          </div>
+        ))}
       </div>
 
       {/* Left side (RTL end): Day, Satisfaction, Reputation, Bourse (L2), Settings */}
-      <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+      <div className="flex items-center gap-2 shrink-0">
         {/* Day Counter */}
-        <div className="flex flex-col items-center min-w-[54px] shrink-0">
-          <span className="text-xs font-extrabold text-[#FBF3DF] whitespace-nowrap">
+        <div className="flex flex-col items-center min-w-[48px] shrink-0">
+          <span className="text-[11px] font-extrabold text-[#FBF3DF] whitespace-nowrap leading-none">
             {STRINGS.dayLabel(state.day)}
           </span>
-          <div className="w-full h-1 bg-[#0B2E29] rounded-full overflow-hidden mt-0.5">
+          <div className="w-full h-1 bg-[#0B2E29] rounded-full overflow-hidden mt-1">
             <div
               className="h-full bg-[#C9962E] transition-[width] duration-300"
               style={{ width: `${dayProgressPct}%` }}
@@ -132,7 +125,7 @@ export function TopBar({ state, onOpenBourse, onOpenSettings }: TopBarProps) {
             {[0, 1, 2, 3, 4].map((idx) => (
               <Star
                 key={idx}
-                className={`w-3.5 h-3.5 ${
+                className={`w-3 h-3 ${
                   idx < filledStars
                     ? 'text-[#E6B64B] fill-[#E6B64B]'
                     : 'text-[#437870]'
@@ -150,7 +143,7 @@ export function TopBar({ state, onOpenBourse, onOpenSettings }: TopBarProps) {
           <button
             type="button"
             onClick={onOpenBourse}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-[#C9962E] hover:bg-[#D6A43E] text-[#2B2118] text-xs font-extrabold transition-colors whitespace-nowrap shrink-0"
+            className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#C9962E] hover:bg-[#D6A43E] text-[#2B2118] text-xs font-extrabold transition-colors whitespace-nowrap shrink-0"
           >
             <Store className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">{STRINGS.bourseButton}</span>
@@ -163,7 +156,7 @@ export function TopBar({ state, onOpenBourse, onOpenSettings }: TopBarProps) {
           onClick={onOpenSettings}
           aria-label={STRINGS.settingsButton}
           title={STRINGS.settingsButton}
-          className="w-8 h-8 rounded-xl bg-[#0E3A34]/75 hover:bg-[#0B2E29] text-[#FBF3DF] flex items-center justify-center transition-colors shrink-0"
+          className="w-8 h-8 rounded-lg bg-[#0E3A34]/75 hover:bg-[#0B2E29] text-[#FBF3DF] flex items-center justify-center transition-colors shrink-0"
         >
           <Settings className="w-4 h-4" />
         </button>

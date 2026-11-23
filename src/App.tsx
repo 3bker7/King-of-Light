@@ -1,7 +1,8 @@
-import { Award, Info, Store } from 'lucide-react';
+import { Award } from 'lucide-react';
 import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { AwayReport } from './components/AwayReport';
 import { BuildDock } from './components/BuildDock';
+import type { CitizenInfo } from './components/CitizenCard';
 import { Inspector } from './components/Inspector';
 import {
   BourseModal,
@@ -9,10 +10,11 @@ import {
   Level3ComingSoonModal,
   SettingsModal,
 } from './components/Modals';
+import { Objectives } from './components/Objectives';
 import { Ticker } from './components/Ticker';
 import { Toasts } from './components/Toasts';
 import { TopBar } from './components/TopBar';
-import { WorldCanvas } from './components/WorldCanvas';
+import { WorldCanvas, type WorldCanvasHandle } from './components/WorldCanvas';
 import { playAudioCue } from './game/audio';
 import { SAVE_THROTTLE_MS, THEMES, TICK_MS } from './game/constants';
 import {
@@ -20,14 +22,28 @@ import {
   gameReducer,
   hydrateGameState,
 } from './game/gameState';
-import { checkMaterialCosts, computeStaffing } from './game/production';
+import {
+  checkMaterialCosts,
+  computeStaffing,
+  findPalaceCube,
+  getManhattanDistanceToPalace,
+  isPurchasableNeutralCube,
+} from './game/production';
 import {
   loadPersistedSave,
   saveGameToStorage,
   simulateOfflineProgress,
 } from './game/save';
 import { STRINGS } from './game/strings';
-import type { AwayReportData, GameState, SlotIndex, ThemeId } from './game/types';
+import type {
+  AwayReportData,
+  Cube,
+  GameState,
+  SlotIndex,
+  ThemeCategory,
+  ThemeId,
+  ToastItem,
+} from './game/types';
 
 function initializeGame(): {
   initialState: GameState;
@@ -47,6 +63,24 @@ function initializeGame(): {
   };
 }
 
+function findNearestCube(
+  cubes: Cube[],
+  predicate: (cube: Cube) => boolean
+): Cube | null {
+  let best: Cube | null = null;
+  let bestDist = Infinity;
+  for (let i = 0; i < cubes.length; i++) {
+    const c = cubes[i];
+    if (!predicate(c)) continue;
+    const dist = getManhattanDistanceToPalace(cubes, c);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = c;
+    }
+  }
+  return best;
+}
+
 export default function App() {
   const initRef = useRef<{
     initialState: GameState;
@@ -56,6 +90,8 @@ export default function App() {
     initRef.current = initializeGame();
   }
 
+  const worldRef = useRef<WorldCanvasHandle | null>(null);
+
   const [state, dispatch] = useReducer(
     gameReducer,
     initRef.current.initialState
@@ -63,10 +99,21 @@ export default function App() {
   const [awayReport, setAwayReport] = useState<AwayReportData | null>(
     initRef.current.initialAwayReport
   );
+
+  // Single coherent UI overlay state — ALL panels closed by default on load
   const [selectedCubeId, setSelectedCubeId] = useState<number | null>(null);
+  const [selectedCitizenId, setSelectedCitizenId] = useState<number | null>(null);
+  const [followCitizenId, setFollowCitizenId] = useState<number | null>(null);
+  const [citizenInfo, setCitizenInfo] = useState<CitizenInfo | null>(null);
+  const [kingdomCardOpen, setKingdomCardOpen] = useState(false);
+
+  const [openBuildCategory, setOpenBuildCategory] =
+    useState<ThemeCategory | null>(null);
   const [activeBuildTheme, setActiveBuildTheme] = useState<ThemeId | null>(null);
+  const [pulsingTheme, setPulsingTheme] = useState<ThemeId | null>(null);
+  const [objectivesOpen, setObjectivesOpen] = useState(false);
+
   const [inspectorTab, setInspectorTab] = useState<'info' | 'bourse'>('info');
-  const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
   const [bourseModalOpen, setBourseModalOpen] = useState(false);
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [showLevel2Modal, setShowLevel2Modal] = useState(false);
@@ -125,22 +172,55 @@ export default function App() {
     }
   }, [state.pendingAudioCue, state.muted]);
 
-  // Auto-dismiss toasts after 4.5s
+  // Auto-dismiss toasts after 5s
   useEffect(() => {
     if (state.toasts.length === 0) return;
     const oldest = state.toasts[0];
     const timeout = window.setTimeout(() => {
       dispatch({ type: 'DISMISS_TOAST', id: oldest.id });
-    }, 4500);
+    }, 5000);
     return () => window.clearTimeout(timeout);
   }, [state.toasts]);
 
-  // Escape key cancels build mode or closes modals
+  // Live refresh of selected citizen's destination & mood while citizen card is open
+  useEffect(() => {
+    if (selectedCitizenId === null) {
+      setCitizenInfo(null);
+      return;
+    }
+    const refresh = () => {
+      const info = worldRef.current?.getCitizenInfo(selectedCitizenId) ?? null;
+      if (!info) {
+        setSelectedCitizenId(null);
+        setFollowCitizenId(null);
+        setCitizenInfo(null);
+      } else {
+        setCitizenInfo(info);
+      }
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 350);
+    return () => window.clearInterval(timer);
+  }, [selectedCitizenId]);
+
+  // Element 6.1: Escape closes in strict stack order
+  // (citizen card -> cube/kingdom card -> build panel/placement -> objectives -> modals)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
-      if (activeBuildTheme) {
+      if (selectedCitizenId !== null) {
+        setSelectedCitizenId(null);
+        setFollowCitizenId(null);
+        setCitizenInfo(null);
+      } else if (selectedCubeId !== null || kingdomCardOpen) {
+        setSelectedCubeId(null);
+        setKingdomCardOpen(false);
+      } else if (activeBuildTheme !== null || openBuildCategory !== null) {
         setActiveBuildTheme(null);
+        setOpenBuildCategory(null);
+        setPulsingTheme(null);
+      } else if (objectivesOpen) {
+        setObjectivesOpen(false);
       } else if (showLevel2Modal) {
         setShowLevel2Modal(false);
         dispatch({ type: 'CLEAR_LEVEL2_NOTICE' });
@@ -151,22 +231,24 @@ export default function App() {
         setBourseModalOpen(false);
       } else if (settingsModalOpen) {
         setSettingsModalOpen(false);
-      } else if (mobileInspectorOpen) {
-        setMobileInspectorOpen(false);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [
+    selectedCitizenId,
+    selectedCubeId,
+    kingdomCardOpen,
     activeBuildTheme,
+    openBuildCategory,
+    objectivesOpen,
     showLevel2Modal,
     showLevel3Modal,
     bourseModalOpen,
     settingsModalOpen,
-    mobileInspectorOpen,
   ]);
 
-  // Auto-cancel active build theme if gold or materials drop below its cost
+  // Cancel active build theme if gold or materials drop below its cost
   useEffect(() => {
     if (
       activeBuildTheme &&
@@ -174,6 +256,7 @@ export default function App() {
         !checkMaterialCosts(state.warehouse, activeBuildTheme).ok)
     ) {
       setActiveBuildTheme(null);
+      setPulsingTheme(null);
     }
   }, [activeBuildTheme, state.gold, state.warehouse]);
 
@@ -185,20 +268,199 @@ export default function App() {
   const selectedCube =
     selectedCubeId !== null ? state.cubes[selectedCubeId] ?? null : null;
 
+  const hasOverlayCard = Boolean(
+    citizenInfo || selectedCube || kingdomCardOpen
+  );
+
   const handleCubeClick = (cubeId: number) => {
     if (activeBuildTheme) {
       dispatch({ type: 'PLACE_THEME', cubeId, themeId: activeBuildTheme });
+      setPulsingTheme(null);
+      setOpenBuildCategory(null);
       return;
     }
+    setSelectedCitizenId(null);
+    setFollowCitizenId(null);
+    setCitizenInfo(null);
+    setKingdomCardOpen(false);
+    setOpenBuildCategory(null);
+    setPulsingTheme(null);
     setSelectedCubeId(cubeId);
-    setInspectorTab('info');
-    setMobileInspectorOpen(true);
   };
 
-  const handleSelectBuildTheme = (themeId: ThemeId | null) => {
+  const handleCitizenClick = (agentId: number) => {
+    // Placement mode cancels citizen selection and vice versa
+    setActiveBuildTheme(null);
+    setPulsingTheme(null);
+    setOpenBuildCategory(null);
+    setSelectedCubeId(null);
+    setKingdomCardOpen(false);
+    setFollowCitizenId(null);
+    setSelectedCitizenId(agentId);
+    const info = worldRef.current?.getCitizenInfo(agentId) ?? null;
+    setCitizenInfo(info);
+  };
+
+  const handleSelectBuildTheme = (
+    themeId: ThemeId | null,
+    closePanel = true
+  ) => {
     setActiveBuildTheme(themeId);
+    setPulsingTheme(null);
     if (themeId !== null) {
       setSelectedCubeId(null);
+      setSelectedCitizenId(null);
+      setFollowCitizenId(null);
+      setCitizenInfo(null);
+      setKingdomCardOpen(false);
+    }
+    if (closePanel) {
+      setOpenBuildCategory(null);
+    }
+  };
+
+  const handleToggleCategory = (cat: ThemeCategory | null) => {
+    setOpenBuildCategory(cat);
+    setPulsingTheme(null);
+  };
+
+  const handleToggleKingdom = () => {
+    if (kingdomCardOpen) {
+      setKingdomCardOpen(false);
+    } else {
+      setSelectedCubeId(null);
+      setSelectedCitizenId(null);
+      setFollowCitizenId(null);
+      setCitizenInfo(null);
+      setActiveBuildTheme(null);
+      setPulsingTheme(null);
+      setOpenBuildCategory(null);
+      setObjectivesOpen(false);
+      setInspectorTab('info');
+      setKingdomCardOpen(true);
+    }
+  };
+
+  const handleCloseOverlayCard = () => {
+    setSelectedCubeId(null);
+    setSelectedCitizenId(null);
+    setFollowCitizenId(null);
+    setCitizenInfo(null);
+    setKingdomCardOpen(false);
+  };
+
+  const handleToggleFollowCitizen = () => {
+    if (selectedCitizenId === null) return;
+    setFollowCitizenId((prev) =>
+      prev === selectedCitizenId ? null : selectedCitizenId
+    );
+  };
+
+  // Element 5.2: Objectives smart navigation
+  const handleSelectObjective = (objectiveId: string) => {
+    setObjectivesOpen(false);
+
+    if (objectiveId === 'build_sea' || objectiveId === 'build_farm') {
+      const targetTheme: ThemeId = objectiveId === 'build_sea' ? 'sea' : 'farm';
+      setSelectedCubeId(null);
+      setSelectedCitizenId(null);
+      setFollowCitizenId(null);
+      setCitizenInfo(null);
+      setKingdomCardOpen(false);
+      setOpenBuildCategory('food');
+      setActiveBuildTheme(targetTheme);
+      setPulsingTheme(targetTheme);
+
+      const emptyOwned = findNearestCube(
+        state.cubes,
+        (c) => c.owner === 'player' && !c.themeId && !c.secondThemeId
+      );
+      if (emptyOwned) {
+        worldRef.current?.focusOnCube(emptyOwned.id);
+      }
+      return;
+    }
+
+    if (
+      objectiveId === 'hold_30_food' ||
+      objectiveId === 'reach_60_satisfaction'
+    ) {
+      setSelectedCubeId(null);
+      setSelectedCitizenId(null);
+      setFollowCitizenId(null);
+      setCitizenInfo(null);
+      setActiveBuildTheme(null);
+      setPulsingTheme(null);
+      setOpenBuildCategory(null);
+      setInspectorTab('info');
+      setKingdomCardOpen(true);
+      return;
+    }
+
+    if (
+      objectiveId === 'reach_25_pop' ||
+      objectiveId === 'own_15_cubes' ||
+      objectiveId === 'hold_200_gold'
+    ) {
+      const palace = findPalaceCube(state.cubes);
+      if (palace) {
+        setSelectedCitizenId(null);
+        setFollowCitizenId(null);
+        setCitizenInfo(null);
+        setKingdomCardOpen(false);
+        setActiveBuildTheme(null);
+        setPulsingTheme(null);
+        setOpenBuildCategory(null);
+        setSelectedCubeId(palace.id);
+        worldRef.current?.focusOnCube(palace.id);
+      }
+    }
+  };
+
+  // Element 5.3: Clickable toasts carrying focusCubeId
+  const handleFocusToast = (toast: ToastItem) => {
+    if (typeof toast.focusCubeId !== 'number') return;
+    setActiveBuildTheme(null);
+    setPulsingTheme(null);
+    setOpenBuildCategory(null);
+    setObjectivesOpen(false);
+    setSelectedCitizenId(null);
+    setFollowCitizenId(null);
+    setCitizenInfo(null);
+    setKingdomCardOpen(false);
+    setSelectedCubeId(toast.focusCubeId);
+    worldRef.current?.focusOnCube(toast.focusCubeId);
+    dispatch({ type: 'DISMISS_TOAST', id: toast.id });
+  };
+
+  // Element 5.4: Inspector shortage fix button -> arm producer & fly to rocky cell for mines
+  const handleFixHint = (producerTheme: ThemeId) => {
+    const def = THEMES[producerTheme];
+    setSelectedCubeId(null);
+    setSelectedCitizenId(null);
+    setFollowCitizenId(null);
+    setCitizenInfo(null);
+    setKingdomCardOpen(false);
+    setOpenBuildCategory(def.category);
+    setActiveBuildTheme(producerTheme);
+    setPulsingTheme(producerTheme);
+
+    if (def.rockyOnly) {
+      const ownedRocky = findNearestCube(
+        state.cubes,
+        (c) => c.owner === 'player' && c.isRocky && !c.themeId && !c.secondThemeId
+      );
+      if (ownedRocky) {
+        worldRef.current?.focusOnCube(ownedRocky.id);
+        return;
+      }
+      const purchasableRocky = findNearestCube(
+        state.cubes,
+        (c) => isPurchasableNeutralCube(state.cubes, c) && c.isRocky
+      );
+      if (purchasableRocky) {
+        worldRef.current?.focusOnCube(purchasableRocky.id);
+      }
     }
   };
 
@@ -208,12 +470,18 @@ export default function App() {
 
   const handleNewGame = () => {
     setActiveBuildTheme(null);
+    setPulsingTheme(null);
+    setOpenBuildCategory(null);
+    setObjectivesOpen(false);
     setSelectedCubeId(null);
+    setSelectedCitizenId(null);
+    setFollowCitizenId(null);
+    setCitizenInfo(null);
+    setKingdomCardOpen(false);
     setInspectorTab('info');
     setBourseModalOpen(false);
     setShowLevel2Modal(false);
     setShowLevel3Modal(false);
-    setMobileInspectorOpen(false);
     setAwayReport(null);
     dispatch({ type: 'NEW_GAME' });
     setResetSignal((n) => n + 1);
@@ -234,7 +502,7 @@ export default function App() {
       dir="rtl"
       className="h-dvh w-full flex flex-col bg-[#0E3A34] overflow-hidden"
     >
-      {/* Top Bar (56px, deep teal #14524A) */}
+      {/* Slim Top Bar (48px) */}
       <TopBar
         state={state}
         onOpenBourse={() => setBourseModalOpen(true)}
@@ -250,7 +518,7 @@ export default function App() {
 
       {/* Explicit Clickable Milestone Notice Banners (never auto-opening modals) */}
       {(state.level2UnlockedNotice || state.level2CompletedNotice) && (
-        <div className="w-full bg-[#11453E] border-b border-[#C9962E]/50 px-3 py-1.5 flex items-center justify-center gap-2 flex-wrap shrink-0">
+        <div className="w-full bg-[#11453E] border-b border-[#C9962E]/50 px-3 py-1 flex items-center justify-center gap-2 flex-wrap shrink-0">
           {state.level2UnlockedNotice && (
             <button
               type="button"
@@ -274,91 +542,85 @@ export default function App() {
         </div>
       )}
 
-      {/* Main Row: RTL Right=BuildDock (210px), Center=Map (>=60%), Left=Inspector (260px) */}
-      <div className="flex-1 min-h-0 flex flex-col lg:flex-row overflow-hidden">
-        {/* Desktop BuildDock is rendered first in RTL so it sits on the RIGHT side */}
-        <div className="hidden lg:flex">
+      {/* Main Viewport: Desktop RTL Right=56px Icon Rail + Full-Bleed Map; Mobile Full-Bleed Map + 56px Bottom Icon Bar */}
+      <div className="flex-1 min-h-0 flex flex-col lg:flex-row overflow-hidden relative">
+        {/* Desktop Icon Rail sits on the RIGHT in RTL; Mobile Icon Bar renders via flex order at bottom */}
+        <div className="order-2 lg:order-1 flex shrink-0">
           <BuildDock
-            variant="desktop"
             gold={state.gold}
             level={state.level}
             warehouse={state.warehouse}
             activeBuildTheme={activeBuildTheme}
+            openCategory={openBuildCategory}
+            pulsingTheme={pulsingTheme}
+            kingdomOpen={kingdomCardOpen}
+            onToggleCategory={handleToggleCategory}
             onSelectTheme={handleSelectBuildTheme}
+            onToggleKingdom={handleToggleKingdom}
           />
         </div>
 
-        {/* Center 3D Isometric RTS World Canvas */}
-        <WorldCanvas
-          cubes={state.cubes}
-          level={state.level}
-          selectedCubeId={selectedCubeId}
-          activeBuildTheme={activeBuildTheme}
-          staffedSlots={staffing.staffedSlots}
-          resetSignal={resetSignal}
-          onCubeClick={handleCubeClick}
-          onCancelBuild={() => setActiveBuildTheme(null)}
-        />
-
-        {/* Mobile Quick Action Bar (Inspector / Objectives & Level 2 Bourse) + Horizontal Build Strip */}
-        <div className="lg:hidden flex flex-col shrink-0">
-          <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 bg-[#11453E] border-t border-[#1D5F56]">
-            <button
-              type="button"
-              onClick={() => {
-                setSelectedCubeId(null);
-                setInspectorTab('info');
-                setMobileInspectorOpen(true);
-              }}
-              className="flex-1 flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-xl bg-[#FBF3DF] text-[#2B2118] text-xs font-extrabold"
-            >
-              <Info className="w-3.5 h-3.5 text-[#14524A]" />
-              <span>{STRINGS.mobile.inspectorButton}</span>
-            </button>
-            {state.level >= 2 && (
-              <button
-                type="button"
-                onClick={() => setBourseModalOpen(true)}
-                className="flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-xl bg-[#C9962E] text-[#2B2118] text-xs font-extrabold"
-              >
-                <Store className="w-3.5 h-3.5" />
-                <span>{STRINGS.mobile.bourseButton}</span>
-              </button>
-            )}
-          </div>
-          <BuildDock
-            variant="mobile"
-            gold={state.gold}
+        {/* Full-Bleed 3D Isometric RTS World Canvas */}
+        <div className="order-1 lg:order-2 flex-1 min-w-0 min-h-0 flex relative">
+          <WorldCanvas
+            ref={worldRef}
+            cubes={state.cubes}
             level={state.level}
-            warehouse={state.warehouse}
+            population={state.population}
+            satisfaction={state.satisfaction}
+            selectedCubeId={selectedCubeId}
+            selectedCitizenId={selectedCitizenId}
+            followCitizenId={followCitizenId}
             activeBuildTheme={activeBuildTheme}
-            onSelectTheme={handleSelectBuildTheme}
-          />
+            staffedSlots={staffing.staffedSlots}
+            resetSignal={resetSignal}
+            onCubeClick={handleCubeClick}
+            onCitizenClick={handleCitizenClick}
+            onCancelBuild={() => {
+              setActiveBuildTheme(null);
+              setPulsingTheme(null);
+            }}
+            onRecenter={() => setFollowCitizenId(null)}
+          >
+            {/* Element 1.4: Compact Collapsible Objectives Chip (top-left of map) */}
+            <Objectives
+              state={state}
+              isOpen={objectivesOpen}
+              onToggle={() => setObjectivesOpen((prev) => !prev)}
+              onSelectObjective={handleSelectObjective}
+            />
+          </WorldCanvas>
         </div>
-
-        {/* Left Inspector Panel (Desktop 260px) & Mobile Slide-up Drawer */}
-        <Inspector
-          state={state}
-          selectedCube={selectedCube}
-          staffing={staffing}
-          activeTab={inspectorTab}
-          onChangeTab={setInspectorTab}
-          onClearSelection={() => setSelectedCubeId(null)}
-          onBuyCube={(cubeId) => dispatch({ type: 'BUY_CUBE', cubeId })}
-          onDemolishTheme={handleDemolish}
-          onFixHint={(themeId) => handleSelectBuildTheme(themeId)}
-          onTrade={(resource, side, quantity) =>
-            dispatch({ type: 'TRADE_RESOURCE', resource, side, quantity })
-          }
-          mobileOpen={mobileInspectorOpen}
-          onCloseMobile={() => setMobileInspectorOpen(false)}
-        />
       </div>
 
-      {/* Bottom-left Toasts */}
+      {/* Element 1.3: Floating Overlay Inspector / Citizen / Kingdom Card (unmounts when nothing selected) */}
+      <Inspector
+        state={state}
+        selectedCube={selectedCube}
+        selectedCitizen={citizenInfo}
+        isFollowingCitizen={
+          selectedCitizenId !== null && followCitizenId === selectedCitizenId
+        }
+        kingdomOpen={kingdomCardOpen}
+        staffing={staffing}
+        activeTab={inspectorTab}
+        onChangeTab={setInspectorTab}
+        onClose={handleCloseOverlayCard}
+        onToggleFollowCitizen={handleToggleFollowCitizen}
+        onBuyCube={(cubeId) => dispatch({ type: 'BUY_CUBE', cubeId })}
+        onDemolishTheme={handleDemolish}
+        onFixHint={handleFixHint}
+        onTrade={(resource, side, quantity) =>
+          dispatch({ type: 'TRADE_RESOURCE', resource, side, quantity })
+        }
+      />
+
+      {/* Element 1.5 & 5.3: Bottom-left Toasts (with clickable focusCubeId navigation) */}
       <Toasts
         toasts={state.toasts}
+        hasOverlayCard={hasOverlayCard}
         onDismiss={(id) => dispatch({ type: 'DISMISS_TOAST', id })}
+        onFocusToast={handleFocusToast}
       />
 
       {/* Non-pausing Parchment Modals */}

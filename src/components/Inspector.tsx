@@ -46,16 +46,20 @@ import type {
   TradedResourceKey,
 } from '../game/types';
 import { BoursePanel } from './BoursePanel';
-import { Objectives } from './Objectives';
+import { CitizenCard, type CitizenInfo } from './CitizenCard';
 import { ThemeIcon } from './ResourceIcon';
 
 interface InspectorProps {
   state: GameState;
   selectedCube: Cube | null;
+  selectedCitizen: CitizenInfo | null;
+  isFollowingCitizen: boolean;
+  kingdomOpen: boolean;
   staffing: StaffingStatus;
   activeTab: 'info' | 'bourse';
   onChangeTab: (tab: 'info' | 'bourse') => void;
-  onClearSelection: () => void;
+  onClose: () => void;
+  onToggleFollowCitizen: () => void;
   onBuyCube: (cubeId: number) => void;
   onDemolishTheme: (cubeId: number, slot: SlotIndex) => void;
   onFixHint?: (themeId: ThemeId) => void;
@@ -64,8 +68,6 @@ interface InspectorProps {
     side: 'buy' | 'sell',
     quantity: number | 'max'
   ) => void;
-  mobileOpen: boolean;
-  onCloseMobile: () => void;
 }
 
 function getBarColorClass(value: number): string {
@@ -239,7 +241,7 @@ function SlotCard({
         </div>
       )}
 
-      {/* Missing input shortage diagnostic + quick producer hint */}
+      {/* Missing input shortage diagnostic + smart producer navigation button */}
       {!unstaffed && shortage && (
         <div className="p-2 rounded-lg bg-[#FBE2DF] border border-[#E5ABA3] text-[11px] font-bold text-[#8E2A1F] space-y-1.5">
           <div className="flex items-start gap-1.5">
@@ -250,7 +252,7 @@ function SlotCard({
             <button
               type="button"
               onClick={() => onFixHint(producerTheme)}
-              className="w-full py-1 px-2 rounded-lg bg-[#14524A] hover:bg-[#1B685E] text-white text-[11px] font-extrabold flex items-center justify-center gap-1 transition-colors"
+              className="w-full py-1.5 px-2 rounded-lg bg-[#14524A] hover:bg-[#1B685E] text-white text-[11px] font-extrabold flex items-center justify-center gap-1 transition-colors"
             >
               <Hammer className="w-3 h-3" />
               <span>
@@ -301,17 +303,24 @@ function SlotCard({
 export function Inspector({
   state,
   selectedCube,
+  selectedCitizen,
+  isFollowingCitizen,
+  kingdomOpen,
   staffing,
   activeTab,
   onChangeTab,
-  onClearSelection,
+  onClose,
+  onToggleFollowCitizen,
   onBuyCube,
   onDemolishTheme,
   onFixHint,
   onTrade,
-  mobileOpen,
-  onCloseMobile,
 }: InspectorProps) {
+  // Element 1.3: Unmount completely when nothing is selected — the map breathes
+  if (!selectedCitizen && !selectedCube && !kingdomOpen) {
+    return null;
+  }
+
   const capacity = getHouseCapacity(state.cubes);
   const ent = getEntertainmentBreakdown(state.cubes, state.warehouse);
   const secondsLeftInDay = Math.max(0, TICKS_PER_DAY - state.tickInDay);
@@ -474,15 +483,31 @@ export function Inspector({
     </div>
   );
 
-  const renderContent = () => (
-    <div className="flex-1 overflow-y-auto parchment-scroll space-y-3.5 pl-0.5">
-      {/* Level 2 switchable tab bar (Kingdom Info vs Bourse) */}
+  const renderKingdomSummary = () => (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between pb-2 border-b border-[#E3D3AC]">
+        <div className="flex items-center gap-1.5 text-[#2B2118]">
+          <Users className="w-4 h-4 text-[#14524A]" />
+          <h3 className="text-sm font-extrabold">
+            {STRINGS.people.summaryTitle}
+          </h3>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label={STRINGS.modals.close}
+          className="w-7 h-7 rounded-lg hover:bg-[#EFE2C2] text-[#4F3F2B] flex items-center justify-center transition-colors"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+
       {state.level >= 2 && (
         <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-[#EFE2C2] border border-[#E3D3AC]">
           <button
             type="button"
             onClick={() => onChangeTab('info')}
-            className={`py-1.5 text-xs font-extrabold rounded-lg transition-colors ${
+            className={`py-1 text-xs font-extrabold rounded-lg transition-colors ${
               activeTab === 'info'
                 ? 'bg-[#14524A] text-white'
                 : 'text-[#4F3F2B] hover:text-[#2B2118]'
@@ -493,7 +518,7 @@ export function Inspector({
           <button
             type="button"
             onClick={() => onChangeTab('bourse')}
-            className={`py-1.5 text-xs font-extrabold rounded-lg transition-colors flex items-center justify-center gap-1 ${
+            className={`py-1 text-xs font-extrabold rounded-lg transition-colors flex items-center justify-center gap-1 ${
               activeTab === 'bourse'
                 ? 'bg-[#14524A] text-white'
                 : 'text-[#4F3F2B] hover:text-[#2B2118]'
@@ -505,11 +530,136 @@ export function Inspector({
         </div>
       )}
 
-      {/* Bourse Tab Content */}
       {state.level >= 2 && activeTab === 'bourse' ? (
         <BoursePanel state={state} compact onTrade={onTrade} />
-      ) : selectedCube ? (
-        /* Selected Cube View */
+      ) : (
+        <section className="space-y-2.5">
+          <div className="flex items-center justify-between text-[11px] font-bold text-[#6F5C43]">
+            <span className="tabular-nums-latin">
+              {STRINGS.people.housingRatio(state.population, capacity)}
+            </span>
+            <span>
+              {STRINGS.people.workersRatio(
+                staffing.totalWorkersEmployed,
+                staffing.totalWorkersNeeded
+              )}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-1 text-[11px] font-bold text-[#6F5C43]">
+            <Clock className="w-3 h-3 text-[#C9962E]" />
+            <span>{STRINGS.people.dayRolloverHint(secondsLeftInDay)}</span>
+          </div>
+
+          {state.hungerFlag && (
+            <div className="p-2 rounded-xl bg-[#FBE2DF] border border-[#E5ABA3] text-[11px] font-bold text-[#8E2A1F] flex items-start gap-1.5">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span>{STRINGS.people.hungerWarning}</span>
+            </div>
+          )}
+
+          {/* Main Satisfaction & Needs */}
+          <div className="p-2.5 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] space-y-2">
+            <MeterBar
+              label={STRINGS.satisfactionLabel}
+              value={state.satisfaction}
+            />
+            <div className="pt-1.5 border-t border-[#EFE3C5] space-y-1.5">
+              <MeterBar
+                label={STRINGS.people.needsFood}
+                value={state.needs.food}
+              />
+              <MeterBar
+                label={STRINGS.people.needsWater}
+                value={state.needs.water}
+              />
+              <MeterBar
+                label={STRINGS.people.needsHousing}
+                value={state.needs.housing}
+              />
+              <MeterBar
+                label={STRINGS.people.needsEntertainment}
+                value={state.needs.entertainment}
+              />
+            </div>
+
+            <div className="pt-1.5 border-t border-[#EFE3C5] space-y-1 text-[11px] text-[#6F5C43]">
+              {[
+                { active: ent.seaAdjacent, label: STRINGS.people.entertainmentSea },
+                { active: ent.shopOrMarket, label: STRINGS.people.entertainmentShop },
+                { active: ent.theater, label: STRINGS.people.entertainmentTheater },
+                { active: ent.mosque, label: STRINGS.people.entertainmentMosque },
+                { active: ent.foodVariety, label: STRINGS.people.entertainmentVariety },
+                { active: ent.cafe, label: STRINGS.people.entertainmentCafe },
+                { active: ent.restaurant, label: STRINGS.people.entertainmentRestaurant },
+              ].map((row) => (
+                <div key={row.label} className="flex items-center gap-1.5">
+                  <Check
+                    className={`w-3 h-3 shrink-0 ${
+                      row.active ? 'text-[#3E9B4F]' : 'text-[#CBBBA0]'
+                    }`}
+                  />
+                  <span className={row.active ? 'text-[#2B2118] font-bold' : ''}>
+                    {row.label}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Reputation */}
+          <div className="p-2.5 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] space-y-1.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5 text-xs font-extrabold text-[#2B2118]">
+                <Star className="w-3.5 h-3.5 text-[#C9962E] fill-[#C9962E]" />
+                <span>{STRINGS.reputationLabel}</span>
+              </div>
+              <span className="text-xs font-extrabold tabular-nums-latin text-[#2B2118]">
+                {Math.round(state.reputation)} / 100
+              </span>
+            </div>
+            <div className="w-full h-2 rounded-full bg-[#E5D5B2] overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-[width] duration-300 ${getBarColorClass(
+                  state.reputation
+                )}`}
+                style={{ width: `${Math.round(state.reputation)}%` }}
+              />
+            </div>
+            <p className="text-[11px] text-[#6F5C43]">
+              {STRINGS.people.reputationHint}
+            </p>
+          </div>
+
+          {state.satisfaction >= 60 ? (
+            <p className="text-[11px] text-[#2D6E3B] font-bold leading-relaxed">
+              {STRINGS.people.growthHintHigh}
+            </p>
+          ) : state.satisfaction < 35 ? (
+            <p className="text-[11px] text-[#A83629] font-bold leading-relaxed">
+              {STRINGS.people.growthHintLow}{' '}
+              {state.level === 1 ? STRINGS.people.growthHintLevel1Floor : ''}
+            </p>
+          ) : null}
+        </section>
+      )}
+    </div>
+  );
+
+  const renderBody = () => {
+    if (selectedCitizen) {
+      return (
+        <CitizenCard
+          citizen={selectedCitizen}
+          isFollowing={isFollowingCitizen}
+          onToggleFollow={onToggleFollowCitizen}
+          onClose={onClose}
+        />
+      );
+    }
+
+    if (selectedCube) {
+      return (
         <div className="space-y-3">
           <div className="flex items-center justify-between pb-2 border-b border-[#E3D3AC]">
             <div className="flex items-center gap-1.5 text-[#2B2118]">
@@ -520,11 +670,11 @@ export function Inspector({
             </div>
             <button
               type="button"
-              onClick={onClearSelection}
-              className="text-[11px] font-bold text-[#14524A] hover:underline flex items-center gap-0.5"
+              onClick={onClose}
+              aria-label={STRINGS.modals.close}
+              className="w-7 h-7 rounded-lg hover:bg-[#EFE2C2] text-[#4F3F2B] flex items-center justify-center transition-colors"
             >
-              <X className="w-3 h-3" />
-              <span>{STRINGS.inspector.closeSelection}</span>
+              <X className="w-4 h-4" />
             </button>
           </div>
 
@@ -600,174 +750,20 @@ export function Inspector({
             </div>
           )}
         </div>
-      ) : (
-        /* Default Unselected View: Objectives + People Summary */
-        <>
-          <Objectives state={state} />
+      );
+    }
 
-          <section className="space-y-2.5">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-1.5">
-                <Users className="w-4 h-4 text-[#14524A]" />
-                <h3 className="text-sm font-extrabold text-[#2B2118]">
-                  {STRINGS.people.summaryTitle}
-                </h3>
-              </div>
-              <span className="text-[11px] font-bold text-[#6F5C43] tabular-nums-latin">
-                {STRINGS.people.housingRatio(state.population, capacity)}
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between text-[11px] font-bold text-[#6F5C43]">
-              <span>
-                {STRINGS.people.workersRatio(
-                  staffing.totalWorkersEmployed,
-                  staffing.totalWorkersNeeded
-                )}
-              </span>
-              <span className="flex items-center gap-1">
-                <Clock className="w-3 h-3 text-[#C9962E]" />
-                <span>{STRINGS.people.dayRolloverHint(secondsLeftInDay)}</span>
-              </span>
-            </div>
-
-            {state.hungerFlag && (
-              <div className="p-2 rounded-xl bg-[#FBE2DF] border border-[#E5ABA3] text-[11px] font-bold text-[#8E2A1F] flex items-start gap-1.5">
-                <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-                <span>{STRINGS.people.hungerWarning}</span>
-              </div>
-            )}
-
-            {/* Main Satisfaction Bar */}
-            <div className="p-2.5 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] space-y-2">
-              <MeterBar
-                label={STRINGS.satisfactionLabel}
-                value={state.satisfaction}
-              />
-
-              <div className="pt-1.5 border-t border-[#EFE3C5] space-y-1.5">
-                <MeterBar
-                  label={STRINGS.people.needsFood}
-                  value={state.needs.food}
-                />
-                <MeterBar
-                  label={STRINGS.people.needsWater}
-                  value={state.needs.water}
-                />
-                <MeterBar
-                  label={STRINGS.people.needsHousing}
-                  value={state.needs.housing}
-                />
-                <MeterBar
-                  label={STRINGS.people.needsEntertainment}
-                  value={state.needs.entertainment}
-                />
-              </div>
-
-              {/* Entertainment breakdown */}
-              <div className="pt-1.5 border-t border-[#EFE3C5] space-y-1 text-[11px] text-[#6F5C43]">
-                {[
-                  { active: ent.seaAdjacent, label: STRINGS.people.entertainmentSea },
-                  { active: ent.shopOrMarket, label: STRINGS.people.entertainmentShop },
-                  { active: ent.theater, label: STRINGS.people.entertainmentTheater },
-                  { active: ent.mosque, label: STRINGS.people.entertainmentMosque },
-                  { active: ent.foodVariety, label: STRINGS.people.entertainmentVariety },
-                  { active: ent.cafe, label: STRINGS.people.entertainmentCafe },
-                  { active: ent.restaurant, label: STRINGS.people.entertainmentRestaurant },
-                ].map((row) => (
-                  <div key={row.label} className="flex items-center gap-1.5">
-                    <Check
-                      className={`w-3 h-3 shrink-0 ${
-                        row.active ? 'text-[#3E9B4F]' : 'text-[#CBBBA0]'
-                      }`}
-                    />
-                    <span className={row.active ? 'text-[#2B2118] font-bold' : ''}>
-                      {row.label}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Reputation summary */}
-            <div className="p-2.5 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] space-y-1.5">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-1.5 text-xs font-extrabold text-[#2B2118]">
-                  <Star className="w-3.5 h-3.5 text-[#C9962E] fill-[#C9962E]" />
-                  <span>{STRINGS.reputationLabel}</span>
-                </div>
-                <span className="text-xs font-extrabold tabular-nums-latin text-[#2B2118]">
-                  {Math.round(state.reputation)} / 100
-                </span>
-              </div>
-              <div className="w-full h-2 rounded-full bg-[#E5D5B2] overflow-hidden">
-                <div
-                  className={`h-full rounded-full transition-[width] duration-300 ${getBarColorClass(
-                    state.reputation
-                  )}`}
-                  style={{ width: `${Math.round(state.reputation)}%` }}
-                />
-              </div>
-              <p className="text-[11px] text-[#6F5C43]">
-                {STRINGS.people.reputationHint}
-              </p>
-            </div>
-
-            {/* Growth & Level 1 safety note */}
-            {state.satisfaction >= 60 ? (
-              <p className="text-[11px] text-[#2D6E3B] font-bold leading-relaxed">
-                {STRINGS.people.growthHintHigh}
-              </p>
-            ) : state.satisfaction < 35 ? (
-              <p className="text-[11px] text-[#A83629] font-bold leading-relaxed">
-                {STRINGS.people.growthHintLow}{' '}
-                {state.level === 1 ? STRINGS.people.growthHintLevel1Floor : ''}
-              </p>
-            ) : null}
-          </section>
-        </>
-      )}
-    </div>
-  );
+    return renderKingdomSummary();
+  };
 
   return (
-    <>
-      {/* Desktop Left Panel (260px) */}
-      <aside className="hidden lg:flex flex-col w-[260px] shrink-0 p-2.5 bg-[#0C332D] border-r border-[#1A5047]">
-        <div className="parchment-panel flex-1 flex flex-col overflow-hidden p-3">
-          {renderContent()}
-        </div>
-      </aside>
-
-      {/* Mobile Slide-Up Inspector Drawer */}
-      {mobileOpen && (
-        <div
-          className="lg:hidden fixed inset-0 z-50 flex items-end bg-black/45"
-          onClick={onCloseMobile}
-        >
-          <div
-            className="w-full max-h-[78vh] bg-[#FBF3DF] border-t-2 border-[#C9962E] rounded-t-2xl p-4 flex flex-col shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between pb-2.5 mb-2.5 border-b border-[#E3D3AC]">
-              <span className="text-sm font-extrabold text-[#2B2118]">
-                {selectedCube
-                  ? STRINGS.inspector.cubeTitle(selectedCube.row, selectedCube.col)
-                  : STRINGS.mobile.inspectorButton}
-              </span>
-              <button
-                type="button"
-                onClick={onCloseMobile}
-                className="w-8 h-8 rounded-xl bg-[#EFE2C2] text-[#2B2118] flex items-center justify-center"
-                aria-label={STRINGS.modals.close}
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            {renderContent()}
-          </div>
-        </div>
-      )}
-    </>
+    <aside
+      aria-label={STRINGS.mobile.inspectorButton}
+      className="fixed bottom-[62px] inset-x-2 lg:inset-x-auto lg:bottom-3 lg:left-3 lg:w-[300px] max-h-[55dvh] lg:max-h-[calc(100dvh-140px)] z-30 parchment-panel border-2 border-[#C9962E] shadow-2xl flex flex-col overflow-hidden"
+    >
+      <div className="flex-1 overflow-y-auto parchment-scroll p-3">
+        {renderBody()}
+      </div>
+    </aside>
   );
 }
