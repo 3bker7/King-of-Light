@@ -1,0 +1,6 @@
+{
+  "name": "نور الشعب — Noor Al-Shaab",
+  "description": "لعبة إدارة وبناء مملكة اقتصادية مستمرة على خريطة مكعبات صحراوية.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
