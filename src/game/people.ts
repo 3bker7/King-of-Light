@@ -1,6 +1,10 @@
 import {
+  ENTERTAINMENT_CAFE_BONUS,
+  ENTERTAINMENT_MOSQUE_BONUS,
+  ENTERTAINMENT_RESTAURANT_BONUS,
   ENTERTAINMENT_SEA_BONUS,
-  ENTERTAINMENT_SHOP_BONUS,
+  ENTERTAINMENT_SHOP_OR_MARKET_BONUS,
+  ENTERTAINMENT_THEATER_BONUS,
   ENTERTAINMENT_VARIETY_BONUS,
   ENTERTAINMENT_VARIETY_MIN_TYPES,
   FOOD_PER_PERSON_PER_DAY,
@@ -13,21 +17,29 @@ import {
   PEOPLE_PER_WATER_PER_DAY,
   POPULATION_CHANGE_STEP,
   REPUTATION_DRIFT_FACTOR,
+  SCHOOL_REPUTATION_MULTIPLIER,
   SHRINK_SATISFACTION_BELOW,
   WEIGHT_ENTERTAINMENT,
   WEIGHT_FOOD,
   WEIGHT_HOUSING,
   WEIGHT_WATER,
 } from './constants';
-import type { Cube, FoodResourceKey, NeedsBreakdown, Warehouse } from './types';
+import type { Cube, FoodResourceKey, NeedsBreakdown, ThemeId, Warehouse } from './types';
 
-// Strictly counts Fish + Crops + Meat + Bread. Water NEVER counts as food.
+// Strictly counts Fish + Crops + Wheat + Fruit + Meat + Bread. Water NEVER counts as food.
 export function getTotalFood(warehouse: Warehouse): number {
-  return FOOD_RESOURCES.reduce((sum, key) => sum + Math.max(0, warehouse[key]), 0);
+  return FOOD_RESOURCES.reduce((sum, key) => sum + Math.max(0, warehouse[key] ?? 0), 0);
 }
 
+// Bread counts double toward food variety.
 export function getFoodVarietyCount(warehouse: Warehouse): number {
-  return FOOD_RESOURCES.filter((key) => warehouse[key] > 0).length;
+  let variety = 0;
+  for (const key of FOOD_RESOURCES) {
+    if ((warehouse[key] ?? 0) > 0) {
+      variety += key === 'bread' ? 2 : 1;
+    }
+  }
+  return variety;
 }
 
 export function getHouseCapacity(cubes: Cube[]): number {
@@ -40,12 +52,16 @@ export function getHouseCapacity(cubes: Cube[]): number {
   return houses * HOUSE_CAPACITY;
 }
 
-export function hasAnyShop(cubes: Cube[]): boolean {
+export function hasThemeBuilt(cubes: Cube[], themeId: ThemeId): boolean {
   return cubes.some(
     (cube) =>
       cube.owner === 'player' &&
-      (cube.themeId === 'shop' || cube.secondThemeId === 'shop')
+      (cube.themeId === themeId || cube.secondThemeId === themeId)
   );
+}
+
+export function hasAnyShopOrMarket(cubes: Cube[]): boolean {
+  return hasThemeBuilt(cubes, 'shop') || hasThemeBuilt(cubes, 'grand_market');
 }
 
 export function hasSeaAdjacentToHouse(cubes: Cube[]): boolean {
@@ -76,19 +92,34 @@ export function hasSeaAdjacentToHouse(cubes: Cube[]): boolean {
 
 export function getEntertainmentBreakdown(cubes: Cube[], warehouse: Warehouse) {
   const seaAdjacent = hasSeaAdjacentToHouse(cubes);
-  const shopExists = hasAnyShop(cubes);
+  const shopOrMarket = hasAnyShopOrMarket(cubes);
+  const theater = hasThemeBuilt(cubes, 'theater');
+  const mosque = hasThemeBuilt(cubes, 'mosque');
   const foodVariety = getFoodVarietyCount(warehouse) >= ENTERTAINMENT_VARIETY_MIN_TYPES;
+  const cafe = hasThemeBuilt(cubes, 'cafe');
+  const restaurant = hasThemeBuilt(cubes, 'restaurant');
 
-  const score =
+  // Exact WP4 formula, capped at 100
+  const score = Math.min(
+    100,
     (seaAdjacent ? ENTERTAINMENT_SEA_BONUS : 0) +
-    (shopExists ? ENTERTAINMENT_SHOP_BONUS : 0) +
-    (foodVariety ? ENTERTAINMENT_VARIETY_BONUS : 0);
+      (shopOrMarket ? ENTERTAINMENT_SHOP_OR_MARKET_BONUS : 0) +
+      (theater ? ENTERTAINMENT_THEATER_BONUS : 0) +
+      (mosque ? ENTERTAINMENT_MOSQUE_BONUS : 0) +
+      (foodVariety ? ENTERTAINMENT_VARIETY_BONUS : 0) +
+      (cafe ? ENTERTAINMENT_CAFE_BONUS : 0) +
+      (restaurant ? ENTERTAINMENT_RESTAURANT_BONUS : 0)
+  );
 
   return {
     seaAdjacent,
-    shopExists,
+    shopOrMarket,
+    theater,
+    mosque,
     foodVariety,
-    score: Math.min(100, score),
+    cafe,
+    restaurant,
+    score,
   };
 }
 
@@ -149,14 +180,13 @@ export function processDayRolloverPeople(
   const nextWarehouse: Warehouse = { ...warehouse };
   const foodAvailableBefore = getTotalFood(nextWarehouse);
 
-  // If warehouse food is 0 at day rollover, hunger flag is set for the day.
   const hungerFlag = population > 0 && foodAvailableBefore === 0;
 
   // Consume 1 food unit per person evenly from available food types.
   let remainingFoodToEat = Math.max(0, population * FOOD_PER_PERSON_PER_DAY);
   while (remainingFoodToEat > 0) {
     const availableKeys: FoodResourceKey[] = FOOD_RESOURCES.filter(
-      (k) => nextWarehouse[k] > 0
+      (k) => (nextWarehouse[k] ?? 0) > 0
     );
     if (availableKeys.length === 0) break;
 
@@ -176,7 +206,6 @@ export function processDayRolloverPeople(
   const waterNeeded = Math.floor(population / PEOPLE_PER_WATER_PER_DAY);
   nextWarehouse.water = Math.max(0, nextWarehouse.water - waterNeeded);
 
-  // Evaluate satisfaction with active hunger cap before growth/departure check.
   const preGrowthEval = computeNeedsAndSatisfaction(
     cubes,
     nextWarehouse,
@@ -185,6 +214,9 @@ export function processDayRolloverPeople(
   );
 
   const capacity = getHouseCapacity(cubes);
+  const clinicExists = hasThemeBuilt(cubes, 'clinic');
+  const schoolExists = hasThemeBuilt(cubes, 'school');
+
   let nextPopulation = population;
   let popEvent: 'grow' | 'shrink' | 'none' = 'none';
 
@@ -195,9 +227,12 @@ export function processDayRolloverPeople(
     nextPopulation = population + POPULATION_CHANGE_STEP;
     popEvent = 'grow';
   } else if (preGrowthEval.satisfaction < SHRINK_SATISFACTION_BELOW) {
-    // Level 1 safety rule: population never drops below 5 in Level 1.
     const popFloor = level === 1 ? LEVEL_1_POPULATION_FLOOR : 0;
-    const candidate = Math.max(popFloor, population - POPULATION_CHANGE_STEP);
+    // Clinic halves population decline (rounded down)
+    const loss = clinicExists
+      ? Math.floor(POPULATION_CHANGE_STEP / 2)
+      : POPULATION_CHANGE_STEP;
+    const candidate = Math.max(popFloor, population - loss);
     if (candidate < population) {
       nextPopulation = candidate;
       popEvent = 'shrink';
@@ -206,16 +241,18 @@ export function processDayRolloverPeople(
 
   const popDelta = nextPopulation - population;
 
-  // Reputation moves 10% of the distance toward current Satisfaction.
+  // Reputation moves 10% toward Satisfaction; School speeds up positive Reputation gain x1.5
+  const repDelta = preGrowthEval.satisfaction - reputation;
+  const repFactor =
+    repDelta > 0 && schoolExists
+      ? REPUTATION_DRIFT_FACTOR * SCHOOL_REPUTATION_MULTIPLIER
+      : REPUTATION_DRIFT_FACTOR;
+
   const nextReputation = Math.max(
     0,
-    Math.min(
-      100,
-      reputation + (preGrowthEval.satisfaction - reputation) * REPUTATION_DRIFT_FACTOR
-    )
+    Math.min(100, reputation + repDelta * repFactor)
   );
 
-  // Recompute final needs/satisfaction for updated population while preserving hungerFlag cap.
   const finalEval = computeNeedsAndSatisfaction(
     cubes,
     nextWarehouse,

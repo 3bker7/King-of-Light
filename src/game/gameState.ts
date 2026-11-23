@@ -2,7 +2,6 @@ import {
   createEmptyTradeVolumes,
   createInitialPrices,
   createInitialWarehouse,
-  CUBE_PURCHASE_COST,
   GRID_SIZE,
   LEVEL_1_FOOD_TARGET,
   LEVEL_1_SATISFACTION_TARGET,
@@ -10,16 +9,23 @@ import {
   LEVEL_2_GOLD_TARGET,
   LEVEL_2_POPULATION_TARGET,
   OBJECTIVE_REWARDS,
+  SEEDED_ROCKY_COORDS,
+  SEEDED_VILLAGE_COORDS,
   START_OWNED_MIN_COL,
   START_OWNED_MIN_ROW,
   STARTING_DAY,
   STARTING_GOLD,
   STARTING_HOUSES_COL,
   STARTING_HOUSES_ROW,
+  STARTING_PALACE_COL,
+  STARTING_PALACE_ROW,
   STARTING_POPULATION,
   STARTING_REPUTATION,
   THEMES,
   TICKS_PER_DAY,
+  VILLAGE_JOIN_MIN_REPUTATION,
+  VILLAGE_JOIN_REQUIRED_DAYS,
+  VILLAGE_NAMES,
 } from './constants';
 import { executeTrade, rolloverBoursePrices } from './economy';
 import {
@@ -30,6 +36,9 @@ import {
 import {
   advanceProductionTick,
   canPlaceThemeOnCube,
+  checkMaterialCosts,
+  getCubePurchasePrice,
+  isAdjacentToOwned,
   isPurchasableNeutralCube,
 } from './production';
 import { clearSavedGame } from './save';
@@ -50,9 +59,13 @@ import type {
 let toastCounter = 1;
 let audioCounter = 1;
 
-function createToast(message: string, tone: ToastTone): ToastItem {
+function createToast(
+  message: string,
+  tone: ToastTone,
+  focusCubeId?: number
+): ToastItem {
   toastCounter += 1;
-  return { id: `toast-${toastCounter}`, message, tone };
+  return { id: `toast-${toastCounter}`, message, tone, focusCubeId };
 }
 
 function appendToasts(existing: ToastItem[], additions: ToastItem[]): ToastItem[] {
@@ -108,28 +121,42 @@ function createInitialObjectives(): ObjectiveState[] {
 }
 
 export function createInitialCubes(now: number): Cube[] {
+  const rockySet = new Set(SEEDED_ROCKY_COORDS.map(([r, c]) => `${r},${c}`));
+  const villageMap = new Map<string, string>();
+  SEEDED_VILLAGE_COORDS.forEach(([r, c], idx) => {
+    villageMap.set(`${r},${c}`, VILLAGE_NAMES[idx % VILLAGE_NAMES.length]);
+  });
+
   const cubes: Cube[] = [];
   for (let row = 0; row < GRID_SIZE; row++) {
     for (let col = 0; col < GRID_SIZE; col++) {
       const id = row * GRID_SIZE + col;
+      const key = `${row},${col}`;
       const isOwned =
         row >= START_OWNED_MIN_ROW && col >= START_OWNED_MIN_COL;
-      const isStartingHousesCube =
+      const isPalace =
+        row === STARTING_PALACE_ROW && col === STARTING_PALACE_COL;
+      const isStartingHouses =
         row === STARTING_HOUSES_ROW && col === STARTING_HOUSES_COL;
+      const villageName = !isOwned ? villageMap.get(key) ?? null : null;
 
       cubes.push({
         id,
         row,
         col,
         owner: isOwned ? 'player' : 'neutral',
-        themeId: isStartingHousesCube ? 'house' : null,
-        secondThemeId: isStartingHousesCube ? 'house' : null,
-        builtAt: isStartingHousesCube ? now : null,
-        secondBuiltAt: isStartingHousesCube ? now : null,
+        themeId: isPalace ? 'palace' : isStartingHouses ? 'house' : null,
+        secondThemeId: isStartingHouses ? 'house' : null,
+        builtAt: isPalace || isStartingHouses ? now : null,
+        secondBuiltAt: isStartingHouses ? now : null,
         progress: 0,
         secondProgress: 0,
         shortage: null,
         secondShortage: null,
+        isRocky: rockySet.has(key),
+        isVillage: villageName !== null,
+        villageName,
+        villageLoyaltyDays: 0,
       });
     }
   }
@@ -165,8 +192,11 @@ export function createFreshGameState(now = Date.now()): GameState {
     tickerMessage: STRINGS.bourse.defaultTicker,
     level: 1,
     objectives: createInitialObjectives(),
-    level2ModalOpen: false,
-    level2CompletedModalOpen: false,
+    villagesJoined: 0,
+    lastJoinedVillageCubeId: null,
+    lastJoinedVillageSeq: 0,
+    level2UnlockedNotice: false,
+    level2CompletedNotice: false,
     level2CompletedShown: false,
     muted: false,
     lastSavedAt: now,
@@ -207,8 +237,11 @@ export function hydrateGameState(saved: PersistedSaveData): GameState {
     tickerMessage: saved.tickerMessage || STRINGS.bourse.defaultTicker,
     level: saved.level === 2 ? 2 : 1,
     objectives: mergedObjectives,
-    level2ModalOpen: false,
-    level2CompletedModalOpen: false,
+    villagesJoined: saved.villagesJoined ?? 0,
+    lastJoinedVillageCubeId: null,
+    lastJoinedVillageSeq: 0,
+    level2UnlockedNotice: false,
+    level2CompletedNotice: false,
     level2CompletedShown: Boolean(saved.level2CompletedShown),
     muted: Boolean(saved.muted),
     lastSavedAt: saved.lastSavedAt,
@@ -225,10 +258,12 @@ function isObjectiveSatisfied(state: GameState, objectiveId: string): boolean {
       );
     case 'build_farm':
       return state.cubes.some(
-        (c) => c.owner === 'player' && c.themeId === 'farm'
+        (c) =>
+          c.owner === 'player' &&
+          (c.themeId === 'farm' || c.themeId === 'wheat_farm')
       );
     case 'hold_30_food':
-      // Strictly counts Fish + Crops + Meat + Bread (Water never counts as food)
+      // Strictly counts Fish + Crops + Wheat + Fruit + Meat + Bread (Water never counts)
       return getTotalFood(state.warehouse) >= LEVEL_1_FOOD_TARGET;
     case 'reach_60_satisfaction':
       return state.satisfaction >= LEVEL_1_SATISFACTION_TARGET;
@@ -249,8 +284,8 @@ function isObjectiveSatisfied(state: GameState, objectiveId: string): boolean {
 function evaluateObjectivesAndProgression(state: GameState): GameState {
   let gold = state.gold;
   let level = state.level;
-  let level2ModalOpen = state.level2ModalOpen;
-  let level2CompletedModalOpen = state.level2CompletedModalOpen;
+  let level2UnlockedNotice = state.level2UnlockedNotice;
+  let level2CompletedNotice = state.level2CompletedNotice;
   let level2CompletedShown = state.level2CompletedShown;
   let pendingAudioCue = state.pendingAudioCue;
   const newToasts: ToastItem[] = [];
@@ -279,27 +314,28 @@ function evaluateObjectivesAndProgression(state: GameState): GameState {
     return { ...obj, completed: true };
   });
 
-  // Check Level 1 completion -> unlock Level 2
+  // Never auto-open modals on state changes! Set clickable notice + toast instead.
   if (level === 1) {
     const level1AllDone = nextObjectives
       .filter((o) => o.level === 1)
       .every((o) => o.completed);
     if (level1AllDone) {
       level = 2;
-      level2ModalOpen = true;
+      level2UnlockedNotice = true;
+      newToasts.push(createToast(STRINGS.toasts.level2Unlocked, 'success'));
       audioCounter += 1;
       pendingAudioCue = { id: audioCounter, cue: 'levelUp' };
     }
   }
 
-  // Check Level 2 completion -> Level 3 coming soon modal
   if (level === 2 && !level2CompletedShown) {
     const level2AllDone = nextObjectives
       .filter((o) => o.level === 2)
       .every((o) => o.completed);
     if (level2AllDone) {
-      level2CompletedModalOpen = true;
+      level2CompletedNotice = true;
       level2CompletedShown = true;
+      newToasts.push(createToast(STRINGS.toasts.level2Completed, 'success'));
       audioCounter += 1;
       pendingAudioCue = { id: audioCounter, cue: 'levelUp' };
     }
@@ -310,8 +346,8 @@ function evaluateObjectivesAndProgression(state: GameState): GameState {
     gold,
     level,
     objectives: nextObjectives,
-    level2ModalOpen,
-    level2CompletedModalOpen,
+    level2UnlockedNotice,
+    level2CompletedNotice,
     level2CompletedShown,
     toasts: appendToasts(state.toasts, newToasts),
     pendingAudioCue,
@@ -330,8 +366,8 @@ export type GameAction =
       quantity: number | 'max';
     }
   | { type: 'DISMISS_TOAST'; id: string }
-  | { type: 'CLOSE_LEVEL2_MODAL' }
-  | { type: 'CLOSE_LEVEL2_COMPLETED_MODAL' }
+  | { type: 'CLEAR_LEVEL2_NOTICE' }
+  | { type: 'CLEAR_LEVEL2_COMPLETED_NOTICE' }
   | { type: 'TOGGLE_MUTE' }
   | { type: 'NEW_GAME' };
 
@@ -363,6 +399,9 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
       let nextDailyBought = state.dailyBought;
       let nextDailySold = state.dailySold;
       let nextTicker = state.tickerMessage;
+      let nextVillagesJoined = state.villagesJoined;
+      let lastJoinedVillageCubeId = state.lastJoinedVillageCubeId;
+      let lastJoinedVillageSeq = state.lastJoinedVillageSeq;
       const newToasts: ToastItem[] = [];
       let pendingAudioCue = state.pendingAudioCue;
 
@@ -403,7 +442,48 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         nextDailyBought = createEmptyTradeVolumes();
         nextDailySold = createEmptyTradeVolumes();
 
-        pendingAudioCue = makeCue('day');
+        // WP3 Independent Village Loyalty Check at Day Rollover
+        const now = Date.now();
+        let villageJoinedThisDay = false;
+        nextCubes = nextCubes.map((cube) => {
+          if (!cube.isVillage || cube.owner === 'player') return cube;
+          if (
+            isAdjacentToOwned(nextCubes, cube) &&
+            nextReputation >= VILLAGE_JOIN_MIN_REPUTATION
+          ) {
+            const nextDays = cube.villageLoyaltyDays + 1;
+            if (nextDays >= VILLAGE_JOIN_REQUIRED_DAYS) {
+              villageJoinedThisDay = true;
+              nextVillagesJoined += 1;
+              lastJoinedVillageCubeId = cube.id;
+              lastJoinedVillageSeq += 1;
+              const vName = cube.villageName ?? 'الواحة';
+              nextTicker = STRINGS.bourse.tickerVillageJoined(vName);
+              newToasts.push(
+                createToast(STRINGS.toasts.villageJoined(vName), 'success', cube.id)
+              );
+              return {
+                ...cube,
+                owner: 'player' as const,
+                isVillage: false,
+                villageLoyaltyDays: 0,
+                themeId: 'house' as const,
+                secondThemeId: 'house' as const,
+                builtAt: now,
+                secondBuiltAt: now,
+                progress: 0,
+                secondProgress: 0,
+              };
+            }
+            return { ...cube, villageLoyaltyDays: nextDays };
+          }
+          if (cube.villageLoyaltyDays !== 0) {
+            return { ...cube, villageLoyaltyDays: 0 };
+          }
+          return cube;
+        });
+
+        pendingAudioCue = makeCue(villageJoinedThisDay ? 'levelUp' : 'day');
       }
 
       const evalNeeds = computeNeedsAndSatisfaction(
@@ -430,6 +510,9 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         dailyBought: nextDailyBought,
         dailySold: nextDailySold,
         tickerMessage: nextTicker,
+        villagesJoined: nextVillagesJoined,
+        lastJoinedVillageCubeId,
+        lastJoinedVillageSeq,
         toasts: appendToasts(state.toasts, newToasts),
         pendingAudioCue,
       };
@@ -452,15 +535,37 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         };
       }
 
-      const check = canPlaceThemeOnCube(cube, action.themeId, state.level);
-      if (!check.valid || check.targetSlot === null) {
+      const matCheck = checkMaterialCosts(state.warehouse, action.themeId);
+      if (!matCheck.ok) {
         return {
           ...state,
           toasts: appendToasts(state.toasts, [
-            createToast(STRINGS.toasts.invalidPlacement, 'warning'),
+            createToast(STRINGS.toasts.notEnoughMaterials, 'warning'),
           ]),
           pendingAudioCue: makeCue('error'),
         };
+      }
+
+      const check = canPlaceThemeOnCube(cube, action.themeId, state.level);
+      if (!check.valid || check.targetSlot === null) {
+        const msg =
+          check.reason === 'rocky_required'
+            ? STRINGS.toasts.rockyRequired
+            : STRINGS.toasts.invalidPlacement;
+        return {
+          ...state,
+          toasts: appendToasts(state.toasts, [createToast(msg, 'warning')]),
+          pendingAudioCue: makeCue('error'),
+        };
+      }
+
+      const nextWarehouse = { ...state.warehouse };
+      if (theme.materialCosts) {
+        for (const [res, amt] of Object.entries(theme.materialCosts) as Array<
+          [TradedResourceKey, number]
+        >) {
+          nextWarehouse[res] = Math.max(0, (nextWarehouse[res] ?? 0) - amt);
+        }
       }
 
       const now = Date.now();
@@ -486,7 +591,7 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
 
       const evalNeeds = computeNeedsAndSatisfaction(
         nextCubes,
-        state.warehouse,
+        nextWarehouse,
         state.population,
         state.hungerFlag
       );
@@ -494,6 +599,7 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
       const updated: GameState = {
         ...state,
         cubes: nextCubes,
+        warehouse: nextWarehouse,
         gold: Math.max(0, state.gold - theme.cost),
         satisfaction: evalNeeds.satisfaction,
         needs: evalNeeds.needs,
@@ -506,11 +612,13 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
     case 'DEMOLISH_THEME': {
       const cube = state.cubes[action.cubeId];
       if (!cube || cube.owner !== 'player') return state;
+      if (action.slot === 0 && cube.themeId && THEMES[cube.themeId].nonDemolishable) {
+        return state;
+      }
 
       const nextCubes = state.cubes.map((c) => {
         if (c.id !== action.cubeId) return c;
         if (action.slot === 0) {
-          // If a second half theme exists, promote it cleanly into slot 0
           if (c.secondThemeId) {
             return {
               ...c,
@@ -559,7 +667,9 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
     case 'BUY_CUBE': {
       const cube = state.cubes[action.cubeId];
       if (!cube || !isPurchasableNeutralCube(state.cubes, cube)) return state;
-      if (state.gold < CUBE_PURCHASE_COST) {
+
+      const price = getCubePurchasePrice(state.cubes, cube);
+      if (state.gold < price) {
         return {
           ...state,
           toasts: appendToasts(state.toasts, [
@@ -576,7 +686,7 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
       const updated: GameState = {
         ...state,
         cubes: nextCubes,
-        gold: Math.max(0, state.gold - CUBE_PURCHASE_COST),
+        gold: Math.max(0, state.gold - price),
         toasts: appendToasts(state.toasts, [
           createToast(STRINGS.toasts.cubePurchased, 'success'),
         ]),
@@ -589,6 +699,7 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
     case 'TRADE_RESOURCE': {
       if (state.level < 2) return state;
       const result = executeTrade(
+        state.cubes,
         state.gold,
         state.warehouse,
         state.prices,
@@ -633,12 +744,12 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
       };
     }
 
-    case 'CLOSE_LEVEL2_MODAL': {
-      return { ...state, level2ModalOpen: false };
+    case 'CLEAR_LEVEL2_NOTICE': {
+      return { ...state, level2UnlockedNotice: false };
     }
 
-    case 'CLOSE_LEVEL2_COMPLETED_MODAL': {
-      return { ...state, level2CompletedModalOpen: false };
+    case 'CLEAR_LEVEL2_COMPLETED_NOTICE': {
+      return { ...state, level2CompletedNotice: false };
     }
 
     case 'TOGGLE_MUTE': {

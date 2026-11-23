@@ -2,15 +2,19 @@ import {
   BASE_BUY_PRICES,
   BOURSE_VOLUME_MODIFIER,
   BOURSE_VOLUME_THRESHOLD,
+  GRAND_MARKET_SELL_BONUS,
   LEVEL_1_PRICE_DRIFT_RANGE,
   LEVEL_2_PRICE_DRIFT_RANGE,
   MAX_BOURSE_PRICE_MULTIPLIER,
   MIN_BOURSE_PRICE,
   SELL_PRICE_RATIO,
+  TRADE_OFFICE_BUY_DISCOUNT,
   TRADED_RESOURCES,
 } from './constants';
+import { hasThemeBuilt } from './people';
 import { STRINGS } from './strings';
 import type {
+  Cube,
   PriceMap,
   PriceMoveSummary,
   TradedResourceKey,
@@ -18,8 +22,17 @@ import type {
   Warehouse,
 } from './types';
 
-export function getSellPrice(buyPrice: number): number {
-  return Math.max(0, Math.floor(buyPrice * SELL_PRICE_RATIO));
+export function getEffectiveBuyPrice(baseBuyPrice: number, cubes?: Cube[]): number {
+  const hasOffice = cubes ? hasThemeBuilt(cubes, 'trade_office') : false;
+  if (!hasOffice) return baseBuyPrice;
+  return Math.max(1, Math.round(baseBuyPrice * (1 - TRADE_OFFICE_BUY_DISCOUNT)));
+}
+
+export function getSellPrice(buyPrice: number, cubes?: Cube[]): number {
+  const hasGrandMarket = cubes ? hasThemeBuilt(cubes, 'grand_market') : false;
+  const baseSell = Math.floor(buyPrice * SELL_PRICE_RATIO);
+  if (!hasGrandMarket) return Math.max(0, baseSell);
+  return Math.max(1, Math.floor(buyPrice * SELL_PRICE_RATIO * (1 + GRAND_MARKET_SELL_BONUS)));
 }
 
 export function generateTickerForMove(move: PriceMoveSummary | null): string {
@@ -48,10 +61,9 @@ export function rolloverBoursePrices(
   dailySold: TradeVolumeMap,
   level: 1 | 2
 ): BourseRolloverResult {
-  const previousPrices: PriceMap = { ...currentPrices };
-  const nextPrices: PriceMap = { ...currentPrices };
+  const previousPrices: PriceMap = { ...BASE_BUY_PRICES, ...currentPrices };
+  const nextPrices: PriceMap = { ...BASE_BUY_PRICES, ...currentPrices };
 
-  // Level 1 safety rule: drift halved to [-0.07, +0.07] and NO flooding/surge modifiers.
   const driftRange =
     level === 1 ? LEVEL_1_PRICE_DRIFT_RANGE : LEVEL_2_PRICE_DRIFT_RANGE;
 
@@ -61,15 +73,15 @@ export function rolloverBoursePrices(
     let r = (Math.random() * 2 - 1) * driftRange;
 
     if (level >= 2) {
-      if (dailySold[resource] > BOURSE_VOLUME_THRESHOLD) {
+      if ((dailySold[resource] ?? 0) > BOURSE_VOLUME_THRESHOLD) {
         r -= BOURSE_VOLUME_MODIFIER;
       }
-      if (dailyBought[resource] > BOURSE_VOLUME_THRESHOLD) {
+      if ((dailyBought[resource] ?? 0) > BOURSE_VOLUME_THRESHOLD) {
         r += BOURSE_VOLUME_MODIFIER;
       }
     }
 
-    const prev = currentPrices[resource];
+    const prev = previousPrices[resource];
     const base = BASE_BUY_PRICES[resource];
     const maxPrice = base * MAX_BOURSE_PRICE_MULTIPLIER;
     const rawNext = Math.round(prev * (1 + r));
@@ -108,6 +120,7 @@ export interface TradeResult {
 }
 
 export function executeTrade(
+  cubes: Cube[],
   gold: number,
   warehouse: Warehouse,
   prices: PriceMap,
@@ -122,7 +135,7 @@ export function executeTrade(
   const nextSold: TradeVolumeMap = { ...dailySold };
 
   if (side === 'buy') {
-    const unitPrice = prices[resource];
+    const unitPrice = getEffectiveBuyPrice(prices[resource], cubes);
     const maxAffordable = unitPrice > 0 ? Math.floor(gold / unitPrice) : 0;
     const actualQty =
       quantity === 'max'
@@ -140,8 +153,8 @@ export function executeTrade(
     }
 
     const totalCost = actualQty * unitPrice;
-    nextWarehouse[resource] = nextWarehouse[resource] + actualQty;
-    nextBought[resource] = nextBought[resource] + actualQty;
+    nextWarehouse[resource] = (nextWarehouse[resource] ?? 0) + actualQty;
+    nextBought[resource] = (nextBought[resource] ?? 0) + actualQty;
 
     return {
       gold: Math.max(0, gold - totalCost),
@@ -153,8 +166,8 @@ export function executeTrade(
   }
 
   // Sell
-  const unitSellPrice = getSellPrice(prices[resource]);
-  const inStock = Math.max(0, warehouse[resource]);
+  const unitSellPrice = getSellPrice(prices[resource], cubes);
+  const inStock = Math.max(0, warehouse[resource] ?? 0);
   const actualQty =
     quantity === 'max' ? inStock : Math.max(0, Math.min(quantity, inStock));
 
@@ -168,8 +181,8 @@ export function executeTrade(
     };
   }
 
-  nextWarehouse[resource] = Math.max(0, nextWarehouse[resource] - actualQty);
-  nextSold[resource] = nextSold[resource] + actualQty;
+  nextWarehouse[resource] = Math.max(0, (nextWarehouse[resource] ?? 0) - actualQty);
+  nextSold[resource] = (nextSold[resource] ?? 0) + actualQty;
 
   return {
     gold: Math.max(0, gold + actualQty * unitSellPrice),

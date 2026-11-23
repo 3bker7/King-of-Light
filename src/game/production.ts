@@ -1,9 +1,18 @@
 import {
+  CUBE_DISTANCE_PRICE_STEP,
+  CUBE_PRICE_ROUND_STEP,
+  CUBE_PURCHASE_BASE_COST,
+  GRAND_MARKET_AURA_RANGE,
+  GRAND_MARKET_SHOP_BONUS,
   GRID_SIZE,
   SEA_ADJACENCY_BONUS_MAX,
   SEA_ADJACENCY_BONUS_STEP,
   SHOP_FOOD_PRIORITY,
+  STARTING_PALACE_COL,
+  STARTING_PALACE_ROW,
   THEMES,
+  WAREHOUSE_AURA_RANGE,
+  WAREHOUSE_GOLD_BONUS,
   WORKER_PRIORITY_ORDER,
 } from './constants';
 import { getTotalFood } from './people';
@@ -13,6 +22,7 @@ import type {
   SlotIndex,
   StaffingStatus,
   ThemeId,
+  TradedResourceKey,
   Warehouse,
 } from './types';
 
@@ -20,7 +30,6 @@ export function makeSlotKey(cubeId: number, slot: SlotIndex): string {
   return `${cubeId}:${slot}`;
 }
 
-// Strict orthogonal neighbors (up/down/left/right, no diagonals).
 export function getOrthogonalNeighbors(
   cubes: Cube[],
   row: number,
@@ -46,12 +55,38 @@ export function getOrthogonalNeighbors(
   return result;
 }
 
-// Unified orthogonal adjacency expansion rule (Level 1 and Level 2).
-export function isPurchasableNeutralCube(cubes: Cube[], cube: Cube): boolean {
-  if (cube.owner !== 'neutral') return false;
+export function isAdjacentToOwned(cubes: Cube[], cube: Cube): boolean {
   return getOrthogonalNeighbors(cubes, cube.row, cube.col).some(
     (neighbor) => neighbor.owner === 'player'
   );
+}
+
+// Neutral cells orthogonally adjacent to owned land (independent villages join free by loyalty, not bought)
+export function isPurchasableNeutralCube(cubes: Cube[], cube: Cube): boolean {
+  if (cube.owner !== 'player' && !cube.isVillage) {
+    return isAdjacentToOwned(cubes, cube);
+  }
+  return false;
+}
+
+export function findPalaceCube(cubes: Cube[]): Cube | null {
+  const palace = cubes.find((c) => c.owner === 'player' && c.themeId === 'palace');
+  if (palace) return palace;
+  return cubes[STARTING_PALACE_ROW * GRID_SIZE + STARTING_PALACE_COL] ?? null;
+}
+
+export function getManhattanDistanceToPalace(cubes: Cube[], cube: Cube): number {
+  const palace = findPalaceCube(cubes);
+  if (!palace) return 1;
+  return Math.abs(cube.row - palace.row) + Math.abs(cube.col - palace.col);
+}
+
+// WP3 exact distance pricing formula:
+// 30 * (1 + 0.15 * manhattanDistance(cell, palaceCell)), rounded to nearest 5.
+export function getCubePurchasePrice(cubes: Cube[], cube: Cube): number {
+  const dist = getManhattanDistanceToPalace(cubes, cube);
+  const raw = CUBE_PURCHASE_BASE_COST * (1 + CUBE_DISTANCE_PRICE_STEP * dist);
+  return Math.round(raw / CUBE_PRICE_ROUND_STEP) * CUBE_PRICE_ROUND_STEP;
 }
 
 export function countAdjacentSeas(cubes: Cube[], cube: Cube): number {
@@ -78,24 +113,76 @@ export function getSeaFishOutput(cubes: Cube[], cube: Cube): {
   };
 }
 
+// Logistics & Grand Market auras for Shops and Restaurants
+export function getGoldServiceAuraBonus(
+  cubes: Cube[],
+  cube: Cube,
+  themeId: ThemeId
+): number {
+  let bonus = 0;
+  if (themeId === 'shop' || themeId === 'restaurant') {
+    const hasNearbyWarehouse = cubes.some(
+      (other) =>
+        other.owner === 'player' &&
+        other.themeId === 'warehouse_bldg' &&
+        Math.max(Math.abs(other.row - cube.row), Math.abs(other.col - cube.col)) <=
+          WAREHOUSE_AURA_RANGE
+    );
+    if (hasNearbyWarehouse) bonus += WAREHOUSE_GOLD_BONUS;
+  }
+
+  if (themeId === 'shop') {
+    const hasNearbyGrandMarket = cubes.some(
+      (other) =>
+        other.owner === 'player' &&
+        other.themeId === 'grand_market' &&
+        Math.max(Math.abs(other.row - cube.row), Math.abs(other.col - cube.col)) <=
+          GRAND_MARKET_AURA_RANGE
+    );
+    if (hasNearbyGrandMarket) bonus += GRAND_MARKET_SHOP_BONUS;
+  }
+
+  return bonus;
+}
+
+export function checkMaterialCosts(
+  warehouse: Warehouse,
+  themeId: ThemeId
+): { ok: boolean; missing: Array<{ resource: TradedResourceKey; needed: number; have: number }> } {
+  const costs = THEMES[themeId].materialCosts;
+  if (!costs) return { ok: true, missing: [] };
+
+  const missing: Array<{ resource: TradedResourceKey; needed: number; have: number }> = [];
+  for (const [res, amt] of Object.entries(costs) as Array<[TradedResourceKey, number]>) {
+    const have = warehouse[res] ?? 0;
+    if (have < amt) {
+      missing.push({ resource: res, needed: amt, have });
+    }
+  }
+  return { ok: missing.length === 0, missing };
+}
+
 export function canPlaceThemeOnCube(
   cube: Cube,
   themeId: ThemeId,
   level: 1 | 2
-): { valid: boolean; targetSlot: SlotIndex | null } {
+): { valid: boolean; targetSlot: SlotIndex | null; reason?: 'rocky_required' | 'invalid' } {
   if (cube.owner !== 'player') {
-    return { valid: false, targetSlot: null };
+    return { valid: false, targetSlot: null, reason: 'invalid' };
   }
   const theme = THEMES[themeId];
-  if (theme.unlockLevel > level) {
-    return { valid: false, targetSlot: null };
+  if (theme.unlockLevel > level || themeId === 'palace') {
+    return { valid: false, targetSlot: null, reason: 'invalid' };
+  }
+  if (theme.rockyOnly && !cube.isRocky) {
+    return { valid: false, targetSlot: null, reason: 'rocky_required' };
   }
 
   if (theme.footprint === 'full') {
     if (cube.themeId === null && cube.secondThemeId === null) {
       return { valid: true, targetSlot: 0 };
     }
-    return { valid: false, targetSlot: null };
+    return { valid: false, targetSlot: null, reason: 'invalid' };
   }
 
   // Half-size theme
@@ -105,7 +192,7 @@ export function canPlaceThemeOnCube(
   if (THEMES[cube.themeId].footprint === 'half' && cube.secondThemeId === null) {
     return { valid: true, targetSlot: 1 };
   }
-  return { valid: false, targetSlot: null };
+  return { valid: false, targetSlot: null, reason: 'invalid' };
 }
 
 interface WorkerCandidate {
@@ -150,7 +237,6 @@ export function computeStaffing(cubes: Cube[], population: number): StaffingStat
     }
   }
 
-  // Strict staffing priority order: Well, Farm, Sea, Pasture, Forest, Shop
   candidates.sort((a, b) => {
     if (a.priorityIndex !== b.priorityIndex) return a.priorityIndex - b.priorityIndex;
     if (a.builtAt !== b.builtAt) return a.builtAt - b.builtAt;
@@ -176,6 +262,45 @@ export function computeStaffing(cubes: Cube[], population: number): StaffingStat
   };
 }
 
+function getShortageForTheme(themeId: ThemeId): ShortageReason {
+  switch (themeId) {
+    case 'farm':
+    case 'wheat_farm':
+    case 'cafe':
+      return 'no_water';
+    case 'pasture':
+      return 'no_crops';
+    case 'bakery':
+      return 'no_wheat';
+    case 'restaurant':
+      return 'no_bread_meat';
+    case 'workshop':
+      return 'no_iron_wood';
+    case 'jeweler':
+      return 'no_gold_gem';
+    case 'shop':
+      return 'no_surplus_food';
+    default:
+      return null;
+  }
+}
+
+function hasInputsForTheme(
+  themeId: ThemeId,
+  warehouse: Warehouse,
+  population: number
+): boolean {
+  if (themeId === 'shop') {
+    return (
+      getTotalFood(warehouse) > population &&
+      SHOP_FOOD_PRIORITY.some((k) => (warehouse[k] ?? 0) >= 1)
+    );
+  }
+  const inputs = THEMES[themeId].inputs;
+  if (!inputs || inputs.length === 0) return true;
+  return inputs.every((inp) => (warehouse[inp.resource] ?? 0) >= inp.amount);
+}
+
 export function resolveCycleOutput(
   themeId: ThemeId,
   cube: Cube,
@@ -186,48 +311,50 @@ export function resolveCycleOutput(
 ): { gold: number; shortage: ShortageReason } {
   const def = THEMES[themeId];
   let nextGold = gold;
-  let shortage: ShortageReason = null;
 
   if (themeId === 'sea') {
     const seaOut = getSeaFishOutput(allCubes, cube);
     warehouse.fish += seaOut.amount;
-  } else if (themeId === 'well') {
-    warehouse.water += def.outputAmount ?? 3;
-  } else if (themeId === 'forest') {
-    warehouse.wood += def.outputAmount ?? 2;
-  } else if (themeId === 'farm') {
-    const waterCost = def.inputAmount ?? 1;
-    if (warehouse.water >= waterCost) {
-      warehouse.water = Math.max(0, warehouse.water - waterCost);
-      warehouse.crops += def.outputAmount ?? 3;
-    } else {
-      shortage = 'no_water';
-    }
-  } else if (themeId === 'pasture') {
-    const cropsCost = def.inputAmount ?? 1;
-    if (warehouse.crops >= cropsCost) {
-      warehouse.crops = Math.max(0, warehouse.crops - cropsCost);
-      warehouse.meat += def.outputAmount ?? 2;
-    } else {
-      shortage = 'no_crops';
-    }
-  } else if (themeId === 'shop') {
-    // Converts 1 unit of surplus food (above daily population need) in Fish -> Crops -> Meat order.
+    return { gold: nextGold, shortage: null };
+  }
+
+  if (themeId === 'shop') {
     const totalFood = getTotalFood(warehouse);
     if (totalFood > population) {
-      const targetFood = SHOP_FOOD_PRIORITY.find((key) => warehouse[key] >= 1);
+      const targetFood = SHOP_FOOD_PRIORITY.find((key) => (warehouse[key] ?? 0) >= 1);
       if (targetFood) {
         warehouse[targetFood] = Math.max(0, warehouse[targetFood] - 1);
-        nextGold += def.shopGoldPerCycle ?? 4;
-      } else {
-        shortage = 'no_surplus_food';
+        const auraBonus = getGoldServiceAuraBonus(allCubes, cube, 'shop');
+        const gain = Math.round((def.goldPerCycle ?? 4) * (1 + auraBonus));
+        nextGold += gain;
+        return { gold: nextGold, shortage: null };
       }
-    } else {
-      shortage = 'no_surplus_food';
+    }
+    return { gold: nextGold, shortage: 'no_surplus_food' };
+  }
+
+  // Check required inputs
+  if (def.inputs && def.inputs.length > 0) {
+    const canPay = def.inputs.every((inp) => (warehouse[inp.resource] ?? 0) >= inp.amount);
+    if (!canPay) {
+      return { gold: nextGold, shortage: getShortageForTheme(themeId) };
+    }
+    for (const inp of def.inputs) {
+      warehouse[inp.resource] = Math.max(0, (warehouse[inp.resource] ?? 0) - inp.amount);
     }
   }
 
-  return { gold: nextGold, shortage };
+  if (def.outputResource && def.outputAmount) {
+    warehouse[def.outputResource] = (warehouse[def.outputResource] ?? 0) + def.outputAmount;
+  }
+
+  if (def.goldPerCycle) {
+    const auraBonus = getGoldServiceAuraBonus(allCubes, cube, themeId);
+    const gain = Math.round(def.goldPerCycle * (1 + auraBonus));
+    nextGold += gain;
+  }
+
+  return { gold: nextGold, shortage: null };
 }
 
 export interface ProductionTickResult {
@@ -256,7 +383,6 @@ export function advanceProductionTick(
     let secondShortage = cube.secondShortage;
     let mutated = false;
 
-    // Slot 0
     if (cube.themeId) {
       const def = THEMES[cube.themeId];
       if (def.cycleSeconds !== null) {
@@ -276,19 +402,13 @@ export function advanceProductionTick(
             );
             nextGold = res.gold;
             shortage = res.shortage;
-          } else {
-            // Clear stale shortage badge immediately if resources have become available
-            if (shortage === 'no_water' && nextWarehouse.water >= 1) shortage = null;
-            if (shortage === 'no_crops' && nextWarehouse.crops >= 1) shortage = null;
-            if (shortage === 'no_surplus_food' && getTotalFood(nextWarehouse) > population) {
-              shortage = null;
-            }
+          } else if (shortage && hasInputsForTheme(cube.themeId, nextWarehouse, population)) {
+            shortage = null;
           }
         }
       }
     }
 
-    // Slot 1 (second half-size theme)
     if (cube.secondThemeId) {
       const def = THEMES[cube.secondThemeId];
       if (def.cycleSeconds !== null) {
@@ -308,19 +428,11 @@ export function advanceProductionTick(
             );
             nextGold = res.gold;
             secondShortage = res.shortage;
-          } else {
-            if (secondShortage === 'no_water' && nextWarehouse.water >= 1) {
-              secondShortage = null;
-            }
-            if (secondShortage === 'no_crops' && nextWarehouse.crops >= 1) {
-              secondShortage = null;
-            }
-            if (
-              secondShortage === 'no_surplus_food' &&
-              getTotalFood(nextWarehouse) > population
-            ) {
-              secondShortage = null;
-            }
+          } else if (
+            secondShortage &&
+            hasInputsForTheme(cube.secondThemeId, nextWarehouse, population)
+          ) {
+            secondShortage = null;
           }
         }
       }
