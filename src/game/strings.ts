@@ -220,6 +220,15 @@ export const STRINGS = {
     inspectorButton: 'التفاصيل والأهداف',
     bourseButton: 'البورصة',
   },
+
+  world3d: {
+    recenterMap: 'العودة لأرضي',
+    zoomIn: 'تقريب',
+    zoomOut: 'تبعيد',
+    webglFallbackTitle: 'تعذر تشغيل العرض ثلاثي الأبعاد',
+    webglFallbackBody:
+      'يبدو أن متصفحك لا يدعم WebGL حالياً. لا يزال بإمكانك متابعة حالة مملكتك والأهداف والبورصة من القوائم الجانبية.',
+  },
 };
 
 export function formatClock(totalSeconds: number): string {

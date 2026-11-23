@@ -3,7 +3,6 @@ import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { AwayReport } from './components/AwayReport';
 import { BuildDock } from './components/BuildDock';
 import { Inspector } from './components/Inspector';
-import { WorldMap } from './components/Map';
 import {
   BourseModal,
   Level2CelebrationModal,
@@ -13,6 +12,7 @@ import {
 import { Ticker } from './components/Ticker';
 import { Toasts } from './components/Toasts';
 import { TopBar } from './components/TopBar';
+import { WorldCanvas } from './components/WorldCanvas';
 import { playAudioCue } from './game/audio';
 import { SAVE_THROTTLE_MS, THEMES, TICK_MS } from './game/constants';
 import {
@@ -69,6 +69,7 @@ export default function App() {
   const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
   const [bourseModalOpen, setBourseModalOpen] = useState(false);
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+  const [resetSignal, setResetSignal] = useState(0);
 
   const latestStateRef = useRef(state);
   latestStateRef.current = state;
@@ -194,6 +195,7 @@ export default function App() {
     setMobileInspectorOpen(false);
     setAwayReport(null);
     dispatch({ type: 'NEW_GAME' });
+    setResetSignal((n) => n + 1);
   };
 
   return (
@@ -228,13 +230,14 @@ export default function App() {
           />
         </div>
 
-        {/* Center World Map */}
-        <WorldMap
+        {/* Center 3D Isometric RTS World Canvas */}
+        <WorldCanvas
           cubes={state.cubes}
           level={state.level}
           selectedCubeId={selectedCubeId}
           activeBuildTheme={activeBuildTheme}
           staffedSlots={staffing.staffedSlots}
+          resetSignal={resetSignal}
           onCubeClick={handleCubeClick}
           onCancelBuild={() => setActiveBuildTheme(null)}
         />
