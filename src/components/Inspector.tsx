@@ -3,7 +3,11 @@ import {
   Check,
   Clock,
   Coins,
+  Crown,
+  Hammer,
+  Home,
   MapPin,
+  Mountain,
   Star,
   Store,
   Trash2,
@@ -12,16 +16,22 @@ import {
   X,
 } from 'lucide-react';
 import {
-  CUBE_PURCHASE_COST,
+  MATERIAL_PRODUCER_THEME,
   THEMES,
   TICKS_PER_DAY,
+  VILLAGE_JOIN_MIN_REPUTATION,
+  VILLAGE_JOIN_REQUIRED_DAYS,
 } from '../game/constants';
 import {
   getEntertainmentBreakdown,
   getHouseCapacity,
 } from '../game/people';
 import {
+  getCubePurchasePrice,
+  getGoldServiceAuraBonus,
+  getManhattanDistanceToPalace,
   getSeaFishOutput,
+  isAdjacentToOwned,
   isPurchasableNeutralCube,
   makeSlotKey,
 } from '../game/production';
@@ -48,6 +58,7 @@ interface InspectorProps {
   onClearSelection: () => void;
   onBuyCube: (cubeId: number) => void;
   onDemolishTheme: (cubeId: number, slot: SlotIndex) => void;
+  onFixHint?: (themeId: ThemeId) => void;
   onTrade: (
     resource: TradedResourceKey,
     side: 'buy' | 'sell',
@@ -61,6 +72,27 @@ function getBarColorClass(value: number): string {
   if (value >= 60) return 'bg-[#3E9B4F]';
   if (value >= 35) return 'bg-[#E8A33D]';
   return 'bg-[#C44536]';
+}
+
+function getShortageResource(
+  shortage: Exclude<ShortageReason, null>
+): TradedResourceKey | null {
+  switch (shortage) {
+    case 'no_water':
+      return 'water';
+    case 'no_crops':
+      return 'crops';
+    case 'no_wheat':
+      return 'wheat';
+    case 'no_bread_meat':
+      return 'bread';
+    case 'no_iron_wood':
+      return 'iron';
+    case 'no_gold_gem':
+      return 'goldOre';
+    case 'no_surplus_food':
+      return 'crops';
+  }
 }
 
 function MeterBar({ label, value }: { label: string; value: number }) {
@@ -93,6 +125,7 @@ interface SlotCardProps {
   shortage: ShortageReason;
   isStaffed: boolean;
   onDemolish: () => void;
+  onFixHint?: (themeId: ThemeId) => void;
 }
 
 function SlotCard({
@@ -104,6 +137,7 @@ function SlotCard({
   shortage,
   isStaffed,
   onDemolish,
+  onFixHint,
 }: SlotCardProps) {
   const def = THEMES[themeId];
   const produces = def.cycleSeconds !== null;
@@ -116,6 +150,13 @@ function SlotCard({
   const unstaffed = def.workers > 0 && !isStaffed;
 
   const seaStats = themeId === 'sea' ? getSeaFishOutput(allCubes, cube) : null;
+  const auraBonus =
+    def.goldPerCycle !== undefined
+      ? getGoldServiceAuraBonus(allCubes, cube, themeId)
+      : 0;
+
+  const missingRes = shortage ? getShortageResource(shortage) : null;
+  const producerTheme = missingRes ? MATERIAL_PRODUCER_THEME[missingRes] : undefined;
 
   return (
     <div className="p-2.5 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] space-y-2">
@@ -175,8 +216,18 @@ function SlotCard({
           <div>{STRINGS.inspector.houseCapacityLabel(def.shelters)}</div>
         )}
 
-        {themeId === 'shop' && def.shopGoldPerCycle && (
-          <div>{STRINGS.inspector.shopOutputPerCycle(def.shopGoldPerCycle)}</div>
+        {themeId === 'shop' && def.goldPerCycle && (
+          <div>{STRINGS.inspector.shopOutputPerCycle(def.goldPerCycle)}</div>
+        )}
+
+        {themeId !== 'shop' && def.goldPerCycle && (
+          <div>{STRINGS.inspector.goldOutputPerCycle(def.goldPerCycle)}</div>
+        )}
+
+        {auraBonus > 0 && (
+          <div className="text-[11px] font-bold text-[#14524A] mt-0.5">
+            {STRINGS.inspector.logisticsBonusNote(Math.round(auraBonus * 100))}
+          </div>
         )}
       </div>
 
@@ -188,11 +239,27 @@ function SlotCard({
         </div>
       )}
 
-      {/* Missing input shortage diagnostic */}
+      {/* Missing input shortage diagnostic + quick producer hint */}
       {!unstaffed && shortage && (
-        <div className="flex items-start gap-1.5 p-2 rounded-lg bg-[#FBE2DF] border border-[#E5ABA3] text-[11px] font-bold text-[#8E2A1F]">
-          <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-          <span>{STRINGS.inspector.shortages[shortage]}</span>
+        <div className="p-2 rounded-lg bg-[#FBE2DF] border border-[#E5ABA3] text-[11px] font-bold text-[#8E2A1F] space-y-1.5">
+          <div className="flex items-start gap-1.5">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+            <span>{STRINGS.inspector.shortages[shortage]}</span>
+          </div>
+          {producerTheme && onFixHint && (
+            <button
+              type="button"
+              onClick={() => onFixHint(producerTheme)}
+              className="w-full py-1 px-2 rounded-lg bg-[#14524A] hover:bg-[#1B685E] text-white text-[11px] font-extrabold flex items-center justify-center gap-1 transition-colors"
+            >
+              <Hammer className="w-3 h-3" />
+              <span>
+                {STRINGS.buildDock.selectProducer(
+                  STRINGS.themes[producerTheme].name
+                )}
+              </span>
+            </button>
+          )}
         </div>
       )}
 
@@ -216,15 +283,17 @@ function SlotCard({
         </div>
       )}
 
-      {/* Demolish button */}
-      <button
-        type="button"
-        onClick={onDemolish}
-        className="w-full flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-xl border border-[#DFB9B3] bg-[#FBF0EE] hover:bg-[#F5DDD9] text-[#A83629] text-xs font-extrabold transition-colors"
-      >
-        <Trash2 className="w-3.5 h-3.5" />
-        <span>{STRINGS.inspector.demolish}</span>
-      </button>
+      {/* Demolish button (hidden for non-demolishable landmarks) */}
+      {!def.nonDemolishable && (
+        <button
+          type="button"
+          onClick={onDemolish}
+          className="w-full flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-xl border border-[#DFB9B3] bg-[#FBF0EE] hover:bg-[#F5DDD9] text-[#A83629] text-xs font-extrabold transition-colors"
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+          <span>{STRINGS.inspector.demolish}</span>
+        </button>
+      )}
     </div>
   );
 }
@@ -238,6 +307,7 @@ export function Inspector({
   onClearSelection,
   onBuyCube,
   onDemolishTheme,
+  onFixHint,
   onTrade,
   mobileOpen,
   onCloseMobile,
@@ -245,6 +315,164 @@ export function Inspector({
   const capacity = getHouseCapacity(state.cubes);
   const ent = getEntertainmentBreakdown(state.cubes, state.warehouse);
   const secondsLeftInDay = Math.max(0, TICKS_PER_DAY - state.tickInDay);
+  const ownedCount = state.cubes.filter((c) => c.owner === 'player').length;
+
+  const renderNeutralCube = (cube: Cube) => {
+    if (cube.isVillage) {
+      const adjacent = isAdjacentToOwned(state.cubes, cube);
+      const repReady = state.reputation >= VILLAGE_JOIN_MIN_REPUTATION;
+      const pct = Math.min(
+        100,
+        Math.round((cube.villageLoyaltyDays / VILLAGE_JOIN_REQUIRED_DAYS) * 100)
+      );
+
+      return (
+        <div className="p-3 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] space-y-2.5">
+          <div className="flex items-center gap-2 text-[#2B2118]">
+            <div className="w-8 h-8 rounded-lg bg-[#C9962E]/20 text-[#8A5F12] flex items-center justify-center shrink-0">
+              <Home className="w-4 h-4" />
+            </div>
+            <div className="text-sm font-extrabold">
+              {STRINGS.inspector.villageTitle(cube.villageName ?? 'الواحة')}
+            </div>
+          </div>
+
+          <p className="text-xs text-[#6F5C43] leading-relaxed">
+            {STRINGS.inspector.villageDesc}
+          </p>
+
+          <div className="space-y-1">
+            <div className="text-[11px] font-extrabold text-[#14524A]">
+              {STRINGS.inspector.villageProgress(
+                cube.villageLoyaltyDays,
+                VILLAGE_JOIN_REQUIRED_DAYS
+              )}
+            </div>
+            <div className="w-full h-2 rounded-full bg-[#E5D5B2] overflow-hidden">
+              <div
+                className="h-full rounded-full bg-[#3E9B4F] transition-[width] duration-300"
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+          </div>
+
+          {!adjacent && (
+            <p className="text-[11px] font-bold text-[#8A5F12] bg-[#F8E7C1] border border-[#E2BA64] rounded-lg p-2">
+              {STRINGS.inspector.villageNeedAdjacent}
+            </p>
+          )}
+          {!repReady && (
+            <p className="text-[11px] font-bold text-[#8A5F12] bg-[#F8E7C1] border border-[#E2BA64] rounded-lg p-2">
+              {STRINGS.inspector.villageNeedRep}
+            </p>
+          )}
+        </div>
+      );
+    }
+
+    const purchasable = isPurchasableNeutralCube(state.cubes, cube);
+    const cubePrice = getCubePurchasePrice(state.cubes, cube);
+    const dist = getManhattanDistanceToPalace(state.cubes, cube);
+
+    return (
+      <div className="p-3 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] space-y-2.5">
+        <div className="text-sm font-extrabold text-[#2B2118]">
+          {STRINGS.inspector.neutralSand}
+        </div>
+        {cube.isRocky && (
+          <div className="flex items-center gap-1.5 p-2 rounded-lg bg-[#EFE4CC] border border-[#D4C29A] text-[11px] font-extrabold text-[#4F3F2B]">
+            <Mountain className="w-3.5 h-3.5 text-[#6F5C43] shrink-0" />
+            <span>{STRINGS.inspector.rockyBadge}</span>
+          </div>
+        )}
+        {purchasable ? (
+          <>
+            <p className="text-xs text-[#6F5C43] leading-relaxed">
+              {STRINGS.inspector.neutralAdjacentHint}
+            </p>
+            <button
+              type="button"
+              disabled={state.gold < cubePrice}
+              onClick={() => onBuyCube(cube.id)}
+              className="w-full py-2 px-3 rounded-xl bg-[#14524A] hover:bg-[#1B685E] disabled:opacity-45 text-white text-xs font-extrabold flex items-center justify-center gap-1.5 transition-colors"
+            >
+              <Coins className="w-3.5 h-3.5 text-[#F2CA6B]" />
+              <span>{STRINGS.inspector.buyCubeAction(cubePrice)}</span>
+            </button>
+            <p className="text-[11px] text-[#6F5C43] leading-relaxed">
+              {STRINGS.inspector.distancePriceNote(dist)}
+            </p>
+            {state.gold < cubePrice && (
+              <p className="text-[11px] font-bold text-[#A83629] text-center">
+                {STRINGS.inspector.notEnoughGold}
+              </p>
+            )}
+          </>
+        ) : (
+          <p className="text-xs text-[#6F5C43] leading-relaxed">
+            {STRINGS.inspector.neutralFarHint}
+          </p>
+        )}
+      </div>
+    );
+  };
+
+  const renderPalacePanel = () => (
+    <div className="p-3 rounded-xl bg-[#FDF8EC] border border-[#C9962E] space-y-2.5">
+      <div className="flex items-center gap-2">
+        <div className="w-9 h-9 rounded-lg bg-[#C9962E]/20 text-[#8A5F12] flex items-center justify-center shrink-0">
+          <Crown className="w-5 h-5" />
+        </div>
+        <div>
+          <div className="text-sm font-extrabold text-[#2B2118]">
+            {STRINGS.inspector.palaceTitle}
+          </div>
+          <div className="text-[11px] font-bold text-[#6F5C43]">
+            {STRINGS.themes.palace.summary}
+          </div>
+        </div>
+      </div>
+
+      <div className="space-y-1.5 pt-2 border-t border-[#EFE3C5] text-xs">
+        <div className="flex items-center justify-between">
+          <span className="text-[#6F5C43] font-bold">
+            {STRINGS.inspector.palaceTerritory}
+          </span>
+          <span className="font-extrabold text-[#2B2118] tabular-nums-latin">
+            {ownedCount} {STRINGS.inspector.palaceCubesUnit}
+          </span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-[#6F5C43] font-bold">
+            {STRINGS.populationLabel}
+          </span>
+          <span className="font-extrabold text-[#2B2118] tabular-nums-latin">
+            {state.population}
+          </span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-[#6F5C43] font-bold">
+            {STRINGS.reputationLabel}
+          </span>
+          <span className="font-extrabold text-[#2B2118] tabular-nums-latin">
+            {Math.round(state.reputation)} / 100
+          </span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-[#6F5C43] font-bold">
+            {STRINGS.inspector.palaceVillagesJoined}
+          </span>
+          <span className="font-extrabold text-[#2B2118] tabular-nums-latin">
+            {state.villagesJoined}
+          </span>
+        </div>
+      </div>
+
+      <p className="text-[11px] font-bold text-[#8A5F12] pt-1.5 border-t border-[#EFE3C5]">
+        {STRINGS.inspector.palaceNonDemolishable}
+      </p>
+    </div>
+  );
 
   const renderContent = () => (
     <div className="flex-1 overflow-y-auto parchment-scroll space-y-3.5 pl-0.5">
@@ -301,47 +529,24 @@ export function Inspector({
           </div>
 
           {selectedCube.owner === 'neutral' ? (
-            <div className="p-3 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] space-y-2.5">
-              <div className="text-sm font-extrabold text-[#2B2118]">
-                {STRINGS.inspector.neutralSand}
-              </div>
-              {isPurchasableNeutralCube(state.cubes, selectedCube) ? (
-                <>
-                  <p className="text-xs text-[#6F5C43] leading-relaxed">
-                    {STRINGS.inspector.neutralAdjacentHint}
-                  </p>
-                  <button
-                    type="button"
-                    disabled={state.gold < CUBE_PURCHASE_COST}
-                    onClick={() => onBuyCube(selectedCube.id)}
-                    className="w-full py-2 px-3 rounded-xl bg-[#14524A] hover:bg-[#1B685E] disabled:opacity-45 text-white text-xs font-extrabold flex items-center justify-center gap-1.5 transition-colors"
-                  >
-                    <Coins className="w-3.5 h-3.5 text-[#F2CA6B]" />
-                    <span>
-                      {STRINGS.inspector.buyCubeAction(CUBE_PURCHASE_COST)}
-                    </span>
-                  </button>
-                  {state.gold < CUBE_PURCHASE_COST && (
-                    <p className="text-[11px] font-bold text-[#A83629] text-center">
-                      {STRINGS.inspector.notEnoughGold}
-                    </p>
-                  )}
-                </>
-              ) : (
-                <p className="text-xs text-[#6F5C43] leading-relaxed">
-                  {STRINGS.inspector.neutralFarHint}
-                </p>
-              )}
-            </div>
+            renderNeutralCube(selectedCube)
           ) : !selectedCube.themeId ? (
-            <div className="p-3 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] space-y-1.5">
+            <div className="p-3 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] space-y-2">
               <div className="text-sm font-extrabold text-[#2B2118]">
                 {STRINGS.inspector.ownedSand}
               </div>
+              {selectedCube.isRocky && (
+                <div className="flex items-center gap-1.5 p-2 rounded-lg bg-[#EFE4CC] border border-[#D4C29A] text-[11px] font-extrabold text-[#4F3F2B]">
+                  <Mountain className="w-3.5 h-3.5 text-[#6F5C43] shrink-0" />
+                  <span>{STRINGS.inspector.rockyBadge}</span>
+                </div>
+              )}
               <p className="text-xs text-[#6F5C43] leading-relaxed">
                 {STRINGS.inspector.ownedSandHint}
               </p>
             </div>
+          ) : selectedCube.themeId === 'palace' ? (
+            renderPalacePanel()
           ) : THEMES[selectedCube.themeId].footprint === 'full' ? (
             <SlotCard
               cube={selectedCube}
@@ -354,6 +559,7 @@ export function Inspector({
                 makeSlotKey(selectedCube.id, 0)
               )}
               onDemolish={() => onDemolishTheme(selectedCube.id, 0)}
+              onFixHint={onFixHint}
             />
           ) : (
             <div className="space-y-2.5">
@@ -369,6 +575,7 @@ export function Inspector({
                   makeSlotKey(selectedCube.id, 0)
                 )}
                 onDemolish={() => onDemolishTheme(selectedCube.id, 0)}
+                onFixHint={onFixHint}
               />
               {selectedCube.secondThemeId ? (
                 <SlotCard
@@ -383,6 +590,7 @@ export function Inspector({
                     makeSlotKey(selectedCube.id, 1)
                   )}
                   onDemolish={() => onDemolishTheme(selectedCube.id, 1)}
+                  onFixHint={onFixHint}
                 />
               ) : (
                 <div className="p-2.5 rounded-xl bg-[#F5EAD0] border border-dashed border-[#D3BE8F] text-[11px] font-bold text-[#6F5C43]">
@@ -458,36 +666,26 @@ export function Inspector({
 
               {/* Entertainment breakdown */}
               <div className="pt-1.5 border-t border-[#EFE3C5] space-y-1 text-[11px] text-[#6F5C43]">
-                <div className="flex items-center gap-1.5">
-                  <Check
-                    className={`w-3 h-3 ${
-                      ent.seaAdjacent ? 'text-[#3E9B4F]' : 'text-[#CBBBA0]'
-                    }`}
-                  />
-                  <span className={ent.seaAdjacent ? 'text-[#2B2118] font-bold' : ''}>
-                    {STRINGS.people.entertainmentSea}
-                  </span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <Check
-                    className={`w-3 h-3 ${
-                      ent.shopExists ? 'text-[#3E9B4F]' : 'text-[#CBBBA0]'
-                    }`}
-                  />
-                  <span className={ent.shopExists ? 'text-[#2B2118] font-bold' : ''}>
-                    {STRINGS.people.entertainmentShop}
-                  </span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <Check
-                    className={`w-3 h-3 ${
-                      ent.foodVariety ? 'text-[#3E9B4F]' : 'text-[#CBBBA0]'
-                    }`}
-                  />
-                  <span className={ent.foodVariety ? 'text-[#2B2118] font-bold' : ''}>
-                    {STRINGS.people.entertainmentVariety}
-                  </span>
-                </div>
+                {[
+                  { active: ent.seaAdjacent, label: STRINGS.people.entertainmentSea },
+                  { active: ent.shopOrMarket, label: STRINGS.people.entertainmentShop },
+                  { active: ent.theater, label: STRINGS.people.entertainmentTheater },
+                  { active: ent.mosque, label: STRINGS.people.entertainmentMosque },
+                  { active: ent.foodVariety, label: STRINGS.people.entertainmentVariety },
+                  { active: ent.cafe, label: STRINGS.people.entertainmentCafe },
+                  { active: ent.restaurant, label: STRINGS.people.entertainmentRestaurant },
+                ].map((row) => (
+                  <div key={row.label} className="flex items-center gap-1.5">
+                    <Check
+                      className={`w-3 h-3 shrink-0 ${
+                        row.active ? 'text-[#3E9B4F]' : 'text-[#CBBBA0]'
+                      }`}
+                    />
+                    <span className={row.active ? 'text-[#2B2118] font-bold' : ''}>
+                      {row.label}
+                    </span>
+                  </div>
+                ))}
               </div>
             </div>
 

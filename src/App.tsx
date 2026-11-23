@@ -1,4 +1,4 @@
-import { Info, Store } from 'lucide-react';
+import { Award, Info, Store } from 'lucide-react';
 import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { AwayReport } from './components/AwayReport';
 import { BuildDock } from './components/BuildDock';
@@ -20,7 +20,7 @@ import {
   gameReducer,
   hydrateGameState,
 } from './game/gameState';
-import { computeStaffing } from './game/production';
+import { checkMaterialCosts, computeStaffing } from './game/production';
 import {
   loadPersistedSave,
   saveGameToStorage,
@@ -69,6 +69,8 @@ export default function App() {
   const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
   const [bourseModalOpen, setBourseModalOpen] = useState(false);
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+  const [showLevel2Modal, setShowLevel2Modal] = useState(false);
+  const [showLevel3Modal, setShowLevel3Modal] = useState(false);
   const [resetSignal, setResetSignal] = useState(0);
 
   const latestStateRef = useRef(state);
@@ -139,6 +141,12 @@ export default function App() {
       if (e.key !== 'Escape') return;
       if (activeBuildTheme) {
         setActiveBuildTheme(null);
+      } else if (showLevel2Modal) {
+        setShowLevel2Modal(false);
+        dispatch({ type: 'CLEAR_LEVEL2_NOTICE' });
+      } else if (showLevel3Modal) {
+        setShowLevel3Modal(false);
+        dispatch({ type: 'CLEAR_LEVEL2_COMPLETED_NOTICE' });
       } else if (bourseModalOpen) {
         setBourseModalOpen(false);
       } else if (settingsModalOpen) {
@@ -149,14 +157,25 @@ export default function App() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [activeBuildTheme, bourseModalOpen, settingsModalOpen, mobileInspectorOpen]);
+  }, [
+    activeBuildTheme,
+    showLevel2Modal,
+    showLevel3Modal,
+    bourseModalOpen,
+    settingsModalOpen,
+    mobileInspectorOpen,
+  ]);
 
-  // Auto-cancel active build theme if gold drops below its cost
+  // Auto-cancel active build theme if gold or materials drop below its cost
   useEffect(() => {
-    if (activeBuildTheme && state.gold < THEMES[activeBuildTheme].cost) {
+    if (
+      activeBuildTheme &&
+      (state.gold < THEMES[activeBuildTheme].cost ||
+        !checkMaterialCosts(state.warehouse, activeBuildTheme).ok)
+    ) {
       setActiveBuildTheme(null);
     }
-  }, [activeBuildTheme, state.gold]);
+  }, [activeBuildTheme, state.gold, state.warehouse]);
 
   const staffing = useMemo(
     () => computeStaffing(state.cubes, state.population),
@@ -192,10 +211,22 @@ export default function App() {
     setSelectedCubeId(null);
     setInspectorTab('info');
     setBourseModalOpen(false);
+    setShowLevel2Modal(false);
+    setShowLevel3Modal(false);
     setMobileInspectorOpen(false);
     setAwayReport(null);
     dispatch({ type: 'NEW_GAME' });
     setResetSignal((n) => n + 1);
+  };
+
+  const handleCloseLevel2Modal = () => {
+    setShowLevel2Modal(false);
+    dispatch({ type: 'CLEAR_LEVEL2_NOTICE' });
+  };
+
+  const handleCloseLevel3Modal = () => {
+    setShowLevel3Modal(false);
+    dispatch({ type: 'CLEAR_LEVEL2_COMPLETED_NOTICE' });
   };
 
   return (
@@ -217,6 +248,32 @@ export default function App() {
         onOpenBourse={() => setBourseModalOpen(true)}
       />
 
+      {/* Explicit Clickable Milestone Notice Banners (never auto-opening modals) */}
+      {(state.level2UnlockedNotice || state.level2CompletedNotice) && (
+        <div className="w-full bg-[#11453E] border-b border-[#C9962E]/50 px-3 py-1.5 flex items-center justify-center gap-2 flex-wrap shrink-0">
+          {state.level2UnlockedNotice && (
+            <button
+              type="button"
+              onClick={() => setShowLevel2Modal(true)}
+              className="flex items-center gap-1.5 px-3.5 py-1 rounded-lg bg-[#C9962E] hover:bg-[#D8A73F] text-[#2B2118] text-xs font-extrabold shadow-sm transition-colors"
+            >
+              <Award className="w-3.5 h-3.5" />
+              <span>{STRINGS.level2ReadyBanner}</span>
+            </button>
+          )}
+          {state.level2CompletedNotice && (
+            <button
+              type="button"
+              onClick={() => setShowLevel3Modal(true)}
+              className="flex items-center gap-1.5 px-3.5 py-1 rounded-lg bg-[#C9962E] hover:bg-[#D8A73F] text-[#2B2118] text-xs font-extrabold shadow-sm transition-colors"
+            >
+              <Award className="w-3.5 h-3.5" />
+              <span>{STRINGS.level3ReadyBanner}</span>
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Main Row: RTL Right=BuildDock (210px), Center=Map (>=60%), Left=Inspector (260px) */}
       <div className="flex-1 min-h-0 flex flex-col lg:flex-row overflow-hidden">
         {/* Desktop BuildDock is rendered first in RTL so it sits on the RIGHT side */}
@@ -225,6 +282,7 @@ export default function App() {
             variant="desktop"
             gold={state.gold}
             level={state.level}
+            warehouse={state.warehouse}
             activeBuildTheme={activeBuildTheme}
             onSelectTheme={handleSelectBuildTheme}
           />
@@ -272,6 +330,7 @@ export default function App() {
             variant="mobile"
             gold={state.gold}
             level={state.level}
+            warehouse={state.warehouse}
             activeBuildTheme={activeBuildTheme}
             onSelectTheme={handleSelectBuildTheme}
           />
@@ -287,6 +346,7 @@ export default function App() {
           onClearSelection={() => setSelectedCubeId(null)}
           onBuyCube={(cubeId) => dispatch({ type: 'BUY_CUBE', cubeId })}
           onDemolishTheme={handleDemolish}
+          onFixHint={(themeId) => handleSelectBuildTheme(themeId)}
           onTrade={(resource, side, quantity) =>
             dispatch({ type: 'TRADE_RESOURCE', resource, side, quantity })
           }
@@ -316,16 +376,12 @@ export default function App() {
         />
       )}
 
-      {state.level2ModalOpen && (
-        <Level2CelebrationModal
-          onClose={() => dispatch({ type: 'CLOSE_LEVEL2_MODAL' })}
-        />
+      {showLevel2Modal && (
+        <Level2CelebrationModal onClose={handleCloseLevel2Modal} />
       )}
 
-      {state.level2CompletedModalOpen && (
-        <Level3ComingSoonModal
-          onClose={() => dispatch({ type: 'CLOSE_LEVEL2_COMPLETED_MODAL' })}
-        />
+      {showLevel3Modal && (
+        <Level3ComingSoonModal onClose={handleCloseLevel3Modal} />
       )}
 
       {settingsModalOpen && (

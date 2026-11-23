@@ -694,7 +694,7 @@ export class WorldEngine {
           def.cycleSeconds && def.cycleSeconds > 0
             ? entry.progress / def.cycleSeconds
             : 0;
-        if (entry.themeId === 'farm') {
+        if (entry.themeId === 'farm' || entry.themeId === 'wheat_farm') {
           updateFarmCropGrowth(handle, ratio);
         } else if (handle.progressArcMesh) {
           updateProgressRing(handle, ratio);
