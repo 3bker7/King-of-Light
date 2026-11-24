@@ -12,6 +12,13 @@ import {
   createWoodPlanksTexture,
 } from './textures';
 import { hash2D } from './worldMath';
+export {
+  type AnchorPoint,
+  type AnchorWorldContext,
+  type BuildingAnchors,
+  type FootprintRect,
+  getBuildingAnchors,
+} from './anchors';
 
 export interface BuildingTexturesBundle {
   plaster: THREE.CanvasTexture;
@@ -55,6 +62,7 @@ export interface BuildingLibrary {
     gemCrystal: THREE.MeshStandardMaterial;
     oilDark: THREE.MeshStandardMaterial;
     clinicEmerald: THREE.MeshStandardMaterial;
+    warmWindow: THREE.MeshStandardMaterial;
     packedEarth: THREE.MeshBasicMaterial;
     blobShadow: THREE.MeshBasicMaterial;
     goldRing: THREE.MeshBasicMaterial;
@@ -324,8 +332,16 @@ export function createBuildingLibrary(
       roughness: 0.5,
       metalness: 0.05,
     }),
+    warmWindow: new THREE.MeshStandardMaterial({
+      color: 0xffe4a0,
+      emissive: 0xe8a430,
+      emissiveIntensity: 0.72,
+      roughness: 0.24,
+      metalness: 0.12,
+    }),
     packedEarth: new THREE.MeshBasicMaterial({
       map: tex.packedEarth,
+      color: new THREE.Color(0.92, 0.92, 0.92),
       transparent: true,
       opacity: 0.92,
       depthWrite: false,
@@ -1806,6 +1822,229 @@ function buildPasture(
   return { group: g, animals };
 }
 
+function buildHotel(lib: BuildingLibrary): THREE.Group {
+  const g = new THREE.Group();
+
+  // Elevated stone plinth + grand south entrance steps
+  const plinth = new THREE.Mesh(
+    new THREE.BoxGeometry(6.8, 0.36, 5.6),
+    lib.materials.stone
+  );
+  plinth.position.set(0, 0.18, -0.1);
+  g.add(plinth);
+
+  const steps = new THREE.Mesh(
+    new THREE.BoxGeometry(2.6, 0.22, 0.9),
+    lib.materials.marble
+  );
+  steps.position.set(0, 0.11, 2.95);
+  g.add(steps);
+
+  // Two-storey main hotel block (warm limestone/marble facade)
+  const mainBlock = new THREE.Mesh(
+    new THREE.BoxGeometry(5.8, 4.1, 4.4),
+    lib.materials.marble
+  );
+  mainBlock.position.set(0, 2.41, -0.1);
+  g.add(mainBlock);
+
+  // Mid-storey cornice belt + roof cornice trim
+  const beltGeo = new THREE.BoxGeometry(6.08, 0.22, 4.68);
+  const midBelt = new THREE.Mesh(beltGeo, lib.materials.stone);
+  midBelt.position.set(0, 2.38, -0.1);
+  g.add(midBelt);
+
+  const topBelt = new THREE.Mesh(beltGeo, lib.materials.stone);
+  topBelt.position.set(0, 4.42, -0.1);
+  g.add(topBelt);
+
+  // Flat roof terrace with perimeter parapet rails + terrace shade canopy
+  const terraceFloor = new THREE.Mesh(
+    new THREE.BoxGeometry(5.5, 0.12, 4.1),
+    lib.materials.terracotta
+  );
+  terraceFloor.position.set(0, 4.54, -0.1);
+  g.add(terraceFloor);
+
+  const paraH = new THREE.BoxGeometry(5.88, 0.42, 0.22);
+  const paraV = new THREE.BoxGeometry(0.22, 0.42, 4.48);
+  const paraN = new THREE.Mesh(paraH, lib.materials.plaster);
+  paraN.position.set(0, 4.72, -2.2);
+  g.add(paraN);
+  const paraS = new THREE.Mesh(paraH, lib.materials.plaster);
+  paraS.position.set(0, 4.72, 2.0);
+  g.add(paraS);
+  const paraW = new THREE.Mesh(paraV, lib.materials.plaster);
+  paraW.position.set(-2.83, 4.72, -0.1);
+  g.add(paraW);
+  const paraE = new THREE.Mesh(paraV, lib.materials.plaster);
+  paraE.position.set(2.83, 4.72, -0.1);
+  g.add(paraE);
+
+  // Rooftop lounge pergola (adds unmistakable hotel terrace silhouette)
+  const pergolaPostGeo = new THREE.BoxGeometry(0.14, 1.0, 0.14);
+  for (const [px, pz] of [
+    [-1.4, -1.3],
+    [1.4, -1.3],
+    [-1.4, 0.5],
+    [1.4, 0.5],
+  ]) {
+    const p = new THREE.Mesh(pergolaPostGeo, lib.materials.darkWood);
+    p.position.set(px, 5.05, pz);
+    g.add(p);
+  }
+  const pergolaRoof = new THREE.Mesh(
+    new THREE.BoxGeometry(3.15, 0.1, 2.05),
+    lib.materials.wood
+  );
+  pergolaRoof.position.set(0, 5.56, -0.4);
+  g.add(pergolaRoof);
+
+  // Double entrance doorway on south facade
+  const doorFrame = new THREE.Mesh(
+    new THREE.BoxGeometry(1.75, 1.85, 0.22),
+    lib.materials.darkWood
+  );
+  doorFrame.position.set(0, 1.28, 2.12);
+  g.add(doorFrame);
+
+  const doorGlass = new THREE.Mesh(
+    new THREE.BoxGeometry(1.25, 1.45, 0.26),
+    lib.materials.warmWindow
+  );
+  doorGlass.position.set(0, 1.26, 2.13);
+  g.add(doorGlass);
+
+  // Striped entrance awning + 2 supporting columns
+  const awningMesh = new THREE.Mesh(
+    new THREE.BoxGeometry(2.65, 0.12, 1.45),
+    lib.materials.awning
+  );
+  awningMesh.position.set(0, 2.26, 2.74);
+  awningMesh.rotation.x = 0.22;
+  g.add(awningMesh);
+
+  const awningPostGeo = new THREE.CylinderGeometry(0.07, 0.08, 1.98, 8);
+  for (const ax of [-1.12, 1.12]) {
+    const post = new THREE.Mesh(awningPostGeo, lib.materials.goldAccent);
+    post.position.set(ax, 1.25, 3.22);
+    g.add(post);
+  }
+
+  // Rooftop front hotel sign board (dark wood board + gold frame & crest bar)
+  const signPostGeo = new THREE.BoxGeometry(0.14, 0.55, 0.14);
+  for (const sx of [-1.0, 1.0]) {
+    const sp = new THREE.Mesh(signPostGeo, lib.materials.darkWood);
+    sp.position.set(sx, 5.08, 1.98);
+    g.add(sp);
+  }
+  const signBoard = new THREE.Mesh(
+    new THREE.BoxGeometry(2.7, 0.72, 0.16),
+    lib.materials.bannerTeal
+  );
+  signBoard.position.set(0, 5.5, 1.98);
+  g.add(signBoard);
+
+  const signGoldFrame = new THREE.Mesh(
+    new THREE.BoxGeometry(2.82, 0.12, 0.2),
+    lib.materials.goldAccent
+  );
+  signGoldFrame.position.set(0, 5.86, 1.98);
+  g.add(signGoldFrame);
+
+  const signPlaque = new THREE.Mesh(
+    new THREE.BoxGeometry(2.1, 0.26, 0.2),
+    lib.materials.goldAccent
+  );
+  signPlaque.position.set(0, 5.5, 1.99);
+  g.add(signPlaque);
+
+  // Warm glowing guestroom windows (4 upper south, 2 lower lobby south, 2+2 side windows)
+  const winFrameGeo = new THREE.BoxGeometry(0.84, 0.96, 0.14);
+  const winPaneGeo = new THREE.BoxGeometry(0.66, 0.76, 0.18);
+
+  const addFrontWindow = (wx: number, wy: number) => {
+    const f = new THREE.Mesh(winFrameGeo, lib.materials.darkWood);
+    f.position.set(wx, wy, 2.11);
+    g.add(f);
+    const p = new THREE.Mesh(winPaneGeo, lib.materials.warmWindow);
+    p.position.set(wx, wy, 2.12);
+    g.add(p);
+  };
+  // Upper floor (4 lit windows)
+  for (const wx of [-2.05, -0.7, 0.7, 2.05]) {
+    addFrontWindow(wx, 3.42);
+  }
+  // Ground lobby flanking entrance (2 lit windows)
+  for (const wx of [-1.95, 1.95]) {
+    addFrontWindow(wx, 1.4);
+  }
+
+  // East & West side lit windows
+  const sideFrameGeo = new THREE.BoxGeometry(0.14, 0.9, 0.8);
+  const sidePaneGeo = new THREE.BoxGeometry(0.18, 0.72, 0.62);
+  for (const side of [-1, 1]) {
+    for (const wz of [-1.1, 0.9]) {
+      for (const wy of [1.4, 3.42]) {
+        const f = new THREE.Mesh(sideFrameGeo, lib.materials.darkWood);
+        f.position.set(side * 2.91, wy, wz);
+        g.add(f);
+        const p = new THREE.Mesh(sidePaneGeo, lib.materials.warmWindow);
+        p.position.set(side * 2.92, wy, wz);
+        g.add(p);
+      }
+    }
+  }
+
+  // Potted entrance planters flanking steps
+  const potGeo = new THREE.CylinderGeometry(0.28, 0.2, 0.42, 8);
+  const bushGeo = new THREE.DodecahedronGeometry(0.36, 0);
+  for (const ux of [-1.7, 1.7]) {
+    const pot = new THREE.Mesh(potGeo, lib.materials.terracotta);
+    pot.position.set(ux, 0.42, 2.95);
+    g.add(pot);
+    const bush = new THREE.Mesh(bushGeo, lib.materials.foliageMain);
+    bush.position.set(ux, 0.82, 2.95);
+    g.add(bush);
+  }
+
+  enableShadows(g);
+  return g;
+}
+
+export const BUILDING_MODEL_THEMES: ReadonlySet<ThemeId> = new Set<ThemeId>([
+  'palace',
+  'house',
+  'well',
+  'shop',
+  'bakery',
+  'restaurant',
+  'cafe',
+  'wheat_farm',
+  'farm',
+  'orchard',
+  'forest',
+  'quarry',
+  'iron_mine',
+  'copper_mine',
+  'gold_mine',
+  'gem_mine',
+  'oil_well',
+  'warehouse_bldg',
+  'workshop',
+  'jeweler',
+  'grand_market',
+  'trade_office',
+  'hotel',
+  'mosque',
+  'theater',
+  'garden',
+  'clinic',
+  'school',
+  'pasture',
+  'sea', // Rendered by terrain water mesh in WorldEngine
+]);
+
 export function createBuildingVisual(
   lib: BuildingLibrary,
   key: string,
@@ -1914,6 +2153,9 @@ export function createBuildingVisual(
     case 'trade_office':
       bodyGroup = buildTradeOffice(lib);
       break;
+    case 'hotel':
+      bodyGroup = buildHotel(lib);
+      break;
     case 'mosque':
       bodyGroup = buildMosque(lib);
       break;
@@ -1961,7 +2203,8 @@ export function createBuildingVisual(
     themeId === 'oil_well' ||
     themeId === 'workshop' ||
     themeId === 'jeweler' ||
-    themeId === 'shop';
+    themeId === 'shop' ||
+    themeId === 'hotel';
 
   if (usesGroundRing) {
     const innerR = footprint === 'half' ? 2.15 : 4.55;

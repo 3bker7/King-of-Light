@@ -17,6 +17,7 @@ import {
 } from './constants';
 import { getTotalFood } from './people';
 import type {
+  Citizen,
   Cube,
   ShortageReason,
   SlotIndex,
@@ -147,13 +148,18 @@ export function getGoldServiceAuraBonus(
 
 export function checkMaterialCosts(
   warehouse: Warehouse,
-  themeId: ThemeId
+  themeId: ThemeId,
+  level: 1 | 2 = 2
 ): { ok: boolean; missing: Array<{ resource: TradedResourceKey; needed: number; have: number }> } {
+  if (level < 2) {
+    return { ok: true, missing: [] };
+  }
   const costs = THEMES[themeId].materialCosts;
   if (!costs) return { ok: true, missing: [] };
 
   const missing: Array<{ resource: TradedResourceKey; needed: number; have: number }> = [];
   for (const [res, amt] of Object.entries(costs) as Array<[TradedResourceKey, number]>) {
+    if (amt <= 0) continue;
     const have = warehouse[res] ?? 0;
     if (have < amt) {
       missing.push({ resource: res, needed: amt, have });
@@ -167,7 +173,7 @@ export function canPlaceThemeOnCube(
   themeId: ThemeId,
   level: 1 | 2
 ): { valid: boolean; targetSlot: SlotIndex | null; reason?: 'rocky_required' | 'invalid' } {
-  if (cube.owner !== 'player') {
+  if (cube.owner !== 'player' || cube.privateOwnerId != null) {
     return { valid: false, targetSlot: null, reason: 'invalid' };
   }
   const theme = THEMES[themeId];
@@ -204,13 +210,30 @@ interface WorkerCandidate {
   priorityIndex: number;
 }
 
-export function computeStaffing(cubes: Cube[], population: number): StaffingStatus {
+export function computeStaffing(
+  cubes: Cube[],
+  population: number,
+  citizens?: Citizen[]
+): StaffingStatus {
   const candidates: WorkerCandidate[] = [];
   const staffedSlots = new Set<string>();
   let totalWorkersNeeded = 0;
+  let totalWorkersEmployed = 0;
+
+  // Element 4.4: Pre-count living private workers per cube+owner for O(N) lookup
+  const privateWorkersByCube = new Map<string, number>();
+  if (citizens && citizens.length > 0) {
+    for (const c of citizens) {
+      if (c.jobCubeId !== null && typeof c.employerId === 'number') {
+        const key = `${c.jobCubeId}:${c.employerId}`;
+        privateWorkersByCube.set(key, (privateWorkersByCube.get(key) ?? 0) + 1);
+      }
+    }
+  }
 
   for (const cube of cubes) {
     if (cube.owner !== 'player') continue;
+    const isPrivate = typeof cube.privateOwnerId === 'number';
 
     const slots: Array<{ slot: SlotIndex; themeId: ThemeId | null; builtAt: number | null }> = [
       { slot: 0, themeId: cube.themeId, builtAt: cube.builtAt },
@@ -222,8 +245,21 @@ export function computeStaffing(cubes: Cube[], population: number): StaffingStat
       const def = THEMES[entry.themeId];
       if (def.workers === 0) {
         staffedSlots.add(makeSlotKey(cube.id, entry.slot));
+        continue;
+      }
+
+      totalWorkersNeeded += def.workers;
+
+      if (isPrivate) {
+        // Permitted amendment (Element 4.4): private buildings are staffed ONLY by living ad-filled holders
+        const filled =
+          privateWorkersByCube.get(`${cube.id}:${cube.privateOwnerId}`) ?? 0;
+        totalWorkersEmployed += Math.min(def.workers, filled);
+        if (filled >= def.workers) {
+          staffedSlots.add(makeSlotKey(cube.id, entry.slot));
+        }
       } else {
-        totalWorkersNeeded += def.workers;
+        // Frozen crown priority staffing
         const idx = WORKER_PRIORITY_ORDER.indexOf(entry.themeId);
         candidates.push({
           cubeId: cube.id,
@@ -245,7 +281,6 @@ export function computeStaffing(cubes: Cube[], population: number): StaffingStat
   });
 
   let remainingWorkers = Math.max(0, population);
-  let totalWorkersEmployed = 0;
 
   for (const c of candidates) {
     if (remainingWorkers >= c.workersNeeded) {
@@ -361,17 +396,42 @@ export interface ProductionTickResult {
   cubes: Cube[];
   warehouse: Warehouse;
   gold: number;
+  royalShopGoldDelta: number;
+  businessTaxDelta: number;
+  privateOwnerCredits: Record<number, number>;
 }
 
 export function advanceProductionTick(
   cubes: Cube[],
   warehouse: Warehouse,
   gold: number,
-  population: number
+  population: number,
+  citizens?: Citizen[]
 ): ProductionTickResult {
-  const staffing = computeStaffing(cubes, population);
+  const staffing = computeStaffing(cubes, population, citizens);
   const nextWarehouse: Warehouse = { ...warehouse };
   let nextGold = gold;
+  let royalShopGoldDelta = 0;
+  let businessTaxDelta = 0;
+  const privateOwnerCredits: Record<number, number> = {};
+
+  const applyCycleGold = (cube: Cube, gain: number) => {
+    if (gain <= 0) return;
+    if (typeof cube.privateOwnerId === 'number') {
+      // Element 4.6: Private business revenue splits 90% owner (floor) / 10% treasury tax
+      const ownerShare = Math.floor(gain * 0.9);
+      const tax = gain - ownerShare;
+      nextGold += tax;
+      businessTaxDelta += tax;
+      if (ownerShare > 0) {
+        privateOwnerCredits[cube.privateOwnerId] =
+          (privateOwnerCredits[cube.privateOwnerId] ?? 0) + ownerShare;
+      }
+    } else {
+      nextGold += gain;
+      royalShopGoldDelta += gain;
+    }
+  };
 
   const nextCubes = cubes.map((cube) => {
     if (cube.owner !== 'player') return cube;
@@ -397,10 +457,10 @@ export function advanceProductionTick(
               cube,
               cubes,
               nextWarehouse,
-              nextGold,
+              0,
               population
             );
-            nextGold = res.gold;
+            applyCycleGold(cube, res.gold);
             shortage = res.shortage;
           } else if (shortage && hasInputsForTheme(cube.themeId, nextWarehouse, population)) {
             shortage = null;
@@ -423,10 +483,10 @@ export function advanceProductionTick(
               cube,
               cubes,
               nextWarehouse,
-              nextGold,
+              0,
               population
             );
-            nextGold = res.gold;
+            applyCycleGold(cube, res.gold);
             secondShortage = res.shortage;
           } else if (
             secondShortage &&
@@ -452,5 +512,8 @@ export function advanceProductionTick(
     cubes: nextCubes,
     warehouse: nextWarehouse,
     gold: nextGold,
+    royalShopGoldDelta,
+    businessTaxDelta,
+    privateOwnerCredits,
   };
 }

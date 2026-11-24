@@ -1,4 +1,4 @@
-import { Clock, Coins, TrendingUp, Users } from 'lucide-react';
+import { AlertTriangle, Clock, Coins, ScrollText, TrendingUp, Users, Wallet } from 'lucide-react';
 import { MAX_OFFLINE_SECONDS, TRADED_RESOURCES } from '../game/constants';
 import { formatDurationArabic, STRINGS } from '../game/strings';
 import type { AwayReportData } from '../game/types';
@@ -46,6 +46,29 @@ export function AwayReport({ report, onClose }: AwayReportProps) {
               +{report.goldEarnedByShops}
             </span>
           </div>
+
+          {/* Offline monthly payrolls paid */}
+          {report.payrollPaid > 0 && (
+            <div className="flex items-center justify-between p-2.5 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC]">
+              <div className="flex items-center gap-2 font-bold text-[#2B2118]">
+                <Wallet className="w-4 h-4 text-[#14524A]" />
+                <span>رواتب دُفعت أثناء غيابك: {report.payrollPaid}</span>
+              </div>
+              <span className="text-sm font-extrabold text-[#A83629] tabular-nums-latin">
+                -{report.payrollPaid}
+              </span>
+            </div>
+          )}
+
+          {/* Offline arrears warning if treasury ran short */}
+          {report.arrearsAdded > 0 && (
+            <div className="flex items-center gap-2 p-2.5 rounded-xl bg-[#FBE2DF] border border-[#E5ABA3] font-bold text-[#8E2A1F]">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <span>
+                متأخرات رواتب أثناء غيابك: {report.arrearsAdded} ذهب
+              </span>
+            </div>
+          )}
 
           {/* Resources produced */}
           <div className="p-2.5 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] space-y-2">
@@ -95,6 +118,45 @@ export function AwayReport({ report, onClose }: AwayReportProps) {
                 : report.populationDelta}
             </span>
           </div>
+
+          {/* Element 8.2: Lifecycle summary when any count is non-zero */}
+          {((report.births ?? 0) +
+            (report.cvsFiled ?? 0) +
+            (report.marriages ?? 0) +
+            (report.housingGranted ?? 0) +
+            (report.faxesSent ?? 0)) > 0 && (
+            <div className="flex items-center gap-2 p-2.5 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] font-bold text-[#2B2118]">
+              <ScrollText className="w-4 h-4 text-[#14524A] shrink-0" />
+              <span className="tabular-nums-latin">
+                أثناء غيابك: {report.births ?? 0} مولود، {report.marriages ?? 0}{' '}
+                زواج، {report.housingGranted ?? 0} أسرة سكنت
+              </span>
+            </div>
+          )}
+
+          {/* Element 6.3: Private sector & citizen spending offline summary */}
+          {((report.citizenSpentTotal ?? 0) > 0 ||
+            (report.businessTaxTotal ?? 0) > 0) && (
+            <div className="flex items-center gap-2 p-2.5 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] font-bold text-[#2B2118]">
+              <Coins className="w-4 h-4 text-[#C9962E] shrink-0" />
+              <span className="tabular-nums-latin">
+                أثناء غيابك: المواطنون أنفقوا {report.citizenSpentTotal ?? 0} ذهب،
+                وضرائب الأعمال {report.businessTaxTotal ?? 0}
+              </span>
+            </div>
+          )}
+
+          {/* Element 6.3: Private sector & citizen spending offline summary */}
+          {((report.citizenSpentTotal ?? 0) > 0 ||
+            (report.businessTaxTotal ?? 0) > 0) && (
+            <div className="flex items-center gap-2 p-2.5 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] font-bold text-[#2B2118]">
+              <Coins className="w-4 h-4 text-[#C9962E] shrink-0" />
+              <span className="tabular-nums-latin">
+                أثناء غيابك: المواطنون أنفقوا {report.citizenSpentTotal ?? 0} ذهب،
+                وضرائب الأعمال {report.businessTaxTotal ?? 0}
+              </span>
+            </div>
+          )}
 
           {/* Biggest market move */}
           <div className="p-2.5 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] space-y-1">

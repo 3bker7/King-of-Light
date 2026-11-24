@@ -1,5 +1,6 @@
 import {
   Apple,
+  BedDouble,
   Beef,
   CircleDot,
   Coffee,
@@ -136,6 +137,8 @@ export function ThemeIcon({ themeId, className = 'w-5 h-5' }: ThemeIconProps) {
       return <Store className={className} />;
     case 'trade_office':
       return <Scale className={className} />;
+    case 'hotel':
+      return <BedDouble className={className} />;
     case 'mosque':
       return <MoonStar className={className} />;
     case 'theater':
@@ -150,3 +153,36 @@ export function ThemeIcon({ themeId, className = 'w-5 h-5' }: ThemeIconProps) {
       return <Package className={className} />;
   }
 }
+
+export const THEME_ICON_REGISTERED: ReadonlySet<ThemeId> = new Set<ThemeId>([
+  'palace',
+  'wheat_farm',
+  'farm',
+  'orchard',
+  'pasture',
+  'sea',
+  'well',
+  'bakery',
+  'restaurant',
+  'cafe',
+  'forest',
+  'quarry',
+  'iron_mine',
+  'copper_mine',
+  'gold_mine',
+  'gem_mine',
+  'oil_well',
+  'house',
+  'warehouse_bldg',
+  'workshop',
+  'jeweler',
+  'shop',
+  'grand_market',
+  'trade_office',
+  'hotel',
+  'mosque',
+  'theater',
+  'garden',
+  'clinic',
+  'school',
+]);

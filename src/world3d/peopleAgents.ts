@@ -1,25 +1,50 @@
 import * as THREE from 'three';
 import type { CitizenInfo, CitizenRoleId } from '../components/CitizenCard';
 import { THEMES } from '../game/constants';
+import { FEMALE_NAMES, MALE_NAMES } from '../game/names';
 import { findPalaceCube, makeSlotKey } from '../game/production';
-import type { Cube, ThemeId } from '../game/types';
-import { cellSlotToWorld, cellToWorldCenter, getTerrainHeightAt } from './worldMath';
+import type { Cube, SlotIndex, ThemeId } from '../game/types';
+import {
+  type AnchorPoint,
+  type BuildingAnchors,
+  getBuildingAnchors,
+  isPointInsideAnyBuildingFootprint,
+  isPointOverWater,
+  WALKABLE_FIELD_THEMES,
+} from './anchors';
+import {
+  buildStreetGrid,
+  computeStreetPath,
+  isCellWalkable,
+  type StreetGrid,
+} from './streetPathing';
+import {
+  cellToWorldCenter,
+  getTerrainHeightAt,
+  WATER_SURFACE_Y,
+  worldToCell,
+} from './worldMath';
 
 export type { CitizenInfo, CitizenRoleId };
 
 const MAX_VISIBLE_AGENTS = 36;
+const ADULT_MESH_SCALE = 1.6;
+const CHILD_RELATIVE_SCALE = 0.6;
+const ENTER_DOOR_DURATION = 0.2; // 200ms step-forward shrink into front door
 
 type RoutineState =
   | 'AT_HOME'
+  | 'ENTERING_HOME'
   | 'TO_WORK'
   | 'WORKING'
   | 'TO_BREAK'
   | 'ON_BREAK'
   | 'TO_HOME'
   | 'PLAYING'
-  | 'PATROL';
+  | 'PATROL'
+  | 'WAITING';
 
-type BreakSpotKind =
+type BreakThemeId =
   | 'mosque'
   | 'restaurant'
   | 'cafe'
@@ -29,22 +54,28 @@ type BreakSpotKind =
   | 'theater'
   | 'palace';
 
-interface SpotInfo {
-  x: number;
-  z: number;
+export interface HomeAnchorSpot {
+  cubeId: number;
+  doorstep: AnchorPoint;
+  faceTarget: AnchorPoint;
+  approachOffset: { dRow: number; dCol: number };
+}
+
+export interface WorkAnchorSpot {
   cubeId: number;
   themeId: ThemeId;
+  doorstep: AnchorPoint;
+  workSpots: AnchorPoint[];
+  faceTarget: AnchorPoint;
+  approachOffset: { dRow: number; dCol: number };
 }
 
-interface BreakSpot {
-  x: number;
-  z: number;
-  kind: BreakSpotKind;
-}
-
-interface Waypoint {
-  x: number;
-  z: number;
+export interface BreakAnchorSpot {
+  cubeId: number;
+  themeId: BreakThemeId;
+  doorstep: AnchorPoint;
+  faceTarget: AnchorPoint;
+  approachOffset: { dRow: number; dCol: number };
 }
 
 interface LivingAgent {
@@ -54,68 +85,31 @@ interface LivingAgent {
   role: CitizenRoleId;
   group: THREE.Group;
   bodyPivot: THREE.Group;
+  castingPivot: THREE.Group | null;
   x: number;
   z: number;
-  waypoints: Waypoint[];
+  waypoints: AnchorPoint[];
   waypointIdx: number;
+  pathReachable: boolean;
   speed: number;
-  lateralOffset: number;
   state: RoutineState;
   stateTimer: number;
+  enterDoorTimer: number;
+  enterStartX: number;
+  enterStartZ: number;
   walkPhase: number;
   workPhase: number;
-  homeSpot: { x: number; z: number };
-  workSpot: SpotInfo | null;
-  breakKind: BreakSpotKind;
-  playKind: 'houses' | 'school' | 'garden';
+  workSpotIdx: number;
+  workSpotSwitchTimer: number;
+  homeSpot: HomeAnchorSpot;
+  workSpot: WorkAnchorSpot | null;
+  activeBreakSpot: BreakAnchorSpot | null;
+  targetThemeId: ThemeId | null;
+  activeFaceTarget: AnchorPoint | null;
+  playKind: 'house' | 'school' | 'garden';
   patrolStep: number;
+  patrolAtPalace: boolean;
 }
-
-const MALE_NAMES = [
-  'أحمد',
-  'سالم',
-  'يوسف',
-  'طارق',
-  'كريم',
-  'ناصر',
-  'خالد',
-  'عمر',
-  'زيد',
-  'بدر',
-  'سعيد',
-  'حسن',
-  'ماجد',
-  'رامي',
-  'نبيل',
-  'وليد',
-  'فارس',
-  'رشيد',
-  'سامي',
-  'منصور',
-  'جاسم',
-  'عدنان',
-  'هشام',
-  'محمود',
-];
-
-const FEMALE_NAMES = [
-  'ليلى',
-  'سلمى',
-  'نور',
-  'مريم',
-  'هند',
-  'دلال',
-  'آمنة',
-  'زينب',
-  'ريم',
-  'سارة',
-  'فاطمة',
-  'ياسمين',
-  'رقية',
-  'ندى',
-  'حليمة',
-  'سميرة',
-];
 
 const ROLE_LABELS_AR: Record<CitizenRoleId, string> = {
   farmer: 'مزارع',
@@ -132,7 +126,88 @@ const ROLE_LABELS_AR: Record<CitizenRoleId, string> = {
   police: 'حارس أمن داخلي',
 };
 
-function themeToWorkerRole(themeId: ThemeId): CitizenRoleId | null {
+// Element 4.1 & 4.2: Complete per-theme truthful text tables for ALL 29 ThemeIds (zero generic fallback)
+export const WAITING_NO_PATH_TEXT = 'ينتظر — لا يوجد طريق سالك الآن';
+export const AT_HOME_TEXT = 'في بيته يستريح';
+
+export const THEME_GOING_TEXT: Record<ThemeId, string> = {
+  palace: 'في طريقه إلى ساحة قصر الحاكم',
+  wheat_farm: 'في طريقه إلى مزرعة القمح',
+  farm: 'في طريقه إلى مزرعته',
+  orchard: 'في طريقه إلى بستان الفواكه',
+  pasture: 'في طريقه إلى المرعى',
+  sea: 'في طريقه إلى شاطئ البحر',
+  well: 'في طريقه إلى بئر الماء',
+  bakery: 'في طريقه إلى المخبز',
+  restaurant: 'في طريقه إلى المطعم',
+  cafe: 'في طريقه إلى المقهى',
+  forest: 'في طريقه إلى غابة الأخشاب',
+  quarry: 'في طريقه إلى محجر الحجر',
+  iron_mine: 'في طريقه إلى منجم الحديد',
+  copper_mine: 'في طريقه إلى منجم النحاس',
+  gold_mine: 'في طريقه إلى منجم الذهب',
+  gem_mine: 'في طريقه إلى منجم الأحجار الكريمة',
+  oil_well: 'في طريقه إلى بئر النفط',
+  house: 'في طريقه إلى بيته',
+  warehouse_bldg: 'في طريقه إلى المخزن',
+  workshop: 'في طريقه إلى الورشة',
+  jeweler: 'في طريقه إلى محل الصياغة',
+  shop: 'في طريقه إلى المحل التجاري',
+  grand_market: 'في طريقه إلى السوق الكبير',
+  trade_office: 'في طريقه إلى مكتب التجارة',
+  hotel: 'رايح يشتغل في الفندق',
+  mosque: 'في طريقه إلى المسجد',
+  theater: 'في طريقه إلى المسرح',
+  garden: 'في طريقه إلى الحديقة',
+  clinic: 'في طريقه إلى العيادة',
+  school: 'في طريقه إلى المدرسة',
+};
+
+export const THEME_ARRIVED_TEXT: Record<ThemeId, string> = {
+  palace: 'في ساحة قصر الحاكم',
+  wheat_farm: 'يحصد سنابل القمح في الحقل',
+  farm: 'يحرث أرض مزرعته',
+  orchard: 'يقطف الثمار في بستان الفواكه',
+  pasture: 'يرعى المواشي داخل المرعى',
+  sea: 'يصيد على شاطئ البحر',
+  well: 'يستقي الماء من بئر الماء',
+  bakery: 'يخبز الخبز عند باب المخبز',
+  restaurant: 'يجهّز الطعام عند مدخل المطعم',
+  cafe: 'يعدّ القهوة عند مدخل المقهى',
+  forest: 'يجمع الأخشاب عند طرف الغابة',
+  quarry: 'يقطع الحجارة عند مدخل المحجر',
+  iron_mine: 'يستخرج الخام عند مدخل منجم الحديد',
+  copper_mine: 'يستخرج الخام عند مدخل منجم النحاس',
+  gold_mine: 'يستخرج التبر عند مدخل منجم الذهب',
+  gem_mine: 'يفرز الجواهر عند مدخل منجم الأحجار الكريمة',
+  oil_well: 'يراقب الضخ عند مدخل بئر النفط',
+  house: AT_HOME_TEXT,
+  warehouse_bldg: 'ينظّم البضائع عند باب المخزن',
+  workshop: 'يصنع الأدوات عند مدخل الورشة',
+  jeweler: 'يعرض الحلي عند باب محل الصياغة',
+  shop: 'يبيع البضائع عند واجهة المحل التجاري',
+  grand_market: 'يدير التجارة عند بوابة السوق الكبير',
+  trade_office: 'يتابع الصفقات عند مدخل مكتب التجارة',
+  hotel: 'يستقبل ضيوف الفندق',
+  mosque: 'يصلّي ويطمئن عند ساحة المسجد',
+  theater: 'ينظّم العرض عند مدخل المسرح',
+  garden: 'يستريح بين أشجار الحديقة',
+  clinic: 'يساعد المرضى عند باب العيادة',
+  school: 'يعلّم التلاميذ عند مدخل المدرسة',
+};
+
+const BREAK_ARRIVED_TEXT: Record<BreakThemeId, string> = {
+  mosque: 'يصلّي ويطمئن عند ساحة المسجد',
+  restaurant: 'يتناول وجبة عند مدخل المطعم',
+  cafe: 'يشرب القهوة عند مدخل المقهى',
+  garden: 'يستريح بين أشجار الحديقة',
+  grand_market: 'يتسوّق عند بوابة السوق الكبير',
+  shop: 'يتسوّق عند واجهة المحل التجاري',
+  theater: 'يحضر عرضاً عند مدخل المسرح',
+  palace: 'في ساحة قصر الحاكم',
+};
+
+export function themeToWorkerRole(themeId: ThemeId): CitizenRoleId | null {
   switch (themeId) {
     case 'farm':
     case 'wheat_farm':
@@ -160,6 +235,7 @@ function themeToWorkerRole(themeId: ThemeId): CitizenRoleId | null {
     case 'workshop':
       return 'shopkeeper';
     case 'trade_office':
+    case 'hotel':
     case 'warehouse_bldg':
     case 'clinic':
     case 'school':
@@ -167,109 +243,6 @@ function themeToWorkerRole(themeId: ThemeId): CitizenRoleId | null {
       return 'manager';
     default:
       return null;
-  }
-}
-
-function getWorkDestinationText(
-  role: CitizenRoleId,
-  themeId: ThemeId | null,
-  workingNow: boolean
-): string {
-  const prefix = workingNow ? 'يشتغل في ' : 'رايح يشتغل في ';
-  switch (themeId) {
-    case 'wheat_farm':
-      return `${prefix}مزرعة القمح`;
-    case 'farm':
-      return `${prefix}مزرعته`;
-    case 'orchard':
-      return `${prefix}بستان الفواكه`;
-    case 'pasture':
-      return `${prefix}المرعى`;
-    case 'sea':
-      return workingNow ? 'يصيد السمك عند البحر' : 'رايح يصيد عند البحر';
-    case 'forest':
-      return `${prefix}غابة الأخشاب`;
-    case 'quarry':
-      return `${prefix}محجر الحجر`;
-    case 'iron_mine':
-      return `${prefix}منجم الحديد`;
-    case 'copper_mine':
-      return `${prefix}منجم النحاس`;
-    case 'gold_mine':
-      return `${prefix}منجم الذهب`;
-    case 'gem_mine':
-      return `${prefix}منجم الأحجار الكريمة`;
-    case 'oil_well':
-      return `${prefix}بئر البترول`;
-    case 'bakery':
-      return `${prefix}المخبز`;
-    case 'restaurant':
-      return `${prefix}المطعم`;
-    case 'cafe':
-      return `${prefix}المقهى`;
-    case 'workshop':
-      return `${prefix}الورشة`;
-    case 'jeweler':
-      return `${prefix}محل الصياغة`;
-    case 'shop':
-      return `${prefix}المحل التجاري`;
-    case 'grand_market':
-      return `${prefix}سوق المدينة`;
-    case 'trade_office':
-      return `${prefix}مكتب التجارة`;
-    case 'warehouse_bldg':
-      return `${prefix}المخزن`;
-    case 'clinic':
-      return `${prefix}العيادة`;
-    case 'school':
-      return `${prefix}المدرسة`;
-    case 'theater':
-      return `${prefix}المسرح`;
-    default:
-      return role === 'farmer' ? `${prefix}مزرعته` : `${prefix}عمله`;
-  }
-}
-
-function getBreakDestinationText(
-  kind: BreakSpotKind,
-  isFemale: boolean,
-  arrived: boolean
-): string {
-  if (arrived) {
-    switch (kind) {
-      case 'mosque':
-        return isFemale ? 'تصلي في المسجد' : 'يصلي في المسجد';
-      case 'restaurant':
-        return isFemale ? 'تتناول الطعام في المطعم' : 'يتناول الطعام في المطعم';
-      case 'cafe':
-        return isFemale ? 'تستريح في المقهى' : 'يشرب قهوة في المقهى';
-      case 'garden':
-        return isFemale ? 'تستريح في الحديقة' : 'يستريح في الحديقة';
-      case 'grand_market':
-      case 'shop':
-        return isFemale ? 'تتسوق في السوق' : 'يتسوق في السوق';
-      case 'theater':
-        return isFemale ? 'تحضر عرضاً في المسرح' : 'يحضر عرضاً في المسرح';
-      case 'palace':
-        return isFemale ? 'في ساحة القصر' : 'في ساحة القصر';
-    }
-  }
-  switch (kind) {
-    case 'mosque':
-      return isFemale ? 'رايحة تصلي في المسجد' : 'رايح يصلي في المسجد';
-    case 'restaurant':
-      return isFemale ? 'رايحة تتغدى في المطعم' : 'رايح يتغدى في المطعم';
-    case 'cafe':
-      return isFemale ? 'رايحة المقهى' : 'رايح يشرب قهوة في المقهى';
-    case 'garden':
-      return isFemale ? 'رايحة تستريح في الحديقة' : 'رايح يستريح في الحديقة';
-    case 'grand_market':
-    case 'shop':
-      return isFemale ? 'رايحة تتسوق في السوق' : 'رايح يتسوق في السوق';
-    case 'theater':
-      return isFemale ? 'رايحة المسرح' : 'رايح المسرح';
-    case 'palace':
-      return isFemale ? 'رايحة ساحة القصر' : 'رايح ساحة القصر';
   }
 }
 
@@ -314,7 +287,7 @@ export class PeopleAgentsManager {
   private readonly sharedGeos: THREE.BufferGeometry[] = [];
   private readonly sharedMats: THREE.Material[] = [];
 
-  // Shared geometries
+  // Shared geometries (Element 5: x1.25 wider robes/dresses, x1.6 adult scale, larger shadow/ring/hit)
   private readonly robeGeo: THREE.CylinderGeometry;
   private readonly dressConeGeo: THREE.CylinderGeometry;
   private readonly headGeo: THREE.SphereGeometry;
@@ -326,6 +299,7 @@ export class PeopleAgentsManager {
   private readonly packGeo: THREE.BoxGeometry;
   private readonly headscarfGeo: THREE.SphereGeometry;
   private readonly caneGeo: THREE.CylinderGeometry;
+  private readonly fishingRodGeo: THREE.CylinderGeometry;
   private readonly policeCapGeo: THREE.CylinderGeometry;
   private readonly capVisorGeo: THREE.BoxGeometry;
   private readonly basketGeo: THREE.CylinderGeometry;
@@ -365,76 +339,104 @@ export class PeopleAgentsManager {
   private selectedAgentId: number | null = null;
   private nextAgentId = 1;
 
-  // World data cached on sync (zero per-frame allocations)
-  private houseSpots: Array<{ x: number; z: number }> = [];
-  private breakSpots: BreakSpot[] = [];
-  private schoolSpots: Array<{ x: number; z: number }> = [];
-  private gardenSpots: Array<{ x: number; z: number }> = [];
-  private mosqueSpots: Array<{ x: number; z: number }> = [];
-  private ownedCenters: Array<{ x: number; z: number }> = [];
-  private palaceCenter = { x: 45, z: 45 };
-  private seaCoords: Array<{ x: number; z: number }> = [];
-  private ownedMinX = 35;
-  private ownedMaxX = 55;
-  private ownedMinZ = 35;
-  private ownedMaxZ = 55;
+  // World data rebuilt from Element 1 building anchors + Element 2 street grid
+  private houseSpots: HomeAnchorSpot[] = [];
+  private breakSpots: BreakAnchorSpot[] = [];
+  private schoolSpots: BreakAnchorSpot[] = [];
+  private gardenSpots: BreakAnchorSpot[] = [];
+  private freeStreetCenters: AnchorPoint[] = [];
+  private palaceSpot: BreakAnchorSpot = {
+    cubeId: 130,
+    themeId: 'palace',
+    doorstep: { x: 45, z: 49.5 },
+    faceTarget: { x: 45, z: 45 },
+    approachOffset: { dRow: 1, dCol: 0 },
+  };
+  private seaCoords: AnchorPoint[] = [];
+  private streetGrid: StreetGrid | null = null;
+  private lastCubes: Cube[] = [];
   private lastSatisfaction = 60;
   private lastRoleSignature = '';
 
-  constructor(blobShadowTexture: THREE.CanvasTexture) {
-    // Shared character part geometries
-    this.robeGeo = new THREE.CylinderGeometry(0.18, 0.28, 0.94, 7);
+  constructor(blobShadowTexture: THREE.CanvasTexture | null) {
+    // Element 5.1: Widen robe/dress geometries by x1.25 for chunkier Stronghold silhouettes
+    this.robeGeo = new THREE.CylinderGeometry(0.225, 0.35, 0.94, 8);
     this.robeGeo.translate(0, 0.47, 0);
 
-    this.dressConeGeo = new THREE.CylinderGeometry(0.14, 0.36, 0.96, 8);
+    this.dressConeGeo = new THREE.CylinderGeometry(0.175, 0.45, 0.96, 9);
     this.dressConeGeo.translate(0, 0.48, 0);
 
-    this.headGeo = new THREE.SphereGeometry(0.2, 8, 6);
+    this.headGeo = new THREE.SphereGeometry(0.21, 9, 7);
     this.headGeo.translate(0, 1.12, 0);
 
-    this.turbanGeo = new THREE.CylinderGeometry(0.22, 0.21, 0.14, 7);
+    this.turbanGeo = new THREE.CylinderGeometry(0.235, 0.225, 0.14, 8);
     this.turbanGeo.translate(0, 1.26, 0);
 
-    this.strawHatBrimGeo = new THREE.CylinderGeometry(0.36, 0.36, 0.04, 9);
+    this.strawHatBrimGeo = new THREE.CylinderGeometry(0.39, 0.39, 0.045, 10);
     this.strawHatBrimGeo.translate(0, 1.24, 0);
 
-    this.strawHatTopGeo = new THREE.CylinderGeometry(0.16, 0.22, 0.14, 8);
+    this.strawHatTopGeo = new THREE.CylinderGeometry(0.17, 0.23, 0.14, 8);
     this.strawHatTopGeo.translate(0, 1.32, 0);
 
-    this.helmetGeo = new THREE.SphereGeometry(0.23, 8, 5, 0, Math.PI * 2, 0, Math.PI * 0.58);
+    this.helmetGeo = new THREE.SphereGeometry(
+      0.245,
+      9,
+      6,
+      0,
+      Math.PI * 2,
+      0,
+      Math.PI * 0.58
+    );
     this.helmetGeo.translate(0, 1.15, 0);
 
-    this.apronGeo = new THREE.BoxGeometry(0.26, 0.52, 0.06);
-    this.apronGeo.translate(0, 0.44, 0.22);
+    // Accessories offset slightly outward to clear the 1.25x wider robe cleanly
+    this.apronGeo = new THREE.BoxGeometry(0.31, 0.52, 0.06);
+    this.apronGeo.translate(0, 0.44, 0.28);
 
-    this.packGeo = new THREE.BoxGeometry(0.24, 0.36, 0.16);
-    this.packGeo.translate(0, 0.64, -0.22);
+    this.packGeo = new THREE.BoxGeometry(0.28, 0.38, 0.17);
+    this.packGeo.translate(0, 0.64, -0.28);
 
-    this.headscarfGeo = new THREE.SphereGeometry(0.235, 8, 6, 0, Math.PI * 2, 0, Math.PI * 0.72);
+    this.headscarfGeo = new THREE.SphereGeometry(
+      0.245,
+      9,
+      6,
+      0,
+      Math.PI * 2,
+      0,
+      Math.PI * 0.72
+    );
     this.headscarfGeo.translate(0, 1.13, -0.02);
 
-    this.caneGeo = new THREE.CylinderGeometry(0.028, 0.024, 0.86, 5);
-    this.caneGeo.translate(0.27, 0.43, 0.16);
+    this.caneGeo = new THREE.CylinderGeometry(0.032, 0.026, 0.86, 6);
+    this.caneGeo.translate(0.33, 0.43, 0.18);
 
-    this.policeCapGeo = new THREE.CylinderGeometry(0.21, 0.22, 0.12, 8);
+    // Non-weapon bamboo fishing pole held by the fisher for casting-arm bob animation (Element 3.3)
+    this.fishingRodGeo = new THREE.CylinderGeometry(0.014, 0.026, 1.25, 6);
+    this.fishingRodGeo.rotateX(Math.PI * 0.38);
+    this.fishingRodGeo.translate(0, 0.18, 0.56);
+
+    this.policeCapGeo = new THREE.CylinderGeometry(0.22, 0.23, 0.12, 8);
     this.policeCapGeo.translate(0, 1.28, 0);
 
-    this.capVisorGeo = new THREE.BoxGeometry(0.22, 0.03, 0.14);
-    this.capVisorGeo.translate(0, 1.23, 0.18);
+    this.capVisorGeo = new THREE.BoxGeometry(0.24, 0.035, 0.15);
+    this.capVisorGeo.translate(0, 1.23, 0.19);
 
-    this.basketGeo = new THREE.CylinderGeometry(0.16, 0.12, 0.24, 7);
-    this.basketGeo.translate(0.26, 0.48, 0.06);
+    this.basketGeo = new THREE.CylinderGeometry(0.17, 0.13, 0.25, 8);
+    this.basketGeo.translate(-0.33, 0.48, 0.06);
 
-    this.collarGeo = new THREE.CylinderGeometry(0.21, 0.23, 0.1, 8);
+    this.collarGeo = new THREE.CylinderGeometry(0.245, 0.27, 0.1, 8);
     this.collarGeo.translate(0, 0.9, 0);
 
-    this.shadowGeo = new THREE.PlaneGeometry(1.1, 1.1);
+    // Element 5.1: Blob shadow grows 1.1 -> 1.7 plane
+    this.shadowGeo = new THREE.PlaneGeometry(1.7, 1.7);
     this.shadowGeo.rotateX(-Math.PI / 2);
 
-    this.hitCylinderGeo = new THREE.CylinderGeometry(0.62, 0.62, 1.85, 6);
-    this.hitCylinderGeo.translate(0, 0.92, 0);
+    // Element 5.3: Raycast hit cylinder grows to radius 0.95, height 2.9
+    this.hitCylinderGeo = new THREE.CylinderGeometry(0.95, 0.95, 2.9, 8);
+    this.hitCylinderGeo.translate(0, 1.45, 0);
 
-    this.selectRingGeo = new THREE.RingGeometry(0.65, 0.9, 24);
+    // Element 5.1: Selection ring grows 0.9 -> 1.4 outer radius
+    this.selectRingGeo = new THREE.RingGeometry(1.0, 1.4, 28);
     this.selectRingGeo.rotateX(-Math.PI / 2);
 
     this.sharedGeos.push(
@@ -449,6 +451,7 @@ export class PeopleAgentsManager {
       this.packGeo,
       this.headscarfGeo,
       this.caneGeo,
+      this.fishingRodGeo,
       this.policeCapGeo,
       this.capVisorGeo,
       this.basketGeo,
@@ -458,13 +461,17 @@ export class PeopleAgentsManager {
       this.selectRingGeo
     );
 
-    // Distinct role clothing materials
+    // Distinct role clothing materials (zero weapons)
     this.skinMat = new THREE.MeshStandardMaterial({ color: 0xd2a47c, roughness: 0.85 });
     this.farmerMat = new THREE.MeshStandardMaterial({ color: 0x5c7a44, roughness: 0.88 });
     this.strawMat = new THREE.MeshStandardMaterial({ color: 0xd9b866, roughness: 0.9 });
     this.fisherMat = new THREE.MeshStandardMaterial({ color: 0x2f6d94, roughness: 0.85 });
     this.minerMat = new THREE.MeshStandardMaterial({ color: 0x6b635a, roughness: 0.9 });
-    this.helmetMat = new THREE.MeshStandardMaterial({ color: 0x9b948a, roughness: 0.55, metalness: 0.3 });
+    this.helmetMat = new THREE.MeshStandardMaterial({
+      color: 0x9b948a,
+      roughness: 0.55,
+      metalness: 0.3,
+    });
     this.woodcutterMat = new THREE.MeshStandardMaterial({ color: 0x7b502c, roughness: 0.9 });
     this.leatherMat = new THREE.MeshStandardMaterial({ color: 0x4b2f19, roughness: 0.86 });
     this.bakerMat = new THREE.MeshStandardMaterial({ color: 0xeee2c4, roughness: 0.88 });
@@ -472,7 +479,11 @@ export class PeopleAgentsManager {
     this.shopkeeperMat = new THREE.MeshStandardMaterial({ color: 0xe3cca0, roughness: 0.86 });
     this.apronAccentMat = new THREE.MeshStandardMaterial({ color: 0x9c4636, roughness: 0.84 });
     this.managerMat = new THREE.MeshStandardMaterial({ color: 0x243b55, roughness: 0.78 });
-    this.goldTrimMat = new THREE.MeshStandardMaterial({ color: 0xd8ab3d, roughness: 0.4, metalness: 0.35 });
+    this.goldTrimMat = new THREE.MeshStandardMaterial({
+      color: 0xd8ab3d,
+      roughness: 0.4,
+      metalness: 0.35,
+    });
 
     this.manMats = [
       new THREE.MeshStandardMaterial({ color: 0x9b7e58, roughness: 0.88 }),
@@ -504,10 +515,12 @@ export class PeopleAgentsManager {
     this.policeCapMat = new THREE.MeshStandardMaterial({ color: 0x142640, roughness: 0.65 });
     this.caneMat = new THREE.MeshStandardMaterial({ color: 0x6b4a2d, roughness: 0.9 });
 
+    // Element 6.3: Blob shadows larger (1.7 plane) with opacity 0.55
     this.shadowMat = new THREE.MeshBasicMaterial({
-      map: blobShadowTexture,
+      ...(blobShadowTexture ? { map: blobShadowTexture } : {}),
+      color: blobShadowTexture ? 0xffffff : 0x221b12,
       transparent: true,
-      opacity: 0.68,
+      opacity: 0.55,
       depthWrite: false,
       polygonOffset: true,
       polygonOffsetFactor: -2,
@@ -569,29 +582,43 @@ export class PeopleAgentsManager {
     agentId: number,
     role: CitizenRoleId,
     variantIdx: number
-  ): { root: THREE.Group; bodyPivot: THREE.Group } {
+  ): { root: THREE.Group; bodyPivot: THREE.Group; castingPivot: THREE.Group | null } {
     const root = new THREE.Group();
     root.userData.agentId = agentId;
 
     const shadow = new THREE.Mesh(this.shadowGeo, this.shadowMat);
     shadow.position.y = 0.05;
+    if (role === 'child') {
+      shadow.scale.setScalar(0.68);
+    }
     shadow.userData.agentId = agentId;
     root.add(shadow);
 
-    // Generous invisible raycast hit target so clicking moving citizens is reliable
+    // Element 5.3: Generous invisible raycast hit cylinder (r=0.95, h=2.9)
     const hitMesh = new THREE.Mesh(this.hitCylinderGeo, this.hitMat);
     hitMesh.userData.agentId = agentId;
     root.add(hitMesh);
 
     const bodyPivot = new THREE.Group();
     bodyPivot.userData.agentId = agentId;
+    // Element 5.1: Scale every agent mesh x1.6 (child keeps 0.6 relative scale on top)
+    bodyPivot.scale.setScalar(
+      role === 'child' ? ADULT_MESH_SCALE * CHILD_RELATIVE_SCALE : ADULT_MESH_SCALE
+    );
     root.add(bodyPivot);
 
-    const addPart = (geo: THREE.BufferGeometry, mat: THREE.Material, cast = true) => {
+    let castingPivot: THREE.Group | null = null;
+
+    const addPart = (
+      geo: THREE.BufferGeometry,
+      mat: THREE.Material,
+      parent: THREE.Object3D = bodyPivot,
+      cast = true
+    ) => {
       const m = new THREE.Mesh(geo, mat);
       m.castShadow = cast;
       m.userData.agentId = agentId;
-      bodyPivot.add(m);
+      parent.add(m);
       return m;
     };
 
@@ -603,12 +630,18 @@ export class PeopleAgentsManager {
         addPart(this.strawHatBrimGeo, this.strawMat);
         addPart(this.strawHatTopGeo, this.strawMat);
         break;
-      case 'fisher':
+      case 'fisher': {
         addPart(this.robeGeo, this.fisherMat);
         addPart(this.headGeo, this.skinMat);
         addPart(this.turbanGeo, this.strawMat);
         addPart(this.basketGeo, this.strawMat);
+        castingPivot = new THREE.Group();
+        castingPivot.position.set(0.28, 0.72, 0.14);
+        castingPivot.userData.agentId = agentId;
+        bodyPivot.add(castingPivot);
+        addPart(this.fishingRodGeo, this.caneMat, castingPivot);
         break;
+      }
       case 'miner':
         addPart(this.robeGeo, this.minerMat);
         addPart(this.headGeo, this.skinMat);
@@ -645,14 +678,13 @@ export class PeopleAgentsManager {
       case 'child':
         addPart(this.robeGeo, this.childMats[variantIdx % this.childMats.length]);
         addPart(this.headGeo, this.skinMat);
-        bodyPivot.scale.setScalar(0.6);
         break;
       case 'elder':
         addPart(this.robeGeo, this.elderMat);
         addPart(this.headGeo, this.skinMat);
         addPart(this.turbanGeo, this.apronWhiteMat);
         addPart(this.caneGeo, this.caneMat);
-        bodyPivot.rotation.x = 0.14; // gentle elder stoop
+        bodyPivot.rotation.x = 0.14;
         break;
       case 'police':
         addPart(this.robeGeo, this.policeMat);
@@ -669,42 +701,37 @@ export class PeopleAgentsManager {
         break;
     }
 
-    return { root, bodyPivot };
+    return { root, bodyPivot, castingPivot };
   }
 
-  private clampOwned(x: number, z: number): { x: number; z: number } {
-    return {
-      x: THREE.MathUtils.clamp(x, this.ownedMinX, this.ownedMaxX),
-      z: THREE.MathUtils.clamp(z, this.ownedMinZ, this.ownedMaxZ),
-    };
+  private getLandHeight(x: number, z: number): number {
+    // Element 2.4: Land height everywhere on valid walkable paths (never dip into seabed)
+    return Math.max(WATER_SURFACE_Y + 0.08, getTerrainHeightAt(x, z, this.seaCoords));
   }
 
-  private isNearWater(x: number, z: number): boolean {
-    for (let i = 0; i < this.seaCoords.length; i++) {
-      const sc = this.seaCoords[i];
-      if (Math.abs(x - sc.x) < 4.5 && Math.abs(z - sc.z) < 4.5) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private pickNearestBreakSpot(fromX: number, fromZ: number, preferCalm = false): BreakSpot {
+  private pickNearestBreakSpot(
+    fromX: number,
+    fromZ: number,
+    preferCalm = false
+  ): BreakAnchorSpot {
     const pool = preferCalm
       ? this.breakSpots.filter(
-          (b) => b.kind === 'mosque' || b.kind === 'garden' || b.kind === 'palace'
+          (b) =>
+            b.themeId === 'mosque' ||
+            b.themeId === 'garden' ||
+            b.themeId === 'palace'
         )
       : this.breakSpots;
     const list = pool.length > 0 ? pool : this.breakSpots;
     if (list.length === 0) {
-      return { x: this.palaceCenter.x, z: this.palaceCenter.z + 3.2, kind: 'palace' };
+      return this.palaceSpot;
     }
 
     let best = list[0];
     let bestDist = Infinity;
     for (let i = 0; i < list.length; i++) {
       const b = list[i];
-      const d = Math.hypot(b.x - fromX, b.z - fromZ);
+      const d = Math.hypot(b.doorstep.x - fromX, b.doorstep.z - fromZ);
       if (d < bestDist) {
         bestDist = d;
         best = b;
@@ -713,60 +740,83 @@ export class PeopleAgentsManager {
     return best;
   }
 
-  private buildPathViaPalace(
-    fromX: number,
-    fromZ: number,
-    destX: number,
-    destZ: number,
-    lateralOffset: number
-  ): Waypoint[] {
-    const dTotal = Math.hypot(destX - fromX, destZ - fromZ);
-    const dFromPalace = Math.hypot(fromX - this.palaceCenter.x, fromZ - this.palaceCenter.z);
-    const dToPalace = Math.hypot(destX - this.palaceCenter.x, destZ - this.palaceCenter.z);
+  private routeAgentTo(
+    agent: LivingAgent,
+    destAnchor: AnchorPoint,
+    targetThemeId: ThemeId | null,
+    faceTarget: AnchorPoint | null,
+    destCubeId?: number,
+    destApproachOffset?: { dRow: number; dCol: number }
+  ): void {
+    agent.targetThemeId = targetThemeId;
+    agent.activeFaceTarget = faceTarget;
+    agent.waypointIdx = 0;
 
-    // Offset destination slightly so agents stand around doors/edges, not inside building centers
-    const clampedDest = this.clampOwned(
-      destX + lateralOffset * 0.85,
-      destZ + Math.cos(lateralOffset * 2.1) * 1.4
+    if (!this.streetGrid) {
+      agent.waypoints = [];
+      agent.pathReachable = false;
+      agent.state = 'WAITING';
+      agent.stateTimer = 4.0;
+      return;
+    }
+
+    const result = computeStreetPath(
+      this.streetGrid,
+      agent.x,
+      agent.z,
+      destAnchor,
+      {
+        destCubeId,
+        destThemeId: targetThemeId,
+        destApproachOffset,
+      }
     );
 
-    // Route through Palace courtyard hub along dirt avenues when crossing distinct cells
-    if (dTotal > 10.5 && dFromPalace > 5.5 && dToPalace > 5.5) {
-      const hub = this.clampOwned(
-        this.palaceCenter.x + lateralOffset * 1.6,
-        this.palaceCenter.z + 3.4 + lateralOffset * 0.8
-      );
-      return [hub, clampedDest];
+    agent.waypoints = result.waypoints;
+    agent.pathReachable = result.reachable;
+
+    if (!result.reachable && result.waypoints.length === 0) {
+      agent.state = 'WAITING';
+      agent.stateTimer = 4.0 + Math.random() * 2.5;
     }
-    return [clampedDest];
+  }
+
+  private ensureVisibleAtDoorstepIfLeavingHome(agent: LivingAgent): void {
+    if (!agent.group.visible) {
+      agent.x = agent.homeSpot.doorstep.x;
+      agent.z = agent.homeSpot.doorstep.z;
+      const y = this.getLandHeight(agent.x, agent.z);
+      agent.group.position.set(agent.x, y, agent.z);
+      agent.group.scale.setScalar(1);
+      agent.group.visible = true;
+    }
   }
 
   private assignNextRoutine(agent: LivingAgent): void {
-    const jitter = (Math.random() - 0.5) * 2.8;
+    this.ensureVisibleAtDoorstepIfLeavingHome(agent);
+    agent.activeBreakSpot = null;
 
     if (agent.role === 'police') {
       agent.state = 'PATROL';
       agent.patrolStep += 1;
-      if (agent.patrolStep % 2 === 0 || this.ownedCenters.length === 0) {
-        const dest = this.clampOwned(
-          this.palaceCenter.x + Math.cos(agent.patrolStep * 1.3) * 4.4,
-          this.palaceCenter.z + Math.sin(agent.patrolStep * 1.3) * 4.4
+      if (agent.patrolStep % 2 === 0 || this.freeStreetCenters.length === 0) {
+        agent.patrolAtPalace = true;
+        this.routeAgentTo(
+          agent,
+          this.palaceSpot.doorstep,
+          'palace',
+          this.palaceSpot.faceTarget,
+          this.palaceSpot.cubeId,
+          this.palaceSpot.approachOffset
         );
-        agent.waypoints = [dest];
       } else {
-        const spot =
-          this.ownedCenters[
-            (agent.patrolStep * 3 + agent.id) % this.ownedCenters.length
+        agent.patrolAtPalace = false;
+        const streetPt =
+          this.freeStreetCenters[
+            (agent.patrolStep * 3 + agent.id) % this.freeStreetCenters.length
           ];
-        agent.waypoints = this.buildPathViaPalace(
-          agent.x,
-          agent.z,
-          spot.x + jitter * 0.5,
-          spot.z + jitter * 0.5,
-          agent.lateralOffset
-        );
+        this.routeAgentTo(agent, streetPt, null, null);
       }
-      agent.waypointIdx = 0;
       return;
     }
 
@@ -776,130 +826,137 @@ export class PeopleAgentsManager {
       if (this.schoolSpots.length > 0 && roll < 0.4) {
         const s = this.schoolSpots[agent.id % this.schoolSpots.length];
         agent.playKind = 'school';
-        agent.waypoints = this.buildPathViaPalace(
-          agent.x,
-          agent.z,
-          s.x + jitter,
-          s.z + jitter,
-          agent.lateralOffset
+        this.routeAgentTo(
+          agent,
+          s.doorstep,
+          'school',
+          s.faceTarget,
+          s.cubeId,
+          s.approachOffset
         );
-      } else if (this.gardenSpots.length > 0 && roll < 0.7) {
+      } else if (this.gardenSpots.length > 0 && roll < 0.72) {
         const g = this.gardenSpots[agent.id % this.gardenSpots.length];
         agent.playKind = 'garden';
-        agent.waypoints = this.buildPathViaPalace(
-          agent.x,
-          agent.z,
-          g.x + jitter,
-          g.z + jitter,
-          agent.lateralOffset
+        this.routeAgentTo(
+          agent,
+          g.doorstep,
+          'garden',
+          g.faceTarget,
+          g.cubeId,
+          g.approachOffset
         );
       } else {
-        agent.playKind = 'houses';
+        agent.playKind = 'house';
         const h =
           this.houseSpots.length > 0
-            ? this.houseSpots[Math.floor(Math.random() * this.houseSpots.length)]
+            ? this.houseSpots[(agent.id + Math.floor(Math.random() * this.houseSpots.length)) % this.houseSpots.length]
             : agent.homeSpot;
-        agent.waypoints = [this.clampOwned(h.x + jitter * 1.3, h.z + jitter * 1.3)];
+        this.routeAgentTo(
+          agent,
+          h.doorstep,
+          'house',
+          h.faceTarget,
+          h.cubeId,
+          h.approachOffset
+        );
       }
-      agent.waypointIdx = 0;
       return;
     }
 
     if (agent.role === 'elder') {
-      if (agent.state === 'AT_HOME' || agent.state === 'TO_HOME') {
+      if (agent.state === 'AT_HOME' || agent.state === 'WAITING') {
         const b = this.pickNearestBreakSpot(agent.x, agent.z, true);
-        agent.breakKind = b.kind;
+        agent.activeBreakSpot = b;
         agent.state = 'TO_BREAK';
-        agent.waypoints = this.buildPathViaPalace(
-          agent.x,
-          agent.z,
-          b.x + jitter * 0.5,
-          b.z + jitter * 0.5,
-          agent.lateralOffset
+        this.routeAgentTo(
+          agent,
+          b.doorstep,
+          b.themeId,
+          b.faceTarget,
+          b.cubeId,
+          b.approachOffset
         );
-        agent.waypointIdx = 0;
       } else {
         agent.state = 'TO_HOME';
-        agent.waypoints = this.buildPathViaPalace(
-          agent.x,
-          agent.z,
-          agent.homeSpot.x + jitter * 0.4,
-          agent.homeSpot.z + jitter * 0.4,
-          agent.lateralOffset
+        this.routeAgentTo(
+          agent,
+          agent.homeSpot.doorstep,
+          'house',
+          agent.homeSpot.faceTarget,
+          agent.homeSpot.cubeId,
+          agent.homeSpot.approachOffset
         );
-        agent.waypointIdx = 0;
       }
       return;
     }
 
     // Workers with real staffed buildings: AT_HOME -> TO_WORK -> WORKING -> TO_BREAK -> ON_BREAK -> TO_HOME
     if (agent.workSpot) {
-      if (agent.state === 'AT_HOME') {
+      if (agent.state === 'AT_HOME' || agent.state === 'WAITING') {
         agent.state = 'TO_WORK';
-        // Stand beside sea shore if fisher, otherwise near building edge
-        const offsetX = agent.workSpot.themeId === 'sea' ? 4.8 : jitter * 0.55;
-        const offsetZ = agent.workSpot.themeId === 'sea' ? 4.8 : jitter * 0.55;
-        agent.waypoints = this.buildPathViaPalace(
-          agent.x,
-          agent.z,
-          agent.workSpot.x + offsetX,
-          agent.workSpot.z + offsetZ,
-          agent.lateralOffset
+        agent.workSpotIdx = agent.id % agent.workSpot.workSpots.length;
+        const targetPt = agent.workSpot.workSpots[agent.workSpotIdx] ?? agent.workSpot.doorstep;
+        this.routeAgentTo(
+          agent,
+          targetPt,
+          agent.workSpot.themeId,
+          agent.workSpot.faceTarget,
+          agent.workSpot.cubeId,
+          agent.workSpot.approachOffset
         );
-        agent.waypointIdx = 0;
         return;
       }
       if (agent.state === 'WORKING') {
         const b = this.pickNearestBreakSpot(agent.x, agent.z, false);
-        agent.breakKind = b.kind;
+        agent.activeBreakSpot = b;
         agent.state = 'TO_BREAK';
-        agent.waypoints = this.buildPathViaPalace(
-          agent.x,
-          agent.z,
-          b.x + jitter * 0.5,
-          b.z + jitter * 0.5,
-          agent.lateralOffset
+        this.routeAgentTo(
+          agent,
+          b.doorstep,
+          b.themeId,
+          b.faceTarget,
+          b.cubeId,
+          b.approachOffset
         );
-        agent.waypointIdx = 0;
         return;
       }
       if (agent.state === 'ON_BREAK') {
         agent.state = 'TO_HOME';
-        agent.waypoints = this.buildPathViaPalace(
-          agent.x,
-          agent.z,
-          agent.homeSpot.x + jitter * 0.4,
-          agent.homeSpot.z + jitter * 0.4,
-          agent.lateralOffset
+        this.routeAgentTo(
+          agent,
+          agent.homeSpot.doorstep,
+          'house',
+          agent.homeSpot.faceTarget,
+          agent.homeSpot.cubeId,
+          agent.homeSpot.approachOffset
         );
-        agent.waypointIdx = 0;
         return;
       }
     }
 
     // General townsfolk (man / woman without assigned workplace)
-    if (agent.state === 'AT_HOME') {
+    if (agent.state === 'AT_HOME' || agent.state === 'WAITING') {
       const b = this.pickNearestBreakSpot(agent.x, agent.z, false);
-      agent.breakKind = b.kind;
+      agent.activeBreakSpot = b;
       agent.state = 'TO_BREAK';
-      agent.waypoints = this.buildPathViaPalace(
-        agent.x,
-        agent.z,
-        b.x + jitter * 0.6,
-        b.z + jitter * 0.6,
-        agent.lateralOffset
+      this.routeAgentTo(
+        agent,
+        b.doorstep,
+        b.themeId,
+        b.faceTarget,
+        b.cubeId,
+        b.approachOffset
       );
-      agent.waypointIdx = 0;
     } else {
       agent.state = 'TO_HOME';
-      agent.waypoints = this.buildPathViaPalace(
-        agent.x,
-        agent.z,
-        agent.homeSpot.x + jitter * 0.4,
-        agent.homeSpot.z + jitter * 0.4,
-        agent.lateralOffset
+      this.routeAgentTo(
+        agent,
+        agent.homeSpot.doorstep,
+        'house',
+        agent.homeSpot.faceTarget,
+        agent.homeSpot.cubeId,
+        agent.homeSpot.approachOffset
       );
-      agent.waypointIdx = 0;
     }
   }
 
@@ -908,121 +965,175 @@ export class PeopleAgentsManager {
     population: number,
     satisfaction: number,
     staffedSlots: Set<string>,
-    seaCoords: Array<{ x: number; z: number }>
+    seaCoords: AnchorPoint[]
   ): void {
+    this.lastCubes = cubes;
     this.lastSatisfaction = satisfaction;
     this.seaCoords = seaCoords;
     this.houseSpots = [];
     this.breakSpots = [];
     this.schoolSpots = [];
     this.gardenSpots = [];
-    this.mosqueSpots = [];
-    this.ownedCenters = [];
+    this.freeStreetCenters = [];
 
-    const staffedWorkSlots: Array<{ role: CitizenRoleId; spot: SpotInfo; count: number }> = [];
+    // Element 2.1: Rebuild 12x12 walkability street grid from current cubes
+    this.streetGrid = buildStreetGrid(cubes, seaCoords);
 
-    let minX = Infinity;
-    let maxX = -Infinity;
-    let minZ = Infinity;
-    let maxZ = -Infinity;
+    const staffedWorkSlots: Array<{
+      role: CitizenRoleId;
+      spot: WorkAnchorSpot;
+      count: number;
+    }> = [];
 
-    for (const c of cubes) {
+    // Rebuild Palace courtyard anchor first
+    const palaceCube = findPalaceCube(cubes);
+    if (palaceCube) {
+      const palaceCellPos = cellToWorldCenter(palaceCube.row, palaceCube.col);
+      const palaceAnchors = getBuildingAnchors(
+        'palace',
+        'full',
+        0,
+        palaceCellPos,
+        { cubes, seaCoords, row: palaceCube.row, col: palaceCube.col }
+      );
+      this.palaceSpot = {
+        cubeId: palaceCube.id,
+        themeId: 'palace',
+        doorstep: palaceAnchors.doorstep,
+        faceTarget: palaceAnchors.faceTarget,
+        approachOffset: palaceAnchors.approachOffset,
+      };
+    }
+
+    // Element 1.2: Rebuild houseSpots, breakSpots, schoolSpots, gardenSpots, and workSpots from building anchors
+    for (let i = 0; i < cubes.length; i++) {
+      const c = cubes[i];
       if (c.owner !== 'player') continue;
-      const center = cellToWorldCenter(c.row, c.col);
-      this.ownedCenters.push(center);
-      if (center.x < minX) minX = center.x;
-      if (center.x > maxX) maxX = center.x;
-      if (center.z < minZ) minZ = center.z;
-      if (center.z > maxZ) maxZ = center.z;
+      const cellCenter = cellToWorldCenter(c.row, c.col);
 
-      const slotEntries: Array<{ slot: 0 | 1; themeId: ThemeId | null }> = [
+      if (isCellWalkable(this.streetGrid, c.row, c.col)) {
+        this.freeStreetCenters.push(cellCenter);
+      }
+
+      const slotEntries: Array<{ slot: SlotIndex; themeId: ThemeId | null }> = [
         { slot: 0, themeId: c.themeId },
         { slot: 1, themeId: c.secondThemeId },
       ];
 
-      for (const entry of slotEntries) {
+      for (let s = 0; s < slotEntries.length; s++) {
+        const entry = slotEntries[s];
         if (!entry.themeId) continue;
-        const t = entry.themeId;
-        const def = THEMES[t];
-        const pos = cellSlotToWorld(c.row, c.col, def.footprint, entry.slot);
 
-        if (t === 'house') {
-          this.houseSpots.push(pos);
-        } else if (t === 'mosque') {
-          this.mosqueSpots.push(pos);
-          this.breakSpots.push({ x: pos.x, z: pos.z, kind: 'mosque' });
-        } else if (t === 'garden') {
-          this.gardenSpots.push(pos);
-          this.breakSpots.push({ x: pos.x, z: pos.z, kind: 'garden' });
-        } else if (t === 'school') {
-          this.schoolSpots.push(pos);
+        const def = THEMES[entry.themeId];
+        const anchors: BuildingAnchors = getBuildingAnchors(
+          entry.themeId,
+          def.footprint,
+          entry.slot,
+          cellCenter,
+          { cubes, seaCoords, row: c.row, col: c.col }
+        );
+
+        if (entry.themeId === 'house') {
+          this.houseSpots.push({
+            cubeId: c.id,
+            doorstep: anchors.doorstep,
+            faceTarget: anchors.faceTarget,
+            approachOffset: anchors.approachOffset,
+          });
+        } else if (entry.themeId === 'school') {
+          const spot: BreakAnchorSpot = {
+            cubeId: c.id,
+            themeId: 'palace', // placeholder unused; schoolSpots used for children
+            doorstep: anchors.doorstep,
+            faceTarget: anchors.faceTarget,
+            approachOffset: anchors.approachOffset,
+          };
+          this.schoolSpots.push(spot);
+        } else if (entry.themeId === 'garden') {
+          const spot: BreakAnchorSpot = {
+            cubeId: c.id,
+            themeId: 'garden',
+            doorstep: anchors.doorstep,
+            faceTarget: anchors.faceTarget,
+            approachOffset: anchors.approachOffset,
+          };
+          this.gardenSpots.push(spot);
+          this.breakSpots.push(spot);
         } else if (
-          t === 'restaurant' ||
-          t === 'cafe' ||
-          t === 'grand_market' ||
-          t === 'shop' ||
-          t === 'theater'
+          entry.themeId === 'mosque' ||
+          entry.themeId === 'restaurant' ||
+          entry.themeId === 'cafe' ||
+          entry.themeId === 'grand_market' ||
+          entry.themeId === 'shop' ||
+          entry.themeId === 'theater'
         ) {
-          this.breakSpots.push({ x: pos.x, z: pos.z, kind: t });
+          this.breakSpots.push({
+            cubeId: c.id,
+            themeId: entry.themeId,
+            doorstep: anchors.doorstep,
+            faceTarget: anchors.faceTarget,
+            approachOffset: anchors.approachOffset,
+          });
         }
 
-        // Collect real staffed workplaces (plus sea fishing spots)
-        const role = themeToWorkerRole(t);
-        if (role) {
-          const isStaffed =
-            def.workers === 0 || staffedSlots.has(makeSlotKey(c.id, entry.slot));
-          if (isStaffed) {
-            const workerSeats = t === 'sea' ? 1 : Math.max(1, def.workers);
-            staffedWorkSlots.push({
-              role,
-              spot: { x: pos.x, z: pos.z, cubeId: c.id, themeId: t },
-              count: workerSeats,
-            });
-          }
+        // Staffed workplace assignment (sea spawns a visible shoreline fisher even though workers === 0)
+        const role = themeToWorkerRole(entry.themeId);
+        const slotKey = makeSlotKey(c.id, entry.slot);
+        if (role && (entry.themeId === 'sea' || staffedSlots.has(slotKey))) {
+          const desired = entry.themeId === 'sea' ? 1 : Math.min(2, Math.max(1, def.workers));
+          staffedWorkSlots.push({
+            role,
+            spot: {
+              cubeId: c.id,
+              themeId: entry.themeId,
+              doorstep: anchors.doorstep,
+              workSpots: anchors.workSpots,
+              faceTarget: anchors.faceTarget,
+              approachOffset: anchors.approachOffset,
+            },
+            count: desired,
+          });
         }
       }
     }
 
-    if (Number.isFinite(minX)) {
-      this.ownedMinX = minX - 3.6;
-      this.ownedMaxX = maxX + 3.6;
-      this.ownedMinZ = minZ - 3.6;
-      this.ownedMaxZ = maxZ + 3.6;
-    }
+    // Palace courtyard is always a valid open-air break destination
+    this.breakSpots.push(this.palaceSpot);
 
-    const palace = findPalaceCube(cubes);
-    if (palace) {
-      this.palaceCenter = cellToWorldCenter(palace.row, palace.col);
-    }
-    this.breakSpots.push({
-      x: this.palaceCenter.x,
-      z: this.palaceCenter.z + 3.6,
-      kind: 'palace',
-    });
+    // Fallback home spot if the player demolished all houses
+    const fallbackHome: HomeAnchorSpot =
+      this.houseSpots.length > 0
+        ? this.houseSpots[0]
+        : {
+            cubeId: this.palaceSpot.cubeId,
+            doorstep: this.palaceSpot.doorstep,
+            faceTarget: this.palaceSpot.faceTarget,
+            approachOffset: this.palaceSpot.approachOffset,
+          };
 
-    // Strict visible cap: min(population, 36)
+    // Visible agents capped at min(population, 36)
     const targetCount = Math.min(MAX_VISIBLE_AGENTS, Math.max(0, Math.floor(population)));
+    const desiredSpecs: Array<{ role: CitizenRoleId; workSpot: WorkAnchorSpot | null }> = [];
 
-    // Build desired role + workplace blueprint for the targetCount visible citizens
-    const desiredSpecs: Array<{ role: CitizenRoleId; workSpot: SpotInfo | null }> = [];
-
-    // 1) Internal civic police patrolling from Palace (1 at pop >= 4, 2 at pop >= 14)
-    const policeCount = targetCount >= 14 ? 2 : targetCount >= 4 ? 1 : 0;
-    for (let i = 0; i < policeCount && desiredSpecs.length < targetCount; i++) {
+    // Internal security police officers (1-2 depending on population)
+    if (targetCount >= 6) {
+      desiredSpecs.push({ role: 'police', workSpot: null });
+    }
+    if (targetCount >= 22) {
       desiredSpecs.push({ role: 'police', workSpot: null });
     }
 
-    // 2) Assign workers to real staffed buildings
-    for (const ws of staffedWorkSlots) {
-      for (let i = 0; i < ws.count && desiredSpecs.length < targetCount; i++) {
-        // Reserve a few slots for town families (women, children, elders) if pop >= 6
-        const reserve = targetCount >= 10 ? 4 : targetCount >= 6 ? 2 : 0;
-        if (desiredSpecs.length >= targetCount - reserve) break;
+    // Staffed workers
+    for (let i = 0; i < staffedWorkSlots.length; i++) {
+      const ws = staffedWorkSlots[i];
+      for (let k = 0; k < ws.count; k++) {
+        if (desiredSpecs.length >= targetCount) break;
         desiredSpecs.push({ role: ws.role, workSpot: ws.spot });
       }
+      if (desiredSpecs.length >= targetCount) break;
     }
 
-    // 3) Fill remaining visible citizens with women, children, elders, and men
+    // Fill remaining visible citizens with diverse townsfolk (women, children, men, elders)
     const familyCycle: CitizenRoleId[] = ['woman', 'child', 'man', 'woman', 'elder', 'child'];
     let cycleIdx = 0;
     while (desiredSpecs.length < targetCount) {
@@ -1034,12 +1145,13 @@ export class PeopleAgentsManager {
     }
 
     const roleSig = desiredSpecs
-      .map((s) => `${s.role}:${s.workSpot ? s.workSpot.cubeId : '-'}`)
+      .map((s) => `${s.role}:${s.workSpot ? `${s.workSpot.cubeId}:${s.workSpot.doorstep.x.toFixed(1)},${s.workSpot.doorstep.z.toFixed(1)}` : '-'}`)
       .join('|');
+    const gridSig = `${seaCoords.length}:${this.houseSpots.length}:${this.freeStreetCenters.length}`;
+    const fullSig = `${roleSig}#${gridSig}`;
 
-    // Update existing agents' home/work bindings cleanly; rebuild mesh only when role changes
-    if (roleSig !== this.lastRoleSignature || this.agents.length !== targetCount) {
-      this.lastRoleSignature = roleSig;
+    if (fullSig !== this.lastRoleSignature || this.agents.length !== targetCount) {
+      this.lastRoleSignature = fullSig;
 
       // Trim excess agents cleanly if population dropped
       while (this.agents.length > targetCount) {
@@ -1053,13 +1165,12 @@ export class PeopleAgentsManager {
         }
       }
 
-      // Update existing agents or spawn new ones
       for (let i = 0; i < targetCount; i++) {
         const spec = desiredSpecs[i];
         const home =
           this.houseSpots.length > 0
             ? this.houseSpots[i % this.houseSpots.length]
-            : this.palaceCenter;
+            : fallbackHome;
 
         const existing = this.agents[i];
         if (existing) {
@@ -1069,8 +1180,33 @@ export class PeopleAgentsManager {
             existing.workSpot?.themeId !== spec.workSpot?.themeId;
           existing.workSpot = spec.workSpot;
 
+          // If a new building or sea was built under an agent, nudge cleanly to doorstep
+          const strandedOnWater = isPointOverWater(existing.x, existing.z, seaCoords);
+          const allowedFieldId =
+            existing.state === 'WORKING' &&
+            existing.workSpot &&
+            WALKABLE_FIELD_THEMES.has(existing.workSpot.themeId)
+              ? existing.workSpot.cubeId
+              : undefined;
+          const strandedInWall = isPointInsideAnyBuildingFootprint(
+            existing.x,
+            existing.z,
+            cubes,
+            allowedFieldId
+          );
+          if (strandedOnWater || strandedInWall) {
+            existing.x = home.doorstep.x;
+            existing.z = home.doorstep.z;
+            const y = this.getLandHeight(existing.x, existing.z);
+            existing.group.position.set(existing.x, y, existing.z);
+            existing.group.visible = true;
+            existing.group.scale.setScalar(1);
+            existing.state = 'AT_HOME';
+            existing.stateTimer = 0.25;
+            existing.waypoints = [];
+          }
+
           if (existing.role !== spec.role) {
-            // Replace mesh in-place keeping stable agent id & position
             this.group.remove(existing.group);
             existing.role = spec.role;
             existing.isFemale =
@@ -1083,11 +1219,12 @@ export class PeopleAgentsManager {
             existing.speed = baseSpeed * speedVar;
 
             const built = this.createAgentMesh(existing.id, spec.role, existing.id);
-            const y = getTerrainHeightAt(existing.x, existing.z, this.seaCoords);
+            const y = this.getLandHeight(existing.x, existing.z);
             built.root.position.set(existing.x, y, existing.z);
             this.group.add(built.root);
             existing.group = built.root;
             existing.bodyPivot = built.bodyPivot;
+            existing.castingPivot = built.castingPivot;
             existing.state = 'AT_HOME';
             existing.stateTimer = 0.2;
             this.assignNextRoutine(existing);
@@ -1095,6 +1232,18 @@ export class PeopleAgentsManager {
             existing.state = 'AT_HOME';
             existing.stateTimer = 0.1;
             this.assignNextRoutine(existing);
+          } else if (existing.state !== 'AT_HOME' && existing.state !== 'ENTERING_HOME' && existing.stateTimer <= 0) {
+            // Re-validate active path against updated street grid (e.g. player just built a sea or building)
+            const lastWp = existing.waypoints[existing.waypoints.length - 1];
+            if (lastWp) {
+              this.routeAgentTo(
+                existing,
+                lastWp,
+                existing.targetThemeId,
+                existing.activeFaceTarget,
+                existing.workSpot?.cubeId
+              );
+            }
           }
         } else {
           const id = this.nextAgentId++;
@@ -1105,18 +1254,13 @@ export class PeopleAgentsManager {
             : MALE_NAMES[id % MALE_NAMES.length];
           const baseSpeed = getBaseSpeedForRole(spec.role);
           const speedVar = 0.85 + deterministicUnit(id * 7 + 3) * 0.3; // +-15%
-          const lateralOffset = (deterministicUnit(id * 13 + 5) - 0.5) * 3.2;
 
-          const startPos = this.clampOwned(
-            (spec.role === 'police' ? this.palaceCenter.x : home.x) +
-              (deterministicUnit(id * 3) - 0.5) * 4.0,
-            (spec.role === 'police' ? this.palaceCenter.z : home.z) +
-              (deterministicUnit(id * 5) - 0.5) * 4.0
-          );
-
+          // Spawn cleanly on valid doorstep / palace courtyard anchor (never inside walls or water)
+          const startAnchor =
+            spec.role === 'police' ? this.palaceSpot.doorstep : home.doorstep;
           const built = this.createAgentMesh(id, spec.role, id);
-          const startY = getTerrainHeightAt(startPos.x, startPos.z, this.seaCoords);
-          built.root.position.set(startPos.x, startY, startPos.z);
+          const startY = this.getLandHeight(startAnchor.x, startAnchor.z);
+          built.root.position.set(startAnchor.x, startY, startAnchor.z);
           this.group.add(built.root);
 
           const agent: LivingAgent = {
@@ -1126,21 +1270,30 @@ export class PeopleAgentsManager {
             role: spec.role,
             group: built.root,
             bodyPivot: built.bodyPivot,
-            x: startPos.x,
-            z: startPos.z,
+            castingPivot: built.castingPivot,
+            x: startAnchor.x,
+            z: startAnchor.z,
             waypoints: [],
             waypointIdx: 0,
+            pathReachable: true,
             speed: baseSpeed * speedVar,
-            lateralOffset,
             state: 'AT_HOME',
-            stateTimer: deterministicUnit(id * 11) * 1.4,
+            stateTimer: deterministicUnit(id * 11) * 1.2,
+            enterDoorTimer: 0,
+            enterStartX: startAnchor.x,
+            enterStartZ: startAnchor.z,
             walkPhase: id * 1.1,
             workPhase: id * 0.7,
+            workSpotIdx: 0,
+            workSpotSwitchTimer: 0,
             homeSpot: home,
             workSpot: spec.workSpot,
-            breakKind: 'palace',
-            playKind: 'houses',
+            activeBreakSpot: null,
+            targetThemeId: 'house',
+            activeFaceTarget: home.faceTarget,
+            playKind: 'house',
             patrolStep: id,
+            patrolAtPalace: true,
           };
           this.assignNextRoutine(agent);
           this.agents.push(agent);
@@ -1167,45 +1320,110 @@ export class PeopleAgentsManager {
     return false;
   }
 
+  /**
+   * Read-only snapshot for Element 8 geometric verification tests.
+   */
+  public getDebugAnchors(): {
+    houseSpots: HomeAnchorSpot[];
+    breakSpots: BreakAnchorSpot[];
+    schoolSpots: BreakAnchorSpot[];
+    gardenSpots: BreakAnchorSpot[];
+    palaceSpot: BreakAnchorSpot;
+    workSpots: WorkAnchorSpot[];
+    streetGrid: StreetGrid | null;
+  } {
+    const workSpots: WorkAnchorSpot[] = [];
+    for (let i = 0; i < this.agents.length; i++) {
+      const ws = this.agents[i].workSpot;
+      if (ws) workSpots.push(ws);
+    }
+    return {
+      houseSpots: this.houseSpots,
+      breakSpots: this.breakSpots,
+      schoolSpots: this.schoolSpots,
+      gardenSpots: this.gardenSpots,
+      palaceSpot: this.palaceSpot,
+      workSpots,
+      streetGrid: this.streetGrid,
+    };
+  }
+
+  /**
+   * Element 4.1: Truthful Arabic card text derived strictly from the agent's actual current leg,
+   * target anchor theme, and current visibility/waiting state. Zero generic fallback.
+   */
   public getAgentInfo(agentId: number): CitizenInfo | null {
     for (let i = 0; i < this.agents.length; i++) {
       const a = this.agents[i];
       if (a.id !== agentId) continue;
 
-      let destinationAr = '';
+      let destinationAr: string;
       switch (a.state) {
-        case 'TO_WORK':
-          destinationAr = getWorkDestinationText(a.role, a.workSpot?.themeId ?? null, false);
-          break;
-        case 'WORKING':
-          destinationAr = getWorkDestinationText(a.role, a.workSpot?.themeId ?? null, true);
-          break;
-        case 'TO_BREAK':
-          destinationAr = getBreakDestinationText(a.breakKind, a.isFemale, false);
-          break;
-        case 'ON_BREAK':
-          destinationAr = getBreakDestinationText(a.breakKind, a.isFemale, true);
-          break;
-        case 'TO_HOME':
-          destinationAr = a.isFemale ? 'راجعة بيتها' : 'راجع بيته';
+        case 'WAITING':
+          destinationAr = WAITING_NO_PATH_TEXT;
           break;
         case 'AT_HOME':
-          destinationAr = a.isFemale ? 'تستريح في بيتها' : 'يستريح في بيته';
+          destinationAr = AT_HOME_TEXT;
           break;
-        case 'PLAYING':
-          destinationAr =
-            a.playKind === 'school'
-              ? 'يلعب ويتعلم عند المدرسة'
-              : a.playKind === 'garden'
-                ? 'يلعب في الحديقة'
-                : 'يلعب قرب البيوت';
+        case 'ENTERING_HOME':
+        case 'TO_HOME':
+          destinationAr = THEME_GOING_TEXT.house;
           break;
-        case 'PATROL':
-          destinationAr =
-            a.patrolStep % 2 === 0
-              ? 'في جولة حراسة بساحة القصر'
-              : 'يتفقد أحياء المملكة بسلام';
+        case 'TO_WORK': {
+          const workTheme: ThemeId = a.targetThemeId ?? a.workSpot?.themeId ?? 'palace';
+          destinationAr = THEME_GOING_TEXT[workTheme];
           break;
+        }
+        case 'WORKING': {
+          const workTheme: ThemeId = a.targetThemeId ?? a.workSpot?.themeId ?? 'palace';
+          destinationAr = THEME_ARRIVED_TEXT[workTheme];
+          break;
+        }
+        case 'TO_BREAK': {
+          const breakTheme: BreakThemeId = a.activeBreakSpot?.themeId ?? 'palace';
+          destinationAr = THEME_GOING_TEXT[breakTheme];
+          break;
+        }
+        case 'ON_BREAK': {
+          const breakTheme: BreakThemeId = a.activeBreakSpot?.themeId ?? 'palace';
+          destinationAr = BREAK_ARRIVED_TEXT[breakTheme];
+          break;
+        }
+        case 'PLAYING': {
+          if (a.stateTimer > 0) {
+            destinationAr =
+              a.playKind === 'school'
+                ? 'يلعب عند مدخل المدرسة'
+                : a.playKind === 'garden'
+                  ? 'يلعب بين أشجار الحديقة'
+                  : 'يلعب قرب باب البيت';
+          } else {
+            const playTheme: ThemeId =
+              a.playKind === 'school'
+                ? 'school'
+                : a.playKind === 'garden'
+                  ? 'garden'
+                  : 'house';
+            destinationAr = THEME_GOING_TEXT[playTheme];
+          }
+          break;
+        }
+        case 'PATROL': {
+          if (a.patrolAtPalace) {
+            destinationAr =
+              a.stateTimer > 0
+                ? 'يحرس ساحة قصر الحاكم'
+                : THEME_GOING_TEXT.palace;
+          } else {
+            const curCell = worldToCell(a.x, a.z);
+            const curCube = curCell ? this.lastCubes[curCell.id] : undefined;
+            destinationAr =
+              curCube?.themeId && curCube.themeId !== 'sea'
+                ? `يتفقد الأمن قرب ${THEME_GOING_TEXT[curCube.themeId].replace('في طريقه إلى ', '')}`
+                : 'في جولة أمنية بشوارع المملكة';
+          }
+          break;
+        }
       }
 
       const mood = getMoodFromSatisfaction(this.lastSatisfaction);
@@ -1225,101 +1443,197 @@ export class PeopleAgentsManager {
     return null;
   }
 
+  private facePoint(agent: LivingAgent, target: AnchorPoint | null): void {
+    if (!target) return;
+    const dx = target.x - agent.x;
+    const dz = target.z - agent.z;
+    if (dx * dx + dz * dz > 0.0001) {
+      agent.group.rotation.y = Math.atan2(dx, dz);
+    }
+  }
+
   public update(dt: number): void {
     let selectedFound = false;
 
     for (let i = 0; i < this.agents.length; i++) {
       const a = this.agents[i];
 
-      // Stationary timed states (AT_HOME, WORKING, ON_BREAK)
-      if (a.stateTimer > 0) {
+      // Element 3.1: 200ms step-forward shrink into house front door -> invisible inside home
+      if (a.state === 'ENTERING_HOME') {
+        a.enterDoorTimer -= dt;
+        const progress = THREE.MathUtils.clamp(
+          1 - a.enterDoorTimer / ENTER_DOOR_DURATION,
+          0,
+          1
+        );
+        const fx = a.homeSpot.faceTarget.x - a.enterStartX;
+        const fz = a.homeSpot.faceTarget.z - a.enterStartZ;
+        const flen = Math.hypot(fx, fz) || 1;
+        const stepIn = 0.55 * progress;
+        const curX = a.enterStartX + (fx / flen) * stepIn;
+        const curZ = a.enterStartZ + (fz / flen) * stepIn;
+        const groundY = this.getLandHeight(a.enterStartX, a.enterStartZ);
+        a.group.position.set(curX, groundY, curZ);
+        a.group.rotation.y = Math.atan2(fx, fz);
+        a.group.scale.setScalar(Math.max(0.05, 1 - progress * 0.95));
+
+        if (a.enterDoorTimer <= 0) {
+          a.x = a.homeSpot.doorstep.x;
+          a.z = a.homeSpot.doorstep.z;
+          a.group.position.set(a.x, groundY, a.z);
+          a.group.scale.setScalar(1);
+          a.group.visible = false;
+          a.state = 'AT_HOME';
+          a.stateTimer = 2.4 + Math.random() * 2.0;
+        }
+      } else if (a.stateTimer > 0) {
+        // Stationary timed states (AT_HOME, WORKING, ON_BREAK, PLAYING pause, PATROL pause, WAITING)
         a.stateTimer -= dt;
 
-        // Role-specific working animation at the agent's real building
         if (a.state === 'WORKING') {
-          a.workPhase += dt * 5.2;
-          if (a.role === 'farmer') {
-            a.bodyPivot.rotation.x = 0.22 + Math.sin(a.workPhase) * 0.18;
-          } else if (a.role === 'miner' || a.role === 'woodcutter') {
-            a.bodyPivot.rotation.x = Math.sin(a.workPhase * 1.4) * 0.28;
+          // Element 3.3: Field themes rotate slowly among their workSpots during the shift
+          if (
+            a.workSpot &&
+            WALKABLE_FIELD_THEMES.has(a.workSpot.themeId) &&
+            a.workSpot.workSpots.length > 1
+          ) {
+            a.workSpotSwitchTimer -= dt;
+            const currentSpot = a.workSpot.workSpots[a.workSpotIdx] ?? a.workSpot.doorstep;
+            const dSpotX = currentSpot.x - a.x;
+            const dSpotZ = currentSpot.z - a.z;
+            const dSpot = Math.hypot(dSpotX, dSpotZ);
+
+            if (dSpot > 0.25) {
+              const step = Math.min(dSpot, a.speed * 0.65 * dt);
+              a.x += (dSpotX / dSpot) * step;
+              a.z += (dSpotZ / dSpot) * step;
+              a.walkPhase += dt * 7.2;
+              const groundY = this.getLandHeight(a.x, a.z);
+              const bob = Math.abs(Math.sin(a.walkPhase)) * 0.14;
+              a.group.position.set(a.x, groundY + bob, a.z);
+              a.group.rotation.y = Math.atan2(dSpotX, dSpotZ);
+            } else {
+              a.workPhase += dt * 5.0;
+              a.bodyPivot.rotation.x = 0.22 + Math.sin(a.workPhase) * 0.18;
+              if (a.workSpotSwitchTimer <= 0) {
+                a.workSpotIdx = (a.workSpotIdx + 1) % a.workSpot.workSpots.length;
+                a.workSpotSwitchTimer = 2.6 + Math.random() * 1.4;
+              }
+            }
           } else {
-            a.bodyPivot.rotation.z = Math.sin(a.workPhase * 0.9) * 0.08;
+            // Doorstep themes face the building; fisher faces the water with casting-arm bob
+            this.facePoint(a, a.activeFaceTarget);
+            a.workPhase += dt * 5.0;
+            if (a.role === 'fisher' && a.castingPivot) {
+              // Casting-arm bob animation on the beach facing water
+              a.castingPivot.rotation.x = -0.22 + Math.sin(a.workPhase * 0.85) * 0.36;
+              a.bodyPivot.rotation.x = Math.sin(a.workPhase * 0.85) * 0.08;
+            } else if (a.role === 'farmer') {
+              a.bodyPivot.rotation.x = 0.22 + Math.sin(a.workPhase) * 0.18;
+            } else if (a.role === 'miner' || a.role === 'woodcutter') {
+              a.bodyPivot.rotation.x = Math.sin(a.workPhase * 1.35) * 0.26;
+            } else {
+              a.bodyPivot.rotation.z = Math.sin(a.workPhase * 0.9) * 0.07;
+            }
           }
         } else {
+          if (a.state === 'ON_BREAK') {
+            this.facePoint(a, a.activeFaceTarget);
+          }
           a.bodyPivot.rotation.x = a.role === 'elder' ? 0.14 : 0;
           a.bodyPivot.rotation.z = 0;
+          if (a.castingPivot) {
+            a.castingPivot.rotation.x = 0;
+          }
         }
 
         if (a.stateTimer <= 0) {
           a.bodyPivot.rotation.x = a.role === 'elder' ? 0.14 : 0;
           a.bodyPivot.rotation.z = 0;
+          if (a.castingPivot) {
+            a.castingPivot.rotation.x = 0;
+          }
           this.assignNextRoutine(a);
         }
       } else {
-        // Walking along waypoints
+        // Walking along Element 2 A* street waypoints
         const wp = a.waypoints[a.waypointIdx];
         if (!wp) {
-          this.assignNextRoutine(a);
+          if (!a.pathReachable) {
+            a.state = 'WAITING';
+            a.stateTimer = 4.0 + Math.random() * 2.5;
+          } else {
+            this.assignNextRoutine(a);
+          }
         } else {
           const dx = wp.x - a.x;
           const dz = wp.z - a.z;
           const dist = Math.hypot(dx, dz);
 
-          if (dist < 0.5) {
+          if (dist < 0.35) {
+            a.x = wp.x;
+            a.z = wp.z;
+            const groundY = this.getLandHeight(a.x, a.z);
+            a.group.position.set(a.x, groundY, a.z);
             a.waypointIdx += 1;
+
             if (a.waypointIdx >= a.waypoints.length) {
-              // Arrived at destination -> enter dwell / work / break / home state
-              if (a.state === 'TO_WORK') {
+              if (!a.pathReachable) {
+                // Element 2.5: Reached nearest free cell to isolated target -> wait cleanly
+                a.state = 'WAITING';
+                a.stateTimer = 4.0 + Math.random() * 2.5;
+              } else if (a.state === 'TO_WORK') {
                 a.state = 'WORKING';
-                a.stateTimer = 4.5 + Math.random() * 3.5;
+                a.stateTimer = 5.2 + Math.random() * 3.5;
+                a.workSpotSwitchTimer = 2.4 + Math.random() * 1.2;
+                this.facePoint(a, a.activeFaceTarget);
               } else if (a.state === 'TO_BREAK') {
                 a.state = 'ON_BREAK';
-                a.stateTimer = 2.6 + Math.random() * 2.4;
+                a.stateTimer = 2.8 + Math.random() * 2.4;
+                this.facePoint(a, a.activeFaceTarget);
               } else if (a.state === 'TO_HOME') {
-                a.state = 'AT_HOME';
-                a.stateTimer = 1.8 + Math.random() * 2.0;
+                // Element 3.1: Arrived at house doorstep -> 200ms step-forward shrink -> invisible inside
+                a.state = 'ENTERING_HOME';
+                a.enterDoorTimer = ENTER_DOOR_DURATION;
+                a.enterStartX = a.x;
+                a.enterStartZ = a.z;
               } else if (a.state === 'PLAYING') {
-                a.stateTimer = 0.9 + Math.random() * 1.4;
+                a.stateTimer = 1.2 + Math.random() * 1.5;
+                this.facePoint(a, a.activeFaceTarget);
               } else if (a.state === 'PATROL') {
-                a.stateTimer = 1.0 + Math.random() * 1.2;
+                a.stateTimer = 1.4 + Math.random() * 1.5;
+                if (a.patrolAtPalace) {
+                  this.facePoint(a, this.palaceSpot.faceTarget);
+                }
               } else {
                 this.assignNextRoutine(a);
               }
             }
           } else {
             const step = Math.min(dist, a.speed * dt);
-            const nextX = a.x + (dx / dist) * step;
-            const nextZ = a.z + (dz / dist) * step;
+            a.x += (dx / dist) * step;
+            a.z += (dz / dist) * step;
 
-            if (this.isNearWater(nextX, nextZ)) {
-              // Gently skirt around water bodies
-              a.waypointIdx += 1;
-              if (a.waypointIdx >= a.waypoints.length) {
-                if (a.state === 'TO_WORK') {
-                  a.state = 'WORKING';
-                  a.stateTimer = 4.5 + Math.random() * 3.5;
-                } else {
-                  this.assignNextRoutine(a);
-                }
-              }
-            } else {
-              a.x = nextX;
-              a.z = nextZ;
-              a.walkPhase += dt * (a.role === 'child' ? 11.5 : a.role === 'elder' ? 6.0 : 8.5);
-              const groundY = getTerrainHeightAt(a.x, a.z, this.seaCoords);
-              const bob = Math.abs(Math.sin(a.walkPhase)) * (a.role === 'elder' ? 0.05 : 0.11);
-              a.group.position.set(a.x, groundY + bob, a.z);
-              a.group.rotation.y = Math.atan2(dx, dz);
-            }
+            // Element 5.2: Scaled walk bob & stride matching x1.6 body size (speeds unchanged)
+            const strideFreq =
+              a.role === 'child' ? 10.2 : a.role === 'elder' ? 5.2 : 7.4;
+            a.walkPhase += dt * strideFreq;
+            const groundY = this.getLandHeight(a.x, a.z);
+            const bobAmp =
+              a.role === 'elder' ? 0.08 : a.role === 'child' ? 0.12 : 0.17;
+            const bob = Math.abs(Math.sin(a.walkPhase)) * bobAmp;
+            a.group.position.set(a.x, groundY + bob, a.z);
+            a.group.rotation.y = Math.atan2(dx, dz);
           }
         }
       }
 
       if (this.selectedAgentId !== null && a.id === this.selectedAgentId) {
         selectedFound = true;
-        const groundY = getTerrainHeightAt(a.x, a.z, this.seaCoords);
+        const groundY = this.getLandHeight(a.x, a.z);
         this.selectedRingMesh.position.set(a.x, groundY + 0.12, a.z);
-        this.selectedRingMesh.visible = true;
+        // Hide selection ring while citizen is visibly indoors (card remains open with "في بيته يستريح")
+        this.selectedRingMesh.visible = a.group.visible;
       }
     }
 

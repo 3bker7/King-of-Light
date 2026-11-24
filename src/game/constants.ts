@@ -88,6 +88,7 @@ export const ENTERTAINMENT_RESTAURANT_BONUS = 15;
 export const ENTERTAINMENT_VARIETY_MIN_TYPES = 2;
 
 export const HUNGER_SATISFACTION_CAP = 30;
+export const ARREARS_SATISFACTION_CAP = 50;
 
 export const GROWTH_SATISFACTION_MIN = 60;
 export const SHRINK_SATISFACTION_BELOW = 35;
@@ -185,6 +186,25 @@ export const LEVEL_2_PRICE_DRIFT_RANGE = 0.15;
 export const BOURSE_VOLUME_THRESHOLD = 20;
 export const BOURSE_VOLUME_MODIFIER = 0.1;
 
+// Economic Spine: Month cycle, anti-inflation price bands, inflation basket, and ledger cap
+export const MONTH_DAYS = 30;
+export const PRICE_BANDS = {
+  level1: { lo: 0.8, hi: 1.25 },
+  level2: { lo: 0.6, hi: 1.6 },
+} as const;
+export const INFLATION_BASKET_WEIGHTS: Readonly<
+  Partial<Record<TradedResourceKey, number>>
+> = {
+  fish: 3,
+  crops: 3,
+  wheat: 2,
+  meat: 2,
+  bread: 2,
+  wood: 2,
+  stone: 1,
+};
+export const MAX_LEDGER_ENTRIES = 80;
+
 export const TRADE_BATCH_QUANTITIES = [1, 10] as const;
 
 export const CATEGORY_ORDER: ThemeCategory[] = [
@@ -214,6 +234,7 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     category: 'food',
     footprint: 'full',
     cost: 30,
+    materialCosts: { wood: 1 },
     cycleSeconds: 90,
     outputResource: 'wheat',
     outputAmount: 3,
@@ -226,6 +247,7 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     category: 'food',
     footprint: 'full',
     cost: 30,
+    materialCosts: { wood: 1 },
     cycleSeconds: 90,
     outputResource: 'crops',
     outputAmount: 3,
@@ -238,6 +260,7 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     category: 'food',
     footprint: 'full',
     cost: 55,
+    materialCosts: { wood: 1 },
     cycleSeconds: 150,
     outputResource: 'fruit',
     outputAmount: 3,
@@ -249,6 +272,7 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     category: 'food',
     footprint: 'full',
     cost: 45,
+    materialCosts: { wood: 1 },
     cycleSeconds: 120,
     outputResource: 'meat',
     outputAmount: 2,
@@ -261,6 +285,7 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     category: 'food',
     footprint: 'full',
     cost: 40,
+    materialCosts: {},
     cycleSeconds: 60,
     outputResource: 'fish',
     outputAmount: 2,
@@ -272,6 +297,7 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     category: 'food',
     footprint: 'half',
     cost: 20,
+    materialCosts: { stone: 1 },
     cycleSeconds: 45,
     outputResource: 'water',
     outputAmount: 3,
@@ -283,6 +309,7 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     category: 'food',
     footprint: 'half',
     cost: 70,
+    materialCosts: { wood: 2, stone: 2 },
     cycleSeconds: 60,
     outputResource: 'bread',
     outputAmount: 2,
@@ -295,6 +322,7 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     category: 'food',
     footprint: 'half',
     cost: 120,
+    materialCosts: { wood: 3, stone: 2 },
     cycleSeconds: 120,
     inputs: [
       { resource: 'bread', amount: 1 },
@@ -309,6 +337,7 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     category: 'food',
     footprint: 'half',
     cost: 90,
+    materialCosts: { wood: 2, stone: 1 },
     cycleSeconds: 120,
     inputs: [{ resource: 'water', amount: 1 }],
     goldPerCycle: 6,
@@ -322,6 +351,7 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     category: 'mines',
     footprint: 'full',
     cost: 20,
+    materialCosts: {},
     cycleSeconds: 75,
     outputResource: 'wood',
     outputAmount: 2,
@@ -333,6 +363,7 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     category: 'mines',
     footprint: 'full',
     cost: 50,
+    materialCosts: { wood: 2 },
     cycleSeconds: 100,
     outputResource: 'stone',
     outputAmount: 2,
@@ -344,6 +375,7 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     category: 'mines',
     footprint: 'full',
     cost: 110,
+    materialCosts: { wood: 3 },
     cycleSeconds: 140,
     outputResource: 'iron',
     outputAmount: 2,
@@ -356,6 +388,7 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     category: 'mines',
     footprint: 'full',
     cost: 130,
+    materialCosts: { wood: 3 },
     cycleSeconds: 150,
     outputResource: 'copper',
     outputAmount: 2,
@@ -368,6 +401,7 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     category: 'mines',
     footprint: 'full',
     cost: 220,
+    materialCosts: { wood: 4 },
     cycleSeconds: 200,
     outputResource: 'goldOre',
     outputAmount: 1,
@@ -380,6 +414,7 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     category: 'mines',
     footprint: 'full',
     cost: 300,
+    materialCosts: { wood: 4 },
     cycleSeconds: 260,
     outputResource: 'gem',
     outputAmount: 1,
@@ -392,6 +427,7 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     category: 'mines',
     footprint: 'full',
     cost: 180,
+    materialCosts: { wood: 3, iron: 2 },
     cycleSeconds: 180,
     outputResource: 'oil',
     outputAmount: 2,
@@ -405,6 +441,7 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     category: 'industry',
     footprint: 'half',
     cost: 25,
+    materialCosts: { wood: 2 },
     cycleSeconds: null,
     shelters: HOUSE_CAPACITY,
     workers: 0,
@@ -415,6 +452,7 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     category: 'industry',
     footprint: 'full',
     cost: 80,
+    materialCosts: { wood: 3, stone: 1 },
     cycleSeconds: null,
     workers: 1,
     unlockLevel: 2,
@@ -440,6 +478,7 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     category: 'industry',
     footprint: 'half',
     cost: 200,
+    materialCosts: { wood: 1, stone: 2 },
     cycleSeconds: 240,
     outputResource: 'jewelry',
     outputAmount: 1,
@@ -457,6 +496,7 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     category: 'trade',
     footprint: 'half',
     cost: 60,
+    materialCosts: { wood: 2, stone: 1 },
     cycleSeconds: 60,
     goldPerCycle: 4,
     workers: 1,
@@ -477,8 +517,21 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     category: 'trade',
     footprint: 'half',
     cost: 150,
+    materialCosts: { wood: 3, stone: 1 },
     cycleSeconds: null,
     workers: 1,
+    unlockLevel: 2,
+  },
+  hotel: {
+    id: 'hotel',
+    category: 'trade',
+    footprint: 'full',
+    cost: 120,
+    materialCosts: { wood: 4, stone: 3 },
+    cycleSeconds: 90,
+    goldPerCycle: 9,
+    workers: 3,
+    shelters: 0,
     unlockLevel: 2,
   },
 
@@ -508,6 +561,7 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     category: 'welfare',
     footprint: 'half',
     cost: 60,
+    materialCosts: { wood: 1 },
     cycleSeconds: null,
     workers: 0,
     unlockLevel: 2,
@@ -517,6 +571,7 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     category: 'welfare',
     footprint: 'half',
     cost: 140,
+    materialCosts: { wood: 2, stone: 3 },
     cycleSeconds: null,
     workers: 1,
     unlockLevel: 2,
@@ -526,10 +581,41 @@ export const THEMES: Record<ThemeId, ThemeDefinition> = {
     category: 'welfare',
     footprint: 'full',
     cost: 180,
+    materialCosts: { wood: 3, stone: 2 },
     cycleSeconds: null,
     workers: 1,
     unlockLevel: 2,
   },
+};
+
+// Monthly gold wage per staffed worker, by workplace theme (themes with workers === 0 pay nothing)
+export const WAGE_BY_THEME: Partial<Record<ThemeId, number>> = {
+  well: 8,
+  farm: 10,
+  wheat_farm: 10,
+  orchard: 10,
+  pasture: 10,
+  forest: 10,
+  warehouse_bldg: 10,
+  sea: 12,
+  quarry: 12,
+  bakery: 12,
+  restaurant: 12,
+  cafe: 12,
+  shop: 12,
+  grand_market: 14,
+  hotel: 14,
+  school: 14,
+  theater: 14,
+  trade_office: 16,
+  workshop: 16,
+  clinic: 16,
+  iron_mine: 16,
+  copper_mine: 16,
+  gold_mine: 18,
+  gem_mine: 18,
+  oil_well: 18,
+  jeweler: 18,
 };
 
 export const CATEGORY_THEMES: Record<ThemeCategory, ThemeId[]> = {
@@ -554,7 +640,7 @@ export const CATEGORY_THEMES: Record<ThemeCategory, ThemeId[]> = {
     'oil_well',
   ],
   industry: ['house', 'warehouse_bldg', 'workshop', 'jeweler'],
-  trade: ['shop', 'grand_market', 'trade_office'],
+  trade: ['shop', 'grand_market', 'trade_office', 'hotel'],
   welfare: ['mosque', 'theater', 'garden', 'clinic', 'school'],
 };
 
@@ -600,6 +686,7 @@ export const WORKER_PRIORITY_ORDER: ThemeId[] = [
   'grand_market',
   'trade_office',
   'theater',
+  'hotel',
 ];
 
 // Objectives & Rewards

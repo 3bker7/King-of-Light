@@ -1,12 +1,15 @@
 import {
+  ARREARS_SATISFACTION_CAP,
   AWAY_MODAL_MIN_SECONDS,
   BASE_BUY_PRICES,
   createEmptyTradeVolumes,
   createEmptyWarehouse,
   GRID_SIZE,
   LEVEL_1_POPULATION_FLOOR,
+  MAX_LEDGER_ENTRIES,
   MAX_OFFLINE_POP_DELTA,
   MAX_OFFLINE_SECONDS,
+  MONTH_DAYS,
   SAVE_KEY,
   SAVE_VERSION,
   SEEDED_ROCKY_COORDS,
@@ -20,8 +23,16 @@ import {
   VILLAGE_JOIN_REQUIRED_DAYS,
   VILLAGE_NAMES,
 } from './constants';
-import { rolloverBoursePrices } from './economy';
+import {
+  reconcileCitizens,
+  sanitizeCitizensOnHydrate,
+  sumCitizenWealth,
+} from './citizens';
+import { computeInflationIndex, rolloverBoursePrices } from './economy';
+import { runMonthlyProcessor } from './monthlyProcessor';
 import { computeNeedsAndSatisfaction, getTotalFood, processDayRolloverPeople } from './people';
+import { cleanupEmigratedPrivateOwners, syncPrivateAds } from './privateJobs';
+import { sanitizePrivateLandOnHydrate } from './privateLand';
 import {
   computeStaffing,
   getGoldServiceAuraBonus,
@@ -29,13 +40,20 @@ import {
   isAdjacentToOwned,
   makeSlotKey,
 } from './production';
+import { createZeroLastMonthStats } from './spending';
 import { STRINGS } from './strings';
 import type {
   AwayReportData,
   Cube,
   GameState,
+  LastMonthStats,
+  LedgerEntry,
+  OfficeFax,
+  PayrollRecord,
   PersistedSaveData,
+  PoliceRecord,
   PriceMoveSummary,
+  PrivateAd,
   SlotIndex,
   ThemeId,
   TradedResourceKey,
@@ -66,6 +84,23 @@ export function serializeGameState(state: GameState, now: number): PersistedSave
     level2CompletedShown: state.level2CompletedShown,
     muted: state.muted,
     lastSavedAt: now,
+    citizenWealth: state.citizenWealth,
+    arrears: state.arrears,
+    lastPayroll: state.lastPayroll,
+    dailyShopGold: state.dailyShopGold,
+    inflationIndex: state.inflationIndex,
+    ledger: state.ledger,
+    lastInflationWarnMonth: state.lastInflationWarnMonth,
+    citizens: state.citizens,
+    nextCitizenId: state.nextCitizenId,
+    totalMonths: state.totalMonths,
+    officeFaxes: state.officeFaxes,
+    policeRecords: state.policeRecords,
+    lastMonthStats: state.lastMonthStats,
+    monthlyBusinessTax: state.monthlyBusinessTax,
+    landRequests: state.landRequests,
+    privateAds: state.privateAds,
+    lastSpentMonth: state.lastSpentMonth,
   };
 }
 
@@ -114,6 +149,11 @@ function migrateSaveToV2(raw: PersistedSaveData): PersistedSaveData {
             : null,
       villageLoyaltyDays:
         typeof c.villageLoyaltyDays === 'number' ? c.villageLoyaltyDays : 0,
+      privateOwnerId:
+        typeof c.privateOwnerId === 'number' ? c.privateOwnerId : null,
+      privateIntendedTheme: c.privateIntendedTheme ?? null,
+      privateBuildRetries:
+        typeof c.privateBuildRetries === 'number' ? c.privateBuildRetries : 0,
     };
   });
 
@@ -159,6 +199,9 @@ function migrateSaveToV2(raw: PersistedSaveData): PersistedSaveData {
         isVillage: false,
         villageName: null,
         villageLoyaltyDays: 0,
+        privateOwnerId: null,
+        privateIntendedTheme: null,
+        privateBuildRetries: 0,
       };
     }
   }
@@ -198,6 +241,19 @@ export function loadPersistedSave(): PersistedSaveData | null {
   }
 }
 
+function sanitizeLastMonthStats(raw: Partial<LastMonthStats> | undefined): LastMonthStats {
+  const zero = createZeroLastMonthStats();
+  if (!raw || typeof raw !== 'object') return zero;
+  return {
+    foodRevenue: typeof raw.foodRevenue === 'number' && Number.isFinite(raw.foodRevenue) ? Math.max(0, Math.floor(raw.foodRevenue)) : 0,
+    leisureRevenue: typeof raw.leisureRevenue === 'number' && Number.isFinite(raw.leisureRevenue) ? Math.max(0, Math.floor(raw.leisureRevenue)) : 0,
+    businessTax: typeof raw.businessTax === 'number' && Number.isFinite(raw.businessTax) ? Math.max(0, Math.floor(raw.businessTax)) : 0,
+    importSink: typeof raw.importSink === 'number' && Number.isFinite(raw.importSink) ? Math.max(0, Math.floor(raw.importSink)) : 0,
+    leisureSink: typeof raw.leisureSink === 'number' && Number.isFinite(raw.leisureSink) ? Math.max(0, Math.floor(raw.leisureSink)) : 0,
+    unmetFood: typeof raw.unmetFood === 'number' && Number.isFinite(raw.unmetFood) ? Math.max(0, Math.floor(raw.unmetFood)) : 0,
+  };
+}
+
 export function simulateOfflineProgress(
   saved: PersistedSaveData,
   now: number
@@ -209,7 +265,7 @@ export function simulateOfflineProgress(
     return { restored: { ...saved, lastSavedAt: now }, awayReport: null };
   }
 
-  const nextCubes: Cube[] = saved.cubes.map((c) => ({ ...c }));
+  let nextCubes: Cube[] = saved.cubes.map((c) => ({ ...c }));
   let nextWarehouse = { ...createEmptyWarehouse(), ...saved.warehouse };
   let nextGold = Math.max(0, saved.gold);
   const startPopulation = Math.max(0, saved.population);
@@ -222,12 +278,125 @@ export function simulateOfflineProgress(
   let nextDailySold = { ...createEmptyTradeVolumes(), ...saved.dailySold };
   let nextTicker = saved.tickerMessage;
   let nextVillagesJoined = saved.villagesJoined ?? 0;
+  let nextCitizenWealth =
+    typeof saved.citizenWealth === 'number' ? Math.max(0, saved.citizenWealth) : 0;
+  const startArrears =
+    typeof saved.arrears === 'number' ? Math.max(0, saved.arrears) : 0;
+  let nextArrears = startArrears;
+  let nextLastPayroll: PayrollRecord | null = saved.lastPayroll ?? null;
+  let nextInflationIndex =
+    typeof saved.inflationIndex === 'number'
+      ? saved.inflationIndex
+      : computeInflationIndex(nextPrices);
+  const nextLedger: LedgerEntry[] = Array.isArray(saved.ledger)
+    ? [...saved.ledger]
+    : [];
+
+  // Element 6.2 & H6: Monotonic totalMonths + sanitize citizens, private plots & ads BEFORE offline production
+  const savedTotalMonths =
+    typeof saved.totalMonths === 'number' && Number.isFinite(saved.totalMonths)
+      ? Math.max(0, Math.trunc(saved.totalMonths))
+      : 0;
+  const startTotalMonths = Math.max(
+    savedTotalMonths,
+    Math.floor((Math.max(1, saved.day) - 1) / MONTH_DAYS)
+  );
+  let nextTotalMonths = startTotalMonths;
+
+  const savedPoliceRecords: PoliceRecord[] = Array.isArray(saved.policeRecords)
+    ? saved.policeRecords
+    : [];
+  const savedOfficeFaxes: OfficeFax[] = Array.isArray(saved.officeFaxes)
+    ? saved.officeFaxes
+    : [];
+
+  const hydratedCitizens = sanitizeCitizensOnHydrate(
+    saved.citizens,
+    startTotalMonths,
+    nextCubes,
+    startPopulation,
+    nextCitizenWealth,
+    savedPoliceRecords
+  );
+  let nextCitizens = hydratedCitizens.citizens;
+  let nextCitizenId = Math.max(
+    hydratedCitizens.nextCitizenId,
+    typeof saved.nextCitizenId === 'number' && Number.isFinite(saved.nextCitizenId)
+      ? Math.floor(saved.nextCitizenId)
+      : 1
+  );
+  nextCitizenWealth = hydratedCitizens.citizenWealth;
+  let nextPoliceRecords = hydratedCitizens.policeRecords;
+  let nextOfficeFaxes: OfficeFax[] = [...savedOfficeFaxes];
+
+  // Sanitize private plots, land requests & ads before offline staffing/production
+  const cleanPrivate = sanitizePrivateLandOnHydrate(
+    nextCubes,
+    nextCitizens,
+    saved.landRequests
+  );
+  nextCubes = cleanPrivate.cubes;
+  let nextLandRequests = cleanPrivate.landRequests;
+
+  const initialPrivateAds: PrivateAd[] = Array.isArray(saved.privateAds)
+    ? saved.privateAds
+    : [];
+  const syncedAds = syncPrivateAds({
+    cubes: nextCubes,
+    citizens: nextCitizens,
+    privateAds: initialPrivateAds,
+    totalMonths: startTotalMonths,
+  });
+  let nextPrivateAds = syncedAds.privateAds;
+  nextCitizens = syncedAds.citizens;
+
+  let nextLastMonthStats = sanitizeLastMonthStats(saved.lastMonthStats);
+  let nextMonthlyBusinessTax =
+    typeof saved.monthlyBusinessTax === 'number' &&
+    Number.isFinite(saved.monthlyBusinessTax)
+      ? Math.max(0, Math.floor(saved.monthlyBusinessTax))
+      : 0;
+  let nextLastSpentMonth =
+    typeof saved.lastSpentMonth === 'number' &&
+    Number.isFinite(saved.lastSpentMonth)
+      ? Math.max(0, Math.trunc(saved.lastSpentMonth))
+      : 0;
 
   const pricesBeforeAway = { ...nextPrices };
   const resourcesProduced: Partial<Record<TradedResourceKey, number>> = {};
   let goldEarnedByShops = 0;
 
-  const staffing = computeStaffing(nextCubes, nextPopulation);
+  // Map citizens by id for private offline revenue credits
+  const citizenById = new Map<number, (typeof nextCitizens)[number]>();
+  for (const c of nextCitizens) {
+    citizenById.set(c.id, c);
+  }
+
+  // Helper: route offline goldPerCycle to royal treasury OR 90/10 private owner + businessTax
+  const creditServiceGold = (cube: Cube, cycles: number, perCycleGold: number) => {
+    if (cycles <= 0 || perCycleGold <= 0) return;
+    if (typeof cube.privateOwnerId === 'number') {
+      const owner = citizenById.get(cube.privateOwnerId);
+      const ownerPerCycle = Math.floor(perCycleGold * 0.9);
+      const taxPerCycle = perCycleGold - ownerPerCycle;
+      const totalOwner = cycles * ownerPerCycle;
+      const totalTax = cycles * taxPerCycle;
+      if (owner && totalOwner > 0) {
+        owner.wealth += totalOwner;
+      }
+      if (totalTax > 0) {
+        nextGold += totalTax;
+        nextMonthlyBusinessTax += totalTax;
+      }
+    } else {
+      const gain = cycles * perCycleGold;
+      nextGold += gain;
+      goldEarnedByShops += gain;
+    }
+  };
+
+  // Element 6.2: Pass nextCitizens so unfilled private businesses produce 0 offline
+  const staffing = computeStaffing(nextCubes, nextPopulation, nextCitizens);
 
   interface OfflineSlotTask {
     cube: Cube;
@@ -282,11 +451,16 @@ export function simulateOfflineProgress(
       setSlotProgress(t, null);
     } else if (
       t.themeId !== 'shop' &&
-      (!def.inputs || def.inputs.length === 0) &&
-      def.outputResource &&
-      def.outputAmount
+      (!def.inputs || def.inputs.length === 0)
     ) {
-      addProduced(def.outputResource, t.cycles * def.outputAmount);
+      if (def.outputResource && def.outputAmount) {
+        addProduced(def.outputResource, t.cycles * def.outputAmount);
+      }
+      if (def.goldPerCycle && t.cycles > 0) {
+        const auraBonus = getGoldServiceAuraBonus(nextCubes, t.cube, t.themeId);
+        const perCycleGold = Math.round(def.goldPerCycle * (1 + auraBonus));
+        creditServiceGold(t.cube, t.cycles, perCycleGold);
+      }
       setSlotProgress(t, null);
     }
   }
@@ -326,9 +500,8 @@ export function simulateOfflineProgress(
       }
       if (def.goldPerCycle && affordable > 0) {
         const auraBonus = getGoldServiceAuraBonus(nextCubes, t.cube, t.themeId);
-        const gain = affordable * Math.round(def.goldPerCycle * (1 + auraBonus));
-        nextGold += gain;
-        goldEarnedByShops += gain;
+        const perCycleGold = Math.round(def.goldPerCycle * (1 + auraBonus));
+        creditServiceGold(t.cube, affordable, perCycleGold);
       }
       const shortage: Cube['shortage'] =
         affordable < t.cycles
@@ -359,12 +532,13 @@ export function simulateOfflineProgress(
       const targetFood = SHOP_FOOD_PRIORITY.find((k) => (nextWarehouse[k] ?? 0) >= 1);
       if (!targetFood) break;
       nextWarehouse[targetFood] = Math.max(0, nextWarehouse[targetFood] - 1);
-      nextGold += goldPer;
-      goldEarnedByShops += goldPer;
+      creditServiceGold(t.cube, 1, goldPer);
       executed += 1;
     }
     setSlotProgress(t, executed < t.cycles ? 'no_surplus_food' : null);
   }
+
+  nextCitizenWealth = sumCitizenWealth(nextCitizens);
 
   // Proportional day rollovers
   const totalTicks = saved.tickInDay + elapsedSeconds;
@@ -417,10 +591,12 @@ export function simulateOfflineProgress(
     nextPrices = bourseRes.prices;
     nextPreviousPrices = bourseRes.previousPrices;
     nextTicker = bourseRes.tickerMessage;
+    nextInflationIndex = bourseRes.inflationIndex;
     nextDailyBought = createEmptyTradeVolumes();
     nextDailySold = createEmptyTradeVolumes();
   }
 
+  // Clamp offline population before running monthly processor so all offices see final population
   const rawPopDelta = nextPopulation - startPopulation;
   const clampedPopDelta = Math.max(
     -MAX_OFFLINE_POP_DELTA,
@@ -430,12 +606,131 @@ export function simulateOfflineProgress(
   nextPopulation = Math.max(popFloor, startPopulation + clampedPopDelta);
   const finalPopDelta = nextPopulation - startPopulation;
 
+  const targetTotalMonths = Math.floor((Math.max(1, nextDay) - 1) / MONTH_DAYS);
+  const monthsToRun = Math.min(3, Math.max(0, targetTotalMonths - startTotalMonths));
+
+  let births = 0;
+  let cvsFiled = 0;
+  let marriages = 0;
+  let housingGranted = 0;
+  let faxesSent = 0;
+  let citizenSpentTotal = 0;
+  let businessTaxTotal = 0;
+
+  // Reconcile offline population delta into citizens before monthly ticks (and for sub-month away periods)
+  if (nextCitizens.length !== nextPopulation) {
+    const prevBeforeRec = nextCitizens;
+    const rec = reconcileCitizens({
+      citizens: nextCitizens,
+      nextCitizenId,
+      population: nextPopulation,
+      totalMonths: nextTotalMonths,
+      citizenWealth: nextCitizenWealth,
+      policeRecords: nextPoliceRecords,
+    });
+    nextCitizens = rec.citizens;
+    nextCitizenId = rec.nextCitizenId;
+    nextCitizenWealth = rec.citizenWealth;
+    nextPoliceRecords = rec.policeRecords;
+    births += rec.birthsCount;
+    cvsFiled += rec.cvsFiledCount;
+
+    const emig = cleanupEmigratedPrivateOwners({
+      cubes: nextCubes,
+      previousCitizens: prevBeforeRec,
+      citizens: nextCitizens,
+      privateAds: nextPrivateAds,
+      policeRecords: nextPoliceRecords,
+      totalMonths: nextTotalMonths,
+    });
+    nextCubes = emig.cubes;
+    nextCitizens = emig.citizens;
+    nextPrivateAds = emig.privateAds;
+    nextPoliceRecords = emig.policeRecords;
+  }
+
+  // Element 6.1: Run the SAME unified monthly processor for each full month crossed (cap 3).
+  // Land requests may generate or expire offline, and are NEVER auto-approved.
+  let payrollPaid = 0;
+  for (let m = 0; m < monthsToRun; m++) {
+    const monthBoundaryDay = (startTotalMonths + m + 1) * MONTH_DAYS + 1;
+    const mp = runMonthlyProcessor({
+      cubes: nextCubes,
+      warehouse: nextWarehouse,
+      prices: nextPrices,
+      inflationIndex: nextInflationIndex,
+      population: nextPopulation,
+      gold: nextGold,
+      arrears: nextArrears,
+      citizenWealth: nextCitizenWealth,
+      citizens: nextCitizens,
+      nextCitizenId,
+      totalMonths: nextTotalMonths,
+      officeFaxes: nextOfficeFaxes,
+      policeRecords: nextPoliceRecords,
+      monthlyBusinessTax: nextMonthlyBusinessTax,
+      landRequests: nextLandRequests,
+      privateAds: nextPrivateAds,
+      lastSpentMonth: nextLastSpentMonth,
+      day: monthBoundaryDay,
+      now,
+    });
+    nextTotalMonths = mp.totalMonths;
+    nextCubes = mp.cubes;
+    nextWarehouse = mp.warehouse;
+    nextGold = mp.gold;
+    nextArrears = mp.arrears;
+    nextCitizenWealth = mp.citizenWealth;
+    nextLastPayroll = mp.lastPayroll;
+    nextCitizens = mp.citizens;
+    nextCitizenId = mp.nextCitizenId;
+    nextOfficeFaxes = mp.officeFaxes;
+    nextPoliceRecords = mp.policeRecords;
+    nextLastMonthStats = mp.lastMonthStats;
+    nextMonthlyBusinessTax = mp.monthlyBusinessTax;
+    nextLandRequests = mp.landRequests;
+    nextPrivateAds = mp.privateAds;
+    nextLastSpentMonth = mp.lastSpentMonth;
+
+    payrollPaid += mp.paid;
+    births += mp.summary.births;
+    cvsFiled += mp.summary.cvsFiled;
+    marriages += mp.summary.marriages;
+    housingGranted += mp.summary.housingGranted;
+    faxesSent += mp.summary.faxesSent;
+    citizenSpentTotal += mp.citizenSpentTotal;
+    businessTaxTotal += mp.businessTaxCollected;
+
+    nextLedger.push(...mp.ledgerItems);
+  }
+  const arrearsAdded = Math.max(0, nextArrears - startArrears);
+  nextCitizenWealth = sumCitizenWealth(nextCitizens);
+
+  if (goldEarnedByShops > 0) {
+    nextLedger.push({
+      id: `offline-shop-${nextDay}`,
+      day: nextDay,
+      kind: 'shop',
+      amount: goldEarnedByShops,
+      labelAr: 'دخل المحلات والخدمات',
+    });
+  }
+
+  const trimmedLedger =
+    nextLedger.length > MAX_LEDGER_ENTRIES
+      ? nextLedger.slice(nextLedger.length - MAX_LEDGER_ENTRIES)
+      : nextLedger;
+
   const finalEval = computeNeedsAndSatisfaction(
     nextCubes,
     nextWarehouse,
     nextPopulation,
     nextHungerFlag
   );
+  const finalSatisfaction =
+    nextArrears > 0
+      ? Math.min(ARREARS_SATISFACTION_CAP, finalEval.satisfaction)
+      : finalEval.satisfaction;
 
   let biggestPriceMove: PriceMoveSummary | null = null;
   if (daysElapsed > 0) {
@@ -464,7 +759,7 @@ export function simulateOfflineProgress(
     warehouse: nextWarehouse,
     gold: Math.max(0, nextGold),
     population: nextPopulation,
-    satisfaction: finalEval.satisfaction,
+    satisfaction: finalSatisfaction,
     reputation: nextReputation,
     hungerFlag: nextHungerFlag,
     day: nextDay,
@@ -475,6 +770,22 @@ export function simulateOfflineProgress(
     dailySold: nextDailySold,
     tickerMessage: nextTicker,
     villagesJoined: nextVillagesJoined,
+    citizenWealth: nextCitizenWealth,
+    arrears: nextArrears,
+    lastPayroll: nextLastPayroll,
+    dailyShopGold: 0,
+    inflationIndex: nextInflationIndex,
+    ledger: trimmedLedger,
+    citizens: nextCitizens,
+    nextCitizenId,
+    totalMonths: nextTotalMonths,
+    officeFaxes: nextOfficeFaxes,
+    policeRecords: nextPoliceRecords,
+    lastMonthStats: nextLastMonthStats,
+    monthlyBusinessTax: nextMonthlyBusinessTax,
+    landRequests: nextLandRequests,
+    privateAds: nextPrivateAds,
+    lastSpentMonth: nextLastSpentMonth,
     lastSavedAt: now,
   };
 
@@ -487,6 +798,15 @@ export function simulateOfflineProgress(
           resourcesProduced,
           populationDelta: finalPopDelta,
           biggestPriceMove,
+          payrollPaid,
+          arrearsAdded,
+          births,
+          cvsFiled,
+          marriages,
+          housingGranted,
+          faxesSent,
+          citizenSpentTotal,
+          businessTaxTotal,
         }
       : null;
 

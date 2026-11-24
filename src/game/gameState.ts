@@ -1,4 +1,5 @@
 import {
+  ARREARS_SATISFACTION_CAP,
   createEmptyTradeVolumes,
   createInitialPrices,
   createInitialWarehouse,
@@ -8,6 +9,8 @@ import {
   LEVEL_2_CUBES_TARGET,
   LEVEL_2_GOLD_TARGET,
   LEVEL_2_POPULATION_TARGET,
+  MAX_LEDGER_ENTRIES,
+  MONTH_DAYS,
   OBJECTIVE_REWARDS,
   SEEDED_ROCKY_COORDS,
   SEEDED_VILLAGE_COORDS,
@@ -27,12 +30,31 @@ import {
   VILLAGE_JOIN_REQUIRED_DAYS,
   VILLAGE_NAMES,
 } from './constants';
-import { executeTrade, rolloverBoursePrices } from './economy';
+import {
+  generateInitialCitizens,
+  reconcileCitizens,
+  sanitizeCitizensOnHydrate,
+  sumCitizenWealth,
+} from './citizens';
+import {
+  executeTrade,
+  getEffectiveBuyPrice,
+  rolloverBoursePrices,
+} from './economy';
+import { runMonthlyProcessor } from './monthlyProcessor';
 import {
   computeNeedsAndSatisfaction,
   getTotalFood,
   processDayRolloverPeople,
 } from './people';
+import {
+  cleanupEmigratedPrivateOwners,
+  syncPrivateAds,
+} from './privateJobs';
+import {
+  resolveLandRequest,
+  sanitizePrivateLandOnHydrate,
+} from './privateLand';
 import {
   advanceProductionTick,
   canPlaceThemeOnCube,
@@ -42,13 +64,18 @@ import {
   isPurchasableNeutralCube,
 } from './production';
 import { clearSavedGame } from './save';
+import { createZeroLastMonthStats } from './spending';
 import { STRINGS } from './strings';
 import type {
   AudioCue,
   Cube,
   GameState,
+  LastMonthStats,
+  LedgerEntry,
+  LedgerKind,
   ObjectiveState,
   PersistedSaveData,
+  PrivateAd,
   SlotIndex,
   ThemeId,
   ToastItem,
@@ -58,6 +85,7 @@ import type {
 
 let toastCounter = 1;
 let audioCounter = 1;
+let ledgerCounter = 1;
 
 function createToast(
   message: string,
@@ -71,6 +99,33 @@ function createToast(
 function appendToasts(existing: ToastItem[], additions: ToastItem[]): ToastItem[] {
   if (additions.length === 0) return existing;
   return [...existing, ...additions].slice(-4);
+}
+
+function appendLedger(
+  existing: LedgerEntry[],
+  day: number,
+  kind: LedgerKind,
+  amount: number,
+  labelAr: string
+): LedgerEntry[] {
+  ledgerCounter += 1;
+  const entry: LedgerEntry = {
+    id: `led-${day}-${ledgerCounter}`,
+    day,
+    kind,
+    amount,
+    labelAr,
+  };
+  const next = [...existing, entry];
+  return next.length > MAX_LEDGER_ENTRIES
+    ? next.slice(next.length - MAX_LEDGER_ENTRIES)
+    : next;
+}
+
+function applyArrearsCap(satisfaction: number, arrears: number): number {
+  return arrears > 0
+    ? Math.min(ARREARS_SATISFACTION_CAP, satisfaction)
+    : satisfaction;
 }
 
 function createInitialObjectives(): ObjectiveState[] {
@@ -157,6 +212,9 @@ export function createInitialCubes(now: number): Cube[] {
         isVillage: villageName !== null,
         villageName,
         villageLoyaltyDays: 0,
+        privateOwnerId: null,
+        privateIntendedTheme: null,
+        privateBuildRetries: 0,
       });
     }
   }
@@ -173,6 +231,7 @@ export function createFreshGameState(now = Date.now()): GameState {
     STARTING_POPULATION,
     false
   );
+  const initialPop = generateInitialCitizens(cubes, STARTING_POPULATION, 0, 0);
 
   return {
     cubes,
@@ -202,14 +261,109 @@ export function createFreshGameState(now = Date.now()): GameState {
     lastSavedAt: now,
     toasts: [],
     pendingAudioCue: null,
+    citizenWealth: sumCitizenWealth(initialPop.citizens),
+    arrears: 0,
+    lastPayroll: null,
+    dailyShopGold: 0,
+    inflationIndex: 100,
+    ledger: [],
+    lastInflationWarnMonth: 0,
+    citizens: initialPop.citizens,
+    nextCitizenId: initialPop.nextCitizenId,
+    totalMonths: 0,
+    officeFaxes: [],
+    policeRecords: [],
+    lastMonthStats: createZeroLastMonthStats(),
+    monthlyBusinessTax: 0,
+    landRequests: [],
+    privateAds: [],
+    lastSpentMonth: 0,
   };
 }
 
 export function hydrateGameState(saved: PersistedSaveData): GameState {
-  const evalNeeds = computeNeedsAndSatisfaction(
+  const arrears = typeof saved.arrears === 'number' ? Math.max(0, saved.arrears) : 0;
+  const safeDay = Math.max(1, saved.day);
+  const safePop = Math.max(0, saved.population);
+  const savedTotalMonths =
+    typeof saved.totalMonths === 'number' && Number.isFinite(saved.totalMonths)
+      ? Math.max(0, Math.trunc(saved.totalMonths))
+      : 0;
+  const totalMonths = Math.max(
+    savedTotalMonths,
+    Math.floor((safeDay - 1) / MONTH_DAYS)
+  );
+  const savedCitizenWealth =
+    typeof saved.citizenWealth === 'number' && Number.isFinite(saved.citizenWealth)
+      ? Math.max(0, Math.floor(saved.citizenWealth))
+      : 0;
+  const savedPoliceRecords = Array.isArray(saved.policeRecords)
+    ? saved.policeRecords
+    : [];
+  const savedOfficeFaxes = Array.isArray(saved.officeFaxes)
+    ? saved.officeFaxes
+    : [];
+
+  const sanitized = sanitizeCitizensOnHydrate(
+    saved.citizens,
+    totalMonths,
     saved.cubes,
+    safePop,
+    savedCitizenWealth,
+    savedPoliceRecords
+  );
+
+  // Element 6.2 & H3: Sanitize private plots, land requests & private ads on hydrate
+  const cleanPrivate = sanitizePrivateLandOnHydrate(
+    saved.cubes,
+    sanitized.citizens,
+    saved.landRequests
+  );
+  const rawPrivateAds: PrivateAd[] = Array.isArray(saved.privateAds)
+    ? saved.privateAds
+    : [];
+  const syncedAds = syncPrivateAds({
+    cubes: cleanPrivate.cubes,
+    citizens: sanitized.citizens,
+    privateAds: rawPrivateAds,
+    totalMonths,
+  });
+
+  const rawStats = saved.lastMonthStats as Partial<LastMonthStats> | undefined;
+  const lastMonthStats: LastMonthStats =
+    rawStats && typeof rawStats === 'object'
+      ? {
+          foodRevenue:
+            typeof rawStats.foodRevenue === 'number' && Number.isFinite(rawStats.foodRevenue)
+              ? Math.max(0, Math.floor(rawStats.foodRevenue))
+              : 0,
+          leisureRevenue:
+            typeof rawStats.leisureRevenue === 'number' && Number.isFinite(rawStats.leisureRevenue)
+              ? Math.max(0, Math.floor(rawStats.leisureRevenue))
+              : 0,
+          businessTax:
+            typeof rawStats.businessTax === 'number' && Number.isFinite(rawStats.businessTax)
+              ? Math.max(0, Math.floor(rawStats.businessTax))
+              : 0,
+          importSink:
+            typeof rawStats.importSink === 'number' && Number.isFinite(rawStats.importSink)
+              ? Math.max(0, Math.floor(rawStats.importSink))
+              : 0,
+          leisureSink:
+            typeof rawStats.leisureSink === 'number' && Number.isFinite(rawStats.leisureSink)
+              ? Math.max(0, Math.floor(rawStats.leisureSink))
+              : 0,
+          unmetFood:
+            typeof rawStats.unmetFood === 'number' && Number.isFinite(rawStats.unmetFood)
+              ? Math.max(0, Math.floor(rawStats.unmetFood))
+              : 0,
+        }
+      : createZeroLastMonthStats();
+
+  const evalNeeds = computeNeedsAndSatisfaction(
+    cleanPrivate.cubes,
     saved.warehouse,
-    saved.population,
+    safePop,
     saved.hungerFlag
   );
 
@@ -219,16 +373,27 @@ export function hydrateGameState(saved: PersistedSaveData): GameState {
     return found ? { ...def, completed: Boolean(found.completed) } : def;
   });
 
+  const savedLedger = Array.isArray(saved.ledger)
+    ? saved.ledger.slice(-MAX_LEDGER_ENTRIES)
+    : [];
+
+  const nextCitizenId = Math.max(
+    sanitized.nextCitizenId,
+    typeof saved.nextCitizenId === 'number' && Number.isFinite(saved.nextCitizenId)
+      ? Math.floor(saved.nextCitizenId)
+      : 1
+  );
+
   return {
-    cubes: saved.cubes,
+    cubes: cleanPrivate.cubes,
     warehouse: saved.warehouse,
     gold: Math.max(0, saved.gold),
-    population: Math.max(0, saved.population),
-    satisfaction: evalNeeds.satisfaction,
+    population: safePop,
+    satisfaction: applyArrearsCap(evalNeeds.satisfaction, arrears),
     reputation: Math.max(0, Math.min(100, saved.reputation)),
     hungerFlag: Boolean(saved.hungerFlag),
     needs: evalNeeds.needs,
-    day: Math.max(1, saved.day),
+    day: safeDay,
     tickInDay: Math.max(0, saved.tickInDay % TICKS_PER_DAY),
     prices: saved.prices,
     previousPrices: saved.previousPrices,
@@ -247,6 +412,36 @@ export function hydrateGameState(saved: PersistedSaveData): GameState {
     lastSavedAt: saved.lastSavedAt,
     toasts: [],
     pendingAudioCue: null,
+    citizenWealth: sumCitizenWealth(syncedAds.citizens),
+    arrears,
+    lastPayroll: saved.lastPayroll ?? null,
+    dailyShopGold:
+      typeof saved.dailyShopGold === 'number' ? Math.max(0, saved.dailyShopGold) : 0,
+    inflationIndex:
+      typeof saved.inflationIndex === 'number' ? saved.inflationIndex : 100,
+    ledger: savedLedger,
+    lastInflationWarnMonth:
+      typeof saved.lastInflationWarnMonth === 'number'
+        ? saved.lastInflationWarnMonth
+        : 0,
+    citizens: syncedAds.citizens,
+    nextCitizenId,
+    totalMonths,
+    officeFaxes: savedOfficeFaxes,
+    policeRecords: sanitized.policeRecords,
+    lastMonthStats,
+    monthlyBusinessTax:
+      typeof saved.monthlyBusinessTax === 'number' &&
+      Number.isFinite(saved.monthlyBusinessTax)
+        ? Math.max(0, Math.floor(saved.monthlyBusinessTax))
+        : 0,
+    landRequests: cleanPrivate.landRequests,
+    privateAds: syncedAds.privateAds,
+    lastSpentMonth:
+      typeof saved.lastSpentMonth === 'number' &&
+      Number.isFinite(saved.lastSpentMonth)
+        ? Math.max(0, Math.trunc(saved.lastSpentMonth))
+        : 0,
   };
 }
 
@@ -283,6 +478,8 @@ function isObjectiveSatisfied(state: GameState, objectiveId: string): boolean {
 
 function evaluateObjectivesAndProgression(state: GameState): GameState {
   let gold = state.gold;
+  let warehouse = state.warehouse;
+  let ledger = state.ledger;
   let level = state.level;
   let level2UnlockedNotice = state.level2UnlockedNotice;
   let level2CompletedNotice = state.level2CompletedNotice;
@@ -305,6 +502,15 @@ function evaluateObjectivesAndProgression(state: GameState): GameState {
     }
 
     gold += obj.rewardGold;
+    if (obj.rewardGold > 0) {
+      ledger = appendLedger(
+        ledger,
+        state.day,
+        'objective',
+        obj.rewardGold,
+        'مكافأة هدف'
+      );
+    }
     const label = STRINGS.objectives.items[obj.id] ?? obj.id;
     newToasts.push(
       createToast(STRINGS.toasts.objectiveCompleted(label, obj.rewardGold), 'success')
@@ -322,7 +528,16 @@ function evaluateObjectivesAndProgression(state: GameState): GameState {
     if (level1AllDone) {
       level = 2;
       level2UnlockedNotice = true;
+      // Element 2.2: One-time Level 2 materials gift (+8 wood, +4 stone; no ledger entry)
+      warehouse = {
+        ...warehouse,
+        wood: (warehouse.wood ?? 0) + 8,
+        stone: (warehouse.stone ?? 0) + 4,
+      };
       newToasts.push(createToast(STRINGS.toasts.level2Unlocked, 'success'));
+      newToasts.push(
+        createToast('هدية المستوى الثاني: +8 خشب، +4 حجر', 'success')
+      );
       audioCounter += 1;
       pendingAudioCue = { id: audioCounter, cue: 'levelUp' };
     }
@@ -344,6 +559,8 @@ function evaluateObjectivesAndProgression(state: GameState): GameState {
   return {
     ...state,
     gold,
+    warehouse,
+    ledger,
     level,
     objectives: nextObjectives,
     level2UnlockedNotice,
@@ -365,6 +582,15 @@ export type GameAction =
       side: 'buy' | 'sell';
       quantity: number | 'max';
     }
+  | {
+      type: 'BUY_MATERIALS';
+      items: Partial<Record<TradedResourceKey, number>>;
+    }
+  | {
+      type: 'RESOLVE_LAND_REQUEST';
+      requestId: string;
+      approve: boolean;
+    }
   | { type: 'DISMISS_TOAST'; id: string }
   | { type: 'CLEAR_LEVEL2_NOTICE' }
   | { type: 'CLEAR_LEVEL2_COMPLETED_NOTICE' }
@@ -383,12 +609,15 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         state.cubes,
         state.warehouse,
         state.gold,
-        state.population
+        state.population,
+        state.citizens
       );
 
       let nextCubes = prod.cubes;
       let nextWarehouse = prod.warehouse;
       let nextGold = prod.gold;
+      let nextDailyShopGold = state.dailyShopGold + prod.royalShopGoldDelta;
+      let nextMonthlyBusinessTax = state.monthlyBusinessTax + prod.businessTaxDelta;
       let nextPopulation = state.population;
       let nextReputation = state.reputation;
       let nextHungerFlag = state.hungerFlag;
@@ -402,10 +631,47 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
       let nextVillagesJoined = state.villagesJoined;
       let lastJoinedVillageCubeId = state.lastJoinedVillageCubeId;
       let lastJoinedVillageSeq = state.lastJoinedVillageSeq;
+      let nextCitizenWealth = state.citizenWealth;
+      let nextArrears = state.arrears;
+      let nextLastPayroll = state.lastPayroll;
+      let nextInflationIndex = state.inflationIndex;
+      let nextLedger = state.ledger;
+      let nextLastInflationWarnMonth = state.lastInflationWarnMonth;
+      let nextCitizens = state.citizens;
+      let nextCitizenId = state.nextCitizenId;
+      let nextTotalMonths = state.totalMonths;
+      let nextOfficeFaxes = state.officeFaxes;
+      let nextPoliceRecords = state.policeRecords;
+      let nextLastMonthStats = state.lastMonthStats;
+      let nextLandRequests = state.landRequests;
+      let nextPrivateAds = state.privateAds;
+      let nextLastSpentMonth = state.lastSpentMonth;
       const newToasts: ToastItem[] = [];
       let pendingAudioCue = state.pendingAudioCue;
 
+      // Credit 90% private-business cycle revenue directly to owning citizens
+      const creditKeys = Object.keys(prod.privateOwnerCredits);
+      if (creditKeys.length > 0) {
+        nextCitizens = nextCitizens.map((c) => {
+          const bonus = prod.privateOwnerCredits[c.id];
+          return bonus ? { ...c, wealth: c.wealth + bonus } : c;
+        });
+        nextCitizenWealth = sumCitizenWealth(nextCitizens);
+      }
+
       if (nextTickInDay >= TICKS_PER_DAY) {
+        // Element 3.5: Flush accumulated royal shop/service gold into treasury ledger
+        if (nextDailyShopGold > 0) {
+          nextLedger = appendLedger(
+            nextLedger,
+            state.day,
+            'shop',
+            nextDailyShopGold,
+            'دخل المحلات والخدمات'
+          );
+          nextDailyShopGold = 0;
+        }
+
         nextTickInDay = 0;
         nextDay += 1;
 
@@ -420,6 +686,36 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         nextPopulation = peopleRes.population;
         nextReputation = peopleRes.reputation;
         nextHungerFlag = peopleRes.hungerFlag;
+
+        // Element 1.5 & 7.2: Restore citizens.length === population & clean up emigrated private owners
+        if (nextCitizens.length !== nextPopulation) {
+          const prevBeforeRec = nextCitizens;
+          const rec = reconcileCitizens({
+            citizens: nextCitizens,
+            nextCitizenId,
+            population: nextPopulation,
+            totalMonths: nextTotalMonths,
+            citizenWealth: nextCitizenWealth,
+            policeRecords: nextPoliceRecords,
+          });
+          nextCitizens = rec.citizens;
+          nextCitizenId = rec.nextCitizenId;
+          nextCitizenWealth = rec.citizenWealth;
+          nextPoliceRecords = rec.policeRecords;
+
+          const emig = cleanupEmigratedPrivateOwners({
+            cubes: nextCubes,
+            previousCitizens: prevBeforeRec,
+            citizens: nextCitizens,
+            privateAds: nextPrivateAds,
+            policeRecords: nextPoliceRecords,
+            totalMonths: nextTotalMonths,
+          });
+          nextCubes = emig.cubes;
+          nextCitizens = emig.citizens;
+          nextPrivateAds = emig.privateAds;
+          nextPoliceRecords = emig.policeRecords;
+        }
 
         if (peopleRes.hungerFlag) {
           newToasts.push(createToast(STRINGS.toasts.hungerOccurred, 'warning'));
@@ -439,8 +735,96 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         nextPrices = bourseRes.prices;
         nextPreviousPrices = bourseRes.previousPrices;
         nextTicker = bourseRes.tickerMessage;
+        nextInflationIndex = bourseRes.inflationIndex;
         nextDailyBought = createEmptyTradeVolumes();
         nextDailySold = createEmptyTradeVolumes();
+
+        // Element 5.3: Once per month, warn if inflation index > 130 at rollover
+        const currentMonth = Math.floor((nextDay - 1) / MONTH_DAYS) + 1;
+        if (
+          nextInflationIndex > 130 &&
+          nextLastInflationWarnMonth < currentMonth
+        ) {
+          nextLastInflationWarnMonth = currentMonth;
+          newToasts.push(
+            createToast(
+              `تحذير الخزنة: مؤشر الغلاء مرتفع (${nextInflationIndex}) — راجع نشرة البورصة`,
+              'warning'
+            )
+          );
+        }
+
+        // Unified monthly heartbeat on days 31, 61, 91...
+        if ((nextDay - 1) % MONTH_DAYS === 0 && nextDay > 1) {
+          const mp = runMonthlyProcessor({
+            cubes: nextCubes,
+            warehouse: nextWarehouse,
+            prices: nextPrices,
+            inflationIndex: nextInflationIndex,
+            population: nextPopulation,
+            gold: nextGold,
+            arrears: nextArrears,
+            citizenWealth: nextCitizenWealth,
+            citizens: nextCitizens,
+            nextCitizenId,
+            totalMonths: nextTotalMonths,
+            officeFaxes: nextOfficeFaxes,
+            policeRecords: nextPoliceRecords,
+            monthlyBusinessTax: nextMonthlyBusinessTax,
+            landRequests: nextLandRequests,
+            privateAds: nextPrivateAds,
+            lastSpentMonth: nextLastSpentMonth,
+            day: nextDay,
+          });
+          nextTotalMonths = mp.totalMonths;
+          nextCubes = mp.cubes;
+          nextWarehouse = mp.warehouse;
+          nextGold = mp.gold;
+          nextArrears = mp.arrears;
+          nextCitizenWealth = mp.citizenWealth;
+          nextLastPayroll = mp.lastPayroll;
+          nextCitizens = mp.citizens;
+          nextCitizenId = mp.nextCitizenId;
+          nextOfficeFaxes = mp.officeFaxes;
+          nextPoliceRecords = mp.policeRecords;
+          nextLastMonthStats = mp.lastMonthStats;
+          nextMonthlyBusinessTax = mp.monthlyBusinessTax;
+          nextLandRequests = mp.landRequests;
+          nextPrivateAds = mp.privateAds;
+          nextLastSpentMonth = mp.lastSpentMonth;
+
+          for (const item of mp.ledgerItems) {
+            nextLedger = appendLedger(
+              nextLedger,
+              item.day,
+              item.kind,
+              item.amount,
+              item.labelAr
+            );
+          }
+
+          if (nextArrears === 0) {
+            newToasts.push(
+              createToast(
+                `تم صرف رواتب الشهر: ${mp.paid} ذهب لـ${mp.lastPayroll.workers} عامل`,
+                'info'
+              )
+            );
+          } else {
+            newToasts.push(
+              createToast(
+                `تحذير: الخزنة لم تكفِ الرواتب — متأخرات ${nextArrears} ذهب`,
+                'warning'
+              )
+            );
+          }
+
+          if (mp.summary.landRequestsGenerated > 0) {
+            newToasts.push(
+              createToast('وصل طلب جديد لشراء أرض في القصر الملكي', 'info')
+            );
+          }
+        }
 
         // WP3 Independent Village Loyalty Check at Day Rollover
         const now = Date.now();
@@ -499,7 +883,7 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         warehouse: nextWarehouse,
         gold: Math.max(0, nextGold),
         population: Math.max(0, nextPopulation),
-        satisfaction: evalNeeds.satisfaction,
+        satisfaction: applyArrearsCap(evalNeeds.satisfaction, nextArrears),
         reputation: nextReputation,
         hungerFlag: nextHungerFlag,
         needs: evalNeeds.needs,
@@ -513,6 +897,23 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         villagesJoined: nextVillagesJoined,
         lastJoinedVillageCubeId,
         lastJoinedVillageSeq,
+        citizenWealth: nextCitizenWealth,
+        arrears: nextArrears,
+        lastPayroll: nextLastPayroll,
+        dailyShopGold: nextDailyShopGold,
+        inflationIndex: nextInflationIndex,
+        ledger: nextLedger,
+        lastInflationWarnMonth: nextLastInflationWarnMonth,
+        citizens: nextCitizens,
+        nextCitizenId,
+        totalMonths: nextTotalMonths,
+        officeFaxes: nextOfficeFaxes,
+        policeRecords: nextPoliceRecords,
+        lastMonthStats: nextLastMonthStats,
+        monthlyBusinessTax: nextMonthlyBusinessTax,
+        landRequests: nextLandRequests,
+        privateAds: nextPrivateAds,
+        lastSpentMonth: nextLastSpentMonth,
         toasts: appendToasts(state.toasts, newToasts),
         pendingAudioCue,
       };
@@ -535,7 +936,11 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         };
       }
 
-      const matCheck = checkMaterialCosts(state.warehouse, action.themeId);
+      const matCheck = checkMaterialCosts(
+        state.warehouse,
+        action.themeId,
+        state.level
+      );
       if (!matCheck.ok) {
         return {
           ...state,
@@ -560,11 +965,14 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
       }
 
       const nextWarehouse = { ...state.warehouse };
-      if (theme.materialCosts) {
+      // Element 2.1: Material costs apply ONLY in Level 2+; waived completely in Level 1
+      if (state.level >= 2 && theme.materialCosts) {
         for (const [res, amt] of Object.entries(theme.materialCosts) as Array<
           [TradedResourceKey, number]
         >) {
-          nextWarehouse[res] = Math.max(0, (nextWarehouse[res] ?? 0) - amt);
+          if (amt > 0) {
+            nextWarehouse[res] = Math.max(0, (nextWarehouse[res] ?? 0) - amt);
+          }
         }
       }
 
@@ -596,13 +1004,25 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         state.hungerFlag
       );
 
+      const nextLedger =
+        theme.cost > 0
+          ? appendLedger(
+              state.ledger,
+              state.day,
+              'build',
+              -theme.cost,
+              `بناء ${STRINGS.themes[action.themeId].name}`
+            )
+          : state.ledger;
+
       const updated: GameState = {
         ...state,
         cubes: nextCubes,
         warehouse: nextWarehouse,
         gold: Math.max(0, state.gold - theme.cost),
-        satisfaction: evalNeeds.satisfaction,
+        satisfaction: applyArrearsCap(evalNeeds.satisfaction, state.arrears),
         needs: evalNeeds.needs,
+        ledger: nextLedger,
         pendingAudioCue: makeCue('build'),
       };
 
@@ -612,6 +1032,8 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
     case 'DEMOLISH_THEME': {
       const cube = state.cubes[action.cubeId];
       if (!cube || cube.owner !== 'player') return state;
+      // Element 5.2 & H5: Crown cannot demolish or confiscate private property
+      if (typeof cube.privateOwnerId === 'number') return state;
       if (action.slot === 0 && cube.themeId && THEMES[cube.themeId].nonDemolishable) {
         return state;
       }
@@ -659,7 +1081,7 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
       return {
         ...state,
         cubes: nextCubes,
-        satisfaction: evalNeeds.satisfaction,
+        satisfaction: applyArrearsCap(evalNeeds.satisfaction, state.arrears),
         needs: evalNeeds.needs,
       };
     }
@@ -683,10 +1105,19 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         c.id === action.cubeId ? { ...c, owner: 'player' as const } : c
       );
 
+      const nextLedger = appendLedger(
+        state.ledger,
+        state.day,
+        'land',
+        -price,
+        'شراء أرض'
+      );
+
       const updated: GameState = {
         ...state,
         cubes: nextCubes,
         gold: Math.max(0, state.gold - price),
+        ledger: nextLedger,
         toasts: appendToasts(state.toasts, [
           createToast(STRINGS.toasts.cubePurchased, 'success'),
         ]),
@@ -716,6 +1147,12 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         };
       }
 
+      const goldDelta = result.gold - state.gold;
+      const nextLedger =
+        goldDelta !== 0
+          ? appendLedger(state.ledger, state.day, 'trade', goldDelta, 'بورصة')
+          : state.ledger;
+
       const evalNeeds = computeNeedsAndSatisfaction(
         state.cubes,
         result.warehouse,
@@ -729,9 +1166,189 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         warehouse: result.warehouse,
         dailyBought: result.dailyBought,
         dailySold: result.dailySold,
-        satisfaction: evalNeeds.satisfaction,
+        satisfaction: applyArrearsCap(evalNeeds.satisfaction, state.arrears),
         needs: evalNeeds.needs,
+        ledger: nextLedger,
         pendingAudioCue: makeCue('trade'),
+      };
+
+      return evaluateObjectivesAndProgression(updated);
+    }
+
+    case 'BUY_MATERIALS': {
+      const entries = (
+        Object.entries(action.items) as Array<[TradedResourceKey, number | undefined]>
+      ).filter((entry): entry is [TradedResourceKey, number] =>
+        typeof entry[1] === 'number' && entry[1] > 0
+      );
+      if (entries.length === 0) return state;
+
+      let total = 0;
+      for (const [res, qty] of entries) {
+        const unitPrice = getEffectiveBuyPrice(state.prices[res], state.cubes);
+        total += unitPrice * qty;
+      }
+
+      if (total <= 0) return state;
+      if (state.gold < total) {
+        return {
+          ...state,
+          toasts: appendToasts(state.toasts, [
+            createToast(STRINGS.toasts.notEnoughGold, 'warning'),
+          ]),
+          pendingAudioCue: makeCue('error'),
+        };
+      }
+
+      const nextWarehouse = { ...state.warehouse };
+      const nextBought = { ...state.dailyBought };
+      for (const [res, qty] of entries) {
+        nextWarehouse[res] = (nextWarehouse[res] ?? 0) + qty;
+        nextBought[res] = (nextBought[res] ?? 0) + qty;
+      }
+
+      const nextLedger = appendLedger(
+        state.ledger,
+        state.day,
+        'materials',
+        -total,
+        'شراء خامات'
+      );
+
+      const evalNeeds = computeNeedsAndSatisfaction(
+        state.cubes,
+        nextWarehouse,
+        state.population,
+        state.hungerFlag
+      );
+
+      const updated: GameState = {
+        ...state,
+        gold: Math.max(0, state.gold - total),
+        warehouse: nextWarehouse,
+        dailyBought: nextBought,
+        satisfaction: applyArrearsCap(evalNeeds.satisfaction, state.arrears),
+        needs: evalNeeds.needs,
+        ledger: nextLedger,
+        pendingAudioCue: makeCue('trade'),
+      };
+
+      return evaluateObjectivesAndProgression(updated);
+    }
+
+    case 'RESOLVE_LAND_REQUEST': {
+      const res = resolveLandRequest({
+        cubes: state.cubes,
+        citizens: state.citizens,
+        landRequests: state.landRequests,
+        gold: state.gold,
+        policeRecords: state.policeRecords,
+        totalMonths: state.totalMonths,
+        requestId: action.requestId,
+        approve: action.approve,
+      });
+
+      if (!res.resolved) {
+        if (res.landRequests === state.landRequests) {
+          return state;
+        }
+        return {
+          ...state,
+          landRequests: res.landRequests,
+          toasts: appendToasts(state.toasts, [
+            createToast('تعذّر تنفيذ طلب الأرض لانتفاء الشروط', 'warning'),
+          ]),
+          pendingAudioCue: makeCue('error'),
+        };
+      }
+
+      let nextLedger = state.ledger;
+      if (res.ledgerItem) {
+        nextLedger = appendLedger(
+          nextLedger,
+          state.day,
+          res.ledgerItem.kind,
+          res.ledgerItem.amount,
+          res.ledgerItem.labelAr
+        );
+      }
+
+      const toastMsg = res.approved
+        ? `تم بيع الأرض بنجاح (+${res.ledgerItem?.amount ?? 0} ذهب)`
+        : 'تم رفض طلب شراء الأرض';
+
+      const updated: GameState = {
+        ...state,
+        cubes: res.cubes,
+        citizens: res.citizens,
+        gold: res.gold,
+        citizenWealth: res.citizenWealth,
+        landRequests: res.landRequests,
+        policeRecords: res.policeRecords,
+        ledger: nextLedger,
+        toasts: appendToasts(state.toasts, [
+          createToast(toastMsg, res.approved ? 'success' : 'info'),
+        ]),
+        pendingAudioCue: makeCue(res.approved ? 'trade' : 'day'),
+      };
+
+      return evaluateObjectivesAndProgression(updated);
+    }
+
+    case 'RESOLVE_LAND_REQUEST': {
+      const res = resolveLandRequest({
+        cubes: state.cubes,
+        citizens: state.citizens,
+        landRequests: state.landRequests,
+        gold: state.gold,
+        policeRecords: state.policeRecords,
+        totalMonths: state.totalMonths,
+        requestId: action.requestId,
+        approve: action.approve,
+      });
+
+      if (!res.resolved) {
+        if (res.landRequests === state.landRequests) {
+          return state;
+        }
+        return {
+          ...state,
+          landRequests: res.landRequests,
+          toasts: appendToasts(state.toasts, [
+            createToast('تعذّر تنفيذ طلب الأرض لانتفاء الشروط', 'warning'),
+          ]),
+          pendingAudioCue: makeCue('error'),
+        };
+      }
+
+      let nextLedger = state.ledger;
+      if (res.ledgerItem) {
+        nextLedger = appendLedger(
+          nextLedger,
+          state.day,
+          res.ledgerItem.kind,
+          res.ledgerItem.amount,
+          res.ledgerItem.labelAr
+        );
+      }
+
+      const toastMsg = res.approved
+        ? `تم بيع الأرض بنجاح (+${res.ledgerItem?.amount ?? 0} ذهب)`
+        : 'تم رفض طلب شراء الأرض';
+
+      const updated: GameState = {
+        ...state,
+        cubes: res.cubes,
+        citizens: res.citizens,
+        gold: res.gold,
+        citizenWealth: res.citizenWealth,
+        landRequests: res.landRequests,
+        policeRecords: res.policeRecords,
+        ledger: nextLedger,
+        toasts: appendToasts(state.toasts, [
+          createToast(toastMsg, res.approved ? 'success' : 'info'),
+        ]),
+        pendingAudioCue: makeCue(res.approved ? 'trade' : 'day'),
       };
 
       return evaluateObjectivesAndProgression(updated);

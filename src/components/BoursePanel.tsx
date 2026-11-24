@@ -1,6 +1,6 @@
-import { ArrowDownRight, ArrowUpRight, Minus } from 'lucide-react';
+import { ArrowDownRight, ArrowUpRight, Gauge, Minus } from 'lucide-react';
 import { TRADE_BATCH_QUANTITIES, TRADED_RESOURCES } from '../game/constants';
-import { getSellPrice } from '../game/economy';
+import { getEffectiveBuyPrice, getSellPrice } from '../game/economy';
 import { STRINGS } from '../game/strings';
 import type { GameState, TradedResourceKey } from '../game/types';
 import { ResourceIcon } from './ResourceIcon';
@@ -13,6 +13,16 @@ interface BoursePanelProps {
     side: 'buy' | 'sell',
     quantity: number | 'max'
   ) => void;
+}
+
+function getInflationBadgeClass(index: number): string {
+  if (index < 110) {
+    return 'bg-[#E3F3E6] border-[#9CD0A7] text-[#2D6E3B]';
+  }
+  if (index <= 130) {
+    return 'bg-[#F8E7C1] border-[#E2BA64] text-[#8A5F12]';
+  }
+  return 'bg-[#FBE2DF] border-[#E5ABA3] text-[#A83629]';
 }
 
 export function BoursePanel({
@@ -30,17 +40,30 @@ export function BoursePanel({
 
   return (
     <div className="space-y-2.5">
-      <p className="text-[11px] leading-relaxed text-[#6F5C43]">
-        {STRINGS.bourse.subtitle}
-      </p>
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <p className="text-[11px] leading-relaxed text-[#6F5C43]">
+          {STRINGS.bourse.subtitle}
+        </p>
+        <div
+          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-extrabold tabular-nums-latin shrink-0 ${getInflationBadgeClass(
+            state.inflationIndex
+          )}`}
+        >
+          <Gauge className="w-3.5 h-3.5 shrink-0" />
+          <span>مؤشر الغلاء: {state.inflationIndex}</span>
+        </div>
+      </div>
 
       <div className={compact ? 'space-y-2.5' : 'grid grid-cols-1 sm:grid-cols-2 gap-3'}>
         {TRADED_RESOURCES.map((resource) => {
-          const buyPrice = state.prices[resource];
-          const prevPrice = state.previousPrices[resource] ?? buyPrice;
-          const sellPrice = getSellPrice(buyPrice);
+          const buyPrice = getEffectiveBuyPrice(
+            state.prices[resource],
+            state.cubes
+          );
+          const prevPrice = state.previousPrices[resource] ?? state.prices[resource];
+          const sellPrice = getSellPrice(state.prices[resource], state.cubes);
           const stock = state.warehouse[resource];
-          const diff = buyPrice - prevPrice;
+          const diff = state.prices[resource] - prevPrice;
           const pct = prevPrice > 0 ? Math.round((diff / prevPrice) * 100) : 0;
 
           const maxBuy = buyPrice > 0 ? Math.floor(state.gold / buyPrice) : 0;

@@ -1,13 +1,18 @@
 import {
   AlertTriangle,
+  Briefcase,
   Check,
   Clock,
   Coins,
   Crown,
+  Gauge,
   Hammer,
+  Heart,
   Home,
+  Landmark,
   MapPin,
   Mountain,
+  Shield,
   Star,
   Store,
   Trash2,
@@ -15,13 +20,19 @@ import {
   UserX,
   X,
 } from 'lucide-react';
+import { useMemo } from 'react';
 import {
   MATERIAL_PRODUCER_THEME,
+  MONTH_DAYS,
   THEMES,
   TICKS_PER_DAY,
   VILLAGE_JOIN_MIN_REPUTATION,
   VILLAGE_JOIN_REQUIRED_DAYS,
 } from '../game/constants';
+import { ageYears } from '../game/citizens';
+import { ageYears } from '../game/citizens';
+import { getHousingQueue } from '../game/housingOffice';
+import { getActiveCVs } from '../game/laborOffice';
 import {
   getEntertainmentBreakdown,
   getHouseCapacity,
@@ -47,6 +58,8 @@ import type {
 } from '../game/types';
 import { BoursePanel } from './BoursePanel';
 import { CitizenCard, type CitizenInfo } from './CitizenCard';
+import { MaterialRequirementsCard } from './MaterialRequirementsCard';
+import type { PalaceOfficeTab } from './PalaceOfficesOverlay';
 import { ThemeIcon } from './ResourceIcon';
 
 interface InspectorProps {
@@ -57,12 +70,18 @@ interface InspectorProps {
   kingdomOpen: boolean;
   staffing: StaffingStatus;
   activeTab: 'info' | 'bourse';
+  activeBuildTheme?: ThemeId | null;
+  inspectedShortTheme?: ThemeId | null;
   onChangeTab: (tab: 'info' | 'bourse') => void;
   onClose: () => void;
   onToggleFollowCitizen: () => void;
   onBuyCube: (cubeId: number) => void;
   onDemolishTheme: (cubeId: number, slot: SlotIndex) => void;
   onFixHint?: (themeId: ThemeId) => void;
+  onBuyMaterials?: (items: Partial<Record<TradedResourceKey, number>>) => void;
+  onBuildProducer?: (resource: TradedResourceKey) => void;
+  onOpenOffice?: (tab: PalaceOfficeTab) => void;
+  onResolveLandRequest?: (requestId: string, approve: boolean) => void;
   onTrade: (
     resource: TradedResourceKey,
     side: 'buy' | 'sell',
@@ -285,8 +304,8 @@ function SlotCard({
         </div>
       )}
 
-      {/* Demolish button (hidden for non-demolishable landmarks) */}
-      {!def.nonDemolishable && (
+      {/* Demolish button (hidden for non-demolishable landmarks and private property) */}
+      {!def.nonDemolishable && typeof cube.privateOwnerId !== 'number' && (
         <button
           type="button"
           onClick={onDemolish}
@@ -308,14 +327,50 @@ export function Inspector({
   kingdomOpen,
   staffing,
   activeTab,
+  activeBuildTheme = null,
+  inspectedShortTheme = null,
   onChangeTab,
   onClose,
   onToggleFollowCitizen,
   onBuyCube,
   onDemolishTheme,
   onFixHint,
+  onBuyMaterials,
+  onBuildProducer,
+  onOpenOffice,
+  onResolveLandRequest,
   onTrade,
 }: InspectorProps) {
+  // Memoized office chip counts (H7: skipped when palace is not open, never recomputed on unrelated ticks)
+  const isPalaceSelected = selectedCube?.themeId === 'palace';
+  const officeCounts = useMemo(() => {
+    if (!isPalaceSelected) {
+      return {
+        cvs: 0,
+        housingQueue: 0,
+        marriagesThisMonth: 0,
+        policeTotal: 0,
+      };
+    }
+    const cvs = getActiveCVs(state.citizens, state.totalMonths).length;
+    const housingQueue = getHousingQueue(
+      state.citizens,
+      state.totalMonths
+    ).length;
+    let marriagesThisMonth = 0;
+    for (const r of state.policeRecords) {
+      if (r.kind === 'marriage' && r.month === state.totalMonths) {
+        marriagesThisMonth += 1;
+      }
+    }
+    return {
+      cvs,
+      housingQueue,
+      marriagesThisMonth,
+      policeTotal: state.policeRecords.length,
+    };
+  }, [isPalaceSelected, state.citizens, state.totalMonths, state.policeRecords]);
+
   // Element 1.3: Unmount completely when nothing is selected — the map breathes
   if (!selectedCitizen && !selectedCube && !kingdomOpen) {
     return null;
@@ -426,62 +481,510 @@ export function Inspector({
     );
   };
 
-  const renderPalacePanel = () => (
-    <div className="p-3 rounded-xl bg-[#FDF8EC] border border-[#C9962E] space-y-2.5">
-      <div className="flex items-center gap-2">
-        <div className="w-9 h-9 rounded-lg bg-[#C9962E]/20 text-[#8A5F12] flex items-center justify-center shrink-0">
-          <Crown className="w-5 h-5" />
-        </div>
-        <div>
-          <div className="text-sm font-extrabold text-[#2B2118]">
-            {STRINGS.inspector.palaceTitle}
+  const renderPalacePanel = () => {
+    const monthStart =
+      Math.floor((state.day - 1) / MONTH_DAYS) * MONTH_DAYS + 1;
+    const monthEntries = state.ledger.filter((e) => e.day >= monthStart);
+    const monthIn = monthEntries.reduce(
+      (sum, e) => (e.amount > 0 ? sum + e.amount : sum),
+      0
+    );
+    const monthOut = monthEntries.reduce(
+      (sum, e) => (e.amount < 0 ? sum + Math.abs(e.amount) : sum),
+      0
+    );
+    const monthNet = monthIn - monthOut;
+    const avgCitizenWealth = Math.floor(
+      state.citizenWealth / Math.max(1, state.population)
+    );
+    const recentLedger = state.ledger.slice(-8).reverse();
+    const inflationTone =
+      state.inflationIndex < 110
+        ? 'bg-[#E3F3E6] border-[#9CD0A7] text-[#2D6E3B]'
+        : state.inflationIndex <= 130
+          ? 'bg-[#F8E7C1] border-[#E2BA64] text-[#8A5F12]'
+          : 'bg-[#FBE2DF] border-[#E5ABA3] text-[#A83629]';
+
+    return (
+      <div className="space-y-2.5">
+        <div className="p-3 rounded-xl bg-[#FDF8EC] border border-[#C9962E] space-y-2.5">
+          <div className="flex items-center gap-2">
+            <div className="w-9 h-9 rounded-lg bg-[#C9962E]/20 text-[#8A5F12] flex items-center justify-center shrink-0">
+              <Crown className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="text-sm font-extrabold text-[#2B2118]">
+                {STRINGS.inspector.palaceTitle}
+              </div>
+              <div className="text-[11px] font-bold text-[#6F5C43]">
+                {STRINGS.themes.palace.summary}
+              </div>
+            </div>
           </div>
-          <div className="text-[11px] font-bold text-[#6F5C43]">
-            {STRINGS.themes.palace.summary}
+
+          <div className="space-y-1.5 pt-2 border-t border-[#EFE3C5] text-xs">
+            <div className="flex items-center justify-between">
+              <span className="text-[#6F5C43] font-bold">
+                {STRINGS.inspector.palaceTerritory}
+              </span>
+              <span className="font-extrabold text-[#2B2118] tabular-nums-latin">
+                {ownedCount} {STRINGS.inspector.palaceCubesUnit}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[#6F5C43] font-bold">
+                {STRINGS.populationLabel}
+              </span>
+              <span className="font-extrabold text-[#2B2118] tabular-nums-latin">
+                {state.population}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[#6F5C43] font-bold">
+                {STRINGS.reputationLabel}
+              </span>
+              <span className="font-extrabold text-[#2B2118] tabular-nums-latin">
+                {Math.round(state.reputation)} / 100
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[#6F5C43] font-bold">
+                {STRINGS.inspector.palaceVillagesJoined}
+              </span>
+              <span className="font-extrabold text-[#2B2118] tabular-nums-latin">
+                {state.villagesJoined}
+              </span>
+            </div>
+          </div>
+
+          <p className="text-[11px] font-bold text-[#8A5F12] pt-1.5 border-t border-[#EFE3C5]">
+            {STRINGS.inspector.palaceNonDemolishable}
+          </p>
+
+          {/* Element 7.1: دواوين المملكة — compact 4-chip office row */}
+          {onOpenOffice && (
+            <div className="pt-2 border-t border-[#EFE3C5] space-y-1.5">
+              <div className="text-[11px] font-extrabold text-[#4F3F2B]">
+                دواوين المملكة
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => onOpenOffice('labor')}
+                  className="flex items-center justify-between gap-1 px-2 py-1.5 rounded-lg bg-[#F5ECD4] hover:bg-[#ECDDB8] border border-[#DFC996] text-[11px] font-extrabold text-[#2B2118] transition-colors"
+                >
+                  <span className="flex items-center gap-1 min-w-0 truncate">
+                    <Briefcase className="w-3.5 h-3.5 text-[#14524A] shrink-0" />
+                    <span>العمل</span>
+                  </span>
+                  <span className="text-[#14524A] tabular-nums-latin">
+                    {officeCounts.cvs}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onOpenOffice('housing')}
+                  className="flex items-center justify-between gap-1 px-2 py-1.5 rounded-lg bg-[#F5ECD4] hover:bg-[#ECDDB8] border border-[#DFC996] text-[11px] font-extrabold text-[#2B2118] transition-colors"
+                >
+                  <span className="flex items-center gap-1 min-w-0 truncate">
+                    <Home className="w-3.5 h-3.5 text-[#14524A] shrink-0" />
+                    <span>الإسكان</span>
+                  </span>
+                  <span className="text-[#14524A] tabular-nums-latin">
+                    {officeCounts.housingQueue}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onOpenOffice('marriage')}
+                  className="flex items-center justify-between gap-1 px-2 py-1.5 rounded-lg bg-[#F5ECD4] hover:bg-[#ECDDB8] border border-[#DFC996] text-[11px] font-extrabold text-[#2B2118] transition-colors"
+                >
+                  <span className="flex items-center gap-1 min-w-0 truncate">
+                    <Heart className="w-3.5 h-3.5 text-[#8A5F12] shrink-0" />
+                    <span>الزواج</span>
+                  </span>
+                  <span className="text-[#8A5F12] tabular-nums-latin">
+                    {officeCounts.marriagesThisMonth}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onOpenOffice('police')}
+                  className="flex items-center justify-between gap-1 px-2 py-1.5 rounded-lg bg-[#F5ECD4] hover:bg-[#ECDDB8] border border-[#DFC996] text-[11px] font-extrabold text-[#2B2118] transition-colors"
+                >
+                  <span className="flex items-center gap-1 min-w-0 truncate">
+                    <Shield className="w-3.5 h-3.5 text-[#14524A] shrink-0" />
+                    <span>الشرطة</span>
+                  </span>
+                  <span className="text-[#14524A] tabular-nums-latin">
+                    {officeCounts.policeTotal}
+                  </span>
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Element 5.2: Private Land Purchase Requests (طلبات شراء أراضٍ) */}
+        <div className="p-3 rounded-xl bg-[#FDF8EC] border border-[#C9962E] space-y-2">
+          <div className="flex items-center justify-between gap-2 border-b border-[#EFE3C5] pb-1.5">
+            <div className="flex items-center gap-1.5 text-[#2B2118]">
+              <MapPin className="w-4 h-4 text-[#C9962E] shrink-0" />
+              <h4 className="text-xs font-extrabold">طلبات شراء أراضٍ</h4>
+            </div>
+            <span className="px-1.5 py-0.5 rounded-md bg-[#F8E7C1] border border-[#E2BA64] text-[10px] font-extrabold text-[#8A5F12] tabular-nums-latin">
+              {state.landRequests.length}
+            </span>
+          </div>
+
+          {state.landRequests.length === 0 ? (
+            <p className="text-[11px] text-[#8A7759]">
+              لا توجد طلبات شراء أراضٍ معلّقة حالياً.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {state.landRequests.map((req) => {
+                const applicant = state.citizens.find(
+                  (c) => c.id === req.citizenId
+                );
+                const targetCube = state.cubes[req.cubeId];
+                const dist = targetCube
+                  ? getManhattanDistanceToPalace(state.cubes, targetCube)
+                  : 0;
+                const applicantAge = applicant
+                  ? ageYears(applicant, state.totalMonths)
+                  : 0;
+                const jobLabel = applicant?.jobThemeId
+                  ? STRINGS.themes[applicant.jobThemeId].name
+                  : 'باحث عن عمل';
+                return (
+                  <div
+                    key={req.id}
+                    className="p-2.5 rounded-lg bg-[#F7EED8] border border-[#DFC996] space-y-1.5 text-[11px]"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-extrabold text-[#2B2118] truncate">
+                        {applicant?.name ?? 'مواطن'}{' '}
+                        <span className="font-bold text-[#6F5C43] tabular-nums-latin">
+                          ({applicantAge} سنة)
+                        </span>
+                      </span>
+                      <span className="font-extrabold text-[#8A5F12] shrink-0 tabular-nums-latin">
+                        {req.price} ذهب
+                      </span>
+                    </div>
+                    <div className="text-[10px] font-bold text-[#4F3F2B] space-y-0.5">
+                      <div>
+                        العمل: {jobLabel} · الثروة:{' '}
+                        <span className="tabular-nums-latin">
+                          {applicant?.wealth ?? 0} ذهب
+                        </span>{' '}
+                        · الذكاء:{' '}
+                        <span className="tabular-nums-latin">
+                          {applicant?.attrs.intelligence ?? 0}
+                        </span>
+                      </div>
+                      <div>
+                        المشروع:{' '}
+                        <span className="text-[#14524A]">
+                          {STRINGS.themes[req.businessThemeId].name}
+                        </span>{' '}
+                        · البُعد عن القصر:{' '}
+                        <span className="tabular-nums-latin">{dist}</span>
+                      </div>
+                      <div className="text-[#7C684C]">
+                        إن تعذّر البناء 3 أشهر تعود الأرض للتاج.
+                      </div>
+                    </div>
+                    {onResolveLandRequest && (
+                      <div className="grid grid-cols-2 gap-1.5 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => onResolveLandRequest(req.id, true)}
+                          className="py-1.5 px-2 rounded-lg bg-[#14524A] hover:bg-[#1B685E] text-white text-[11px] font-extrabold transition-colors"
+                        >
+                          موافقة
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onResolveLandRequest(req.id, false)}
+                          className="py-1.5 px-2 rounded-lg border border-[#DFB9B3] bg-[#FBF0EE] hover:bg-[#F5DDD9] text-[#A83629] text-[11px] font-extrabold transition-colors"
+                        >
+                          رفض
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Element 5.2: Private Land Purchase Requests (طلبات شراء أراضٍ) */}
+        <div className="p-3 rounded-xl bg-[#FDF8EC] border border-[#C9962E] space-y-2">
+          <div className="flex items-center justify-between gap-2 border-b border-[#EFE3C5] pb-1.5">
+            <div className="flex items-center gap-1.5 text-[#2B2118]">
+              <MapPin className="w-4 h-4 text-[#C9962E] shrink-0" />
+              <h4 className="text-xs font-extrabold">طلبات شراء أراضٍ</h4>
+            </div>
+            <span className="px-1.5 py-0.5 rounded-md bg-[#F8E7C1] border border-[#E2BA64] text-[10px] font-extrabold text-[#8A5F12] tabular-nums-latin">
+              {state.landRequests.length}
+            </span>
+          </div>
+
+          {state.landRequests.length === 0 ? (
+            <p className="text-[11px] text-[#8A7759]">
+              لا توجد طلبات شراء أراضٍ معلّقة حالياً.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {state.landRequests.map((req) => {
+                const applicant = state.citizens.find(
+                  (c) => c.id === req.citizenId
+                );
+                const targetCube = state.cubes[req.cubeId];
+                const dist = targetCube
+                  ? getManhattanDistanceToPalace(state.cubes, targetCube)
+                  : 0;
+                const applicantAge = applicant
+                  ? ageYears(applicant, state.totalMonths)
+                  : 0;
+                const jobLabel = applicant?.jobThemeId
+                  ? STRINGS.themes[applicant.jobThemeId].name
+                  : 'باحث عن عمل';
+                return (
+                  <div
+                    key={req.id}
+                    className="p-2.5 rounded-lg bg-[#F7EED8] border border-[#DFC996] space-y-1.5 text-[11px]"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-extrabold text-[#2B2118] truncate">
+                        {applicant?.name ?? 'مواطن'}{' '}
+                        <span className="font-bold text-[#6F5C43] tabular-nums-latin">
+                          ({applicantAge} سنة)
+                        </span>
+                      </span>
+                      <span className="font-extrabold text-[#8A5F12] shrink-0 tabular-nums-latin">
+                        {req.price} ذهب
+                      </span>
+                    </div>
+                    <div className="text-[10px] font-bold text-[#4F3F2B] space-y-0.5">
+                      <div>
+                        العمل: {jobLabel} · الثروة:{' '}
+                        <span className="tabular-nums-latin">
+                          {applicant?.wealth ?? 0} ذهب
+                        </span>{' '}
+                        · الذكاء:{' '}
+                        <span className="tabular-nums-latin">
+                          {applicant?.attrs.intelligence ?? 0}
+                        </span>
+                      </div>
+                      <div>
+                        المشروع:{' '}
+                        <span className="text-[#14524A]">
+                          {STRINGS.themes[req.businessThemeId].name}
+                        </span>{' '}
+                        · البُعد عن القصر:{' '}
+                        <span className="tabular-nums-latin">{dist}</span>
+                      </div>
+                      <div className="text-[#7C684C]">
+                        إن تعذّر البناء 3 أشهر تعود الأرض للتاج.
+                      </div>
+                    </div>
+                    {onResolveLandRequest && (
+                      <div className="grid grid-cols-2 gap-1.5 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => onResolveLandRequest(req.id, true)}
+                          className="py-1.5 px-2 rounded-lg bg-[#14524A] hover:bg-[#1B685E] text-white text-[11px] font-extrabold transition-colors"
+                        >
+                          موافقة
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onResolveLandRequest(req.id, false)}
+                          className="py-1.5 px-2 rounded-lg border border-[#DFB9B3] bg-[#FBF0EE] hover:bg-[#F5DDD9] text-[#A83629] text-[11px] font-extrabold transition-colors"
+                        >
+                          رفض
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Element 4.3: Kingdom Treasury Section (خزنة المملكة) */}
+        <div className="p-3 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] space-y-2.5">
+          <div className="flex items-center justify-between gap-2 border-b border-[#EFE3C5] pb-2">
+            <div className="flex items-center gap-1.5 text-[#2B2118]">
+              <Landmark className="w-4 h-4 text-[#14524A] shrink-0" />
+              <h4 className="text-xs font-extrabold">خزنة المملكة</h4>
+            </div>
+            <span className="text-[10px] font-bold text-[#6F5C43] tabular-nums-latin">
+              يوم {monthStart}–{state.day}
+            </span>
+          </div>
+
+          {/* Current-month IN / OUT / NET */}
+          <div className="grid grid-cols-3 gap-1.5 text-center">
+            <div className="p-1.5 rounded-lg bg-[#F5ECD4] border border-[#E6D6B0]">
+              <div className="text-[10px] font-bold text-[#6F5C43]">الوارد</div>
+              <div className="text-xs font-extrabold text-[#2D6E3B] tabular-nums-latin">
+                +{monthIn}
+              </div>
+            </div>
+            <div className="p-1.5 rounded-lg bg-[#F5ECD4] border border-[#E6D6B0]">
+              <div className="text-[10px] font-bold text-[#6F5C43]">المنصرف</div>
+              <div className="text-xs font-extrabold text-[#A83629] tabular-nums-latin">
+                -{monthOut}
+              </div>
+            </div>
+            <div className="p-1.5 rounded-lg bg-[#F5ECD4] border border-[#E6D6B0]">
+              <div className="text-[10px] font-bold text-[#6F5C43]">الصافي</div>
+              <div
+                className={`text-xs font-extrabold tabular-nums-latin ${
+                  monthNet >= 0 ? 'text-[#2D6E3B]' : 'text-[#A83629]'
+                }`}
+              >
+                {monthNet >= 0 ? `+${monthNet}` : monthNet}
+              </div>
+            </div>
+          </div>
+
+          {/* Last payroll, citizen wealth, inflation index */}
+          <div className="space-y-1.5 text-[11px]">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[#6F5C43] font-bold">آخر رواتب</span>
+              {state.lastPayroll ? (
+                <span className="font-extrabold text-[#2B2118] tabular-nums-latin">
+                  {state.lastPayroll.workers} عامل · {state.lastPayroll.paid}/
+                  {state.lastPayroll.due} ذهب
+                </span>
+              ) : (
+                <span className="font-bold text-[#8A7759]">
+                  لا توجد رواتب بعد
+                </span>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[#6F5C43] font-bold">
+                متوسط ثروة المواطن
+              </span>
+              <span className="font-extrabold text-[#2B2118] tabular-nums-latin">
+                {avgCitizenWealth} ذهب
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[#6F5C43] font-bold">
+                إيراد غذاء وترفيه المواطنين
+              </span>
+              <span className="font-extrabold text-[#2D6E3B] tabular-nums-latin">
+                {state.lastMonthStats.foodRevenue +
+                  state.lastMonthStats.leisureRevenue}{' '}
+                ذهب
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[#6F5C43] font-bold">
+                ضرائب الأعمال الخاصة
+              </span>
+              <span className="font-extrabold text-[#2D6E3B] tabular-nums-latin">
+                {state.lastMonthStats.businessTax} ذهب
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[#6F5C43] font-bold">
+                إيراد غذاء وترفيه المواطنين
+              </span>
+              <span className="font-extrabold text-[#2D6E3B] tabular-nums-latin">
+                {state.lastMonthStats.foodRevenue +
+                  state.lastMonthStats.leisureRevenue}{' '}
+                ذهب
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[#6F5C43] font-bold">
+                ضرائب الأعمال الخاصة
+              </span>
+              <span className="font-extrabold text-[#2D6E3B] tabular-nums-latin">
+                {state.lastMonthStats.businessTax} ذهب
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[#6F5C43] font-bold">مؤشر الغلاء</span>
+              <span
+                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[11px] font-extrabold tabular-nums-latin ${inflationTone}`}
+              >
+                <Gauge className="w-3 h-3" />
+                <span>{state.inflationIndex}</span>
+              </span>
+            </div>
+          </div>
+
+          {/* Red arrears warning when arrears > 0 */}
+          {state.arrears > 0 && (
+            <div className="flex items-start gap-1.5 p-2 rounded-lg bg-[#FBE2DF] border border-[#E5ABA3] text-[11px] font-extrabold text-[#8E2A1F]">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span>
+                متأخرات رواتب: {state.arrears} ذهب (سقف الرضا 50% حتى السداد)
+              </span>
+            </div>
+          )}
+
+          {/* Last 8 ledger rows */}
+          <div className="pt-2 border-t border-[#EFE3C5] space-y-1">
+            <div className="text-[11px] font-extrabold text-[#4F3F2B]">
+              سجل الخزنة (آخر الحركات)
+            </div>
+            {recentLedger.length === 0 ? (
+              <p className="text-[11px] text-[#8A7759]">
+                لا توجد حركات مسجلة بعد.
+              </p>
+            ) : (
+              <div className="space-y-1">
+                {recentLedger.map((entry) => (
+                  <div
+                    key={entry.id}
+                    className="flex items-center justify-between gap-2 py-1 px-2 rounded-lg bg-[#F7EED8] text-[11px]"
+                  >
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="text-[10px] font-bold text-[#7C684C] shrink-0 tabular-nums-latin">
+                        ي{entry.day}
+                      </span>
+                      <span className="font-bold text-[#2B2118] truncate">
+                        {entry.labelAr}
+                      </span>
+                    </div>
+                    <span
+                      className={`font-extrabold shrink-0 tabular-nums-latin ${
+                        entry.amount > 0
+                          ? 'text-[#2D6E3B]'
+                          : entry.amount < 0
+                            ? 'text-[#A83629]'
+                            : 'text-[#6F5C43]'
+                      }`}
+                    >
+                      {entry.amount > 0 ? `+${entry.amount}` : entry.amount}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>
-
-      <div className="space-y-1.5 pt-2 border-t border-[#EFE3C5] text-xs">
-        <div className="flex items-center justify-between">
-          <span className="text-[#6F5C43] font-bold">
-            {STRINGS.inspector.palaceTerritory}
-          </span>
-          <span className="font-extrabold text-[#2B2118] tabular-nums-latin">
-            {ownedCount} {STRINGS.inspector.palaceCubesUnit}
-          </span>
-        </div>
-        <div className="flex items-center justify-between">
-          <span className="text-[#6F5C43] font-bold">
-            {STRINGS.populationLabel}
-          </span>
-          <span className="font-extrabold text-[#2B2118] tabular-nums-latin">
-            {state.population}
-          </span>
-        </div>
-        <div className="flex items-center justify-between">
-          <span className="text-[#6F5C43] font-bold">
-            {STRINGS.reputationLabel}
-          </span>
-          <span className="font-extrabold text-[#2B2118] tabular-nums-latin">
-            {Math.round(state.reputation)} / 100
-          </span>
-        </div>
-        <div className="flex items-center justify-between">
-          <span className="text-[#6F5C43] font-bold">
-            {STRINGS.inspector.palaceVillagesJoined}
-          </span>
-          <span className="font-extrabold text-[#2B2118] tabular-nums-latin">
-            {state.villagesJoined}
-          </span>
-        </div>
-      </div>
-
-      <p className="text-[11px] font-bold text-[#8A5F12] pt-1.5 border-t border-[#EFE3C5]">
-        {STRINGS.inspector.palaceNonDemolishable}
-      </p>
-    </div>
-  );
+    );
+  };
 
   const renderKingdomSummary = () => (
     <div className="space-y-3">
@@ -680,6 +1183,58 @@ export function Inspector({
 
           {selectedCube.owner === 'neutral' ? (
             renderNeutralCube(selectedCube)
+          ) : typeof selectedCube.privateOwnerId === 'number' ? (
+            (() => {
+              const owner = state.citizens.find(
+                (c) => c.id === selectedCube.privateOwnerId
+              );
+              const intendedName = selectedCube.privateIntendedTheme
+                ? STRINGS.themes[selectedCube.privateIntendedTheme].name
+                : 'مشروع خاص';
+              return (
+                <div className="space-y-2.5">
+                  {/* Element 5.2 & H5: Private property banner — shows owner name, never owner wealth */}
+                  <div className="p-2.5 rounded-xl bg-[#F8E7C1] border border-[#C9962E] space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="inline-flex items-center gap-1 text-xs font-extrabold text-[#6D4707]">
+                        <Landmark className="w-3.5 h-3.5 shrink-0" />
+                        <span>ملكية خاصة</span>
+                      </span>
+                      <span className="text-[11px] font-extrabold text-[#2B2118] truncate">
+                        المالك: {owner?.name ?? 'مواطن'}
+                      </span>
+                    </div>
+                    {!selectedCube.themeId && (
+                      <div className="text-[11px] font-bold text-[#4F3F2B]">
+                        المشروع المخطط: {intendedName} — يبدأ البناء في الشهر القادم
+                        {(selectedCube.privateBuildRetries ?? 0) > 0 && (
+                          <span className="text-[#8A5F12] tabular-nums-latin">
+                            {' '}
+                            (محاولة {selectedCube.privateBuildRetries}/3)
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {selectedCube.themeId && (
+                    <SlotCard
+                      cube={selectedCube}
+                      allCubes={state.cubes}
+                      slot={0}
+                      themeId={selectedCube.themeId}
+                      progress={selectedCube.progress}
+                      shortage={selectedCube.shortage}
+                      isStaffed={staffing.staffedSlots.has(
+                        makeSlotKey(selectedCube.id, 0)
+                      )}
+                      onDemolish={() => onDemolishTheme(selectedCube.id, 0)}
+                      onFixHint={onFixHint}
+                    />
+                  )}
+                </div>
+              );
+            })()
           ) : !selectedCube.themeId ? (
             <div className="p-3 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] space-y-2">
               <div className="text-sm font-extrabold text-[#2B2118]">
@@ -694,6 +1249,31 @@ export function Inspector({
               <p className="text-xs text-[#6F5C43] leading-relaxed">
                 {STRINGS.inspector.ownedSandHint}
               </p>
+              {state.level >= 2 && (activeBuildTheme || inspectedShortTheme) && (
+                <div className="pt-2 border-t border-[#EFE3C5] space-y-1.5">
+                  <div className="text-[11px] font-extrabold text-[#2B2118]">
+                    متطلبات بناء{' '}
+                    {
+                      STRINGS.themes[
+                        (activeBuildTheme ?? inspectedShortTheme) as ThemeId
+                      ].name
+                    }
+                  </div>
+                  <MaterialRequirementsCard
+                    themeId={
+                      (activeBuildTheme ?? inspectedShortTheme) as ThemeId
+                    }
+                    level={state.level}
+                    warehouse={state.warehouse}
+                    gold={state.gold}
+                    prices={state.prices}
+                    cubes={state.cubes}
+                    showActions
+                    onBuyMaterials={onBuyMaterials}
+                    onBuildProducer={onBuildProducer}
+                  />
+                </div>
+              )}
             </div>
           ) : selectedCube.themeId === 'palace' ? (
             renderPalacePanel()
@@ -743,8 +1323,24 @@ export function Inspector({
                   onFixHint={onFixHint}
                 />
               ) : (
-                <div className="p-2.5 rounded-xl bg-[#F5EAD0] border border-dashed border-[#D3BE8F] text-[11px] font-bold text-[#6F5C43]">
-                  {STRINGS.inspector.emptyHalf}
+                <div className="p-2.5 rounded-xl bg-[#F5EAD0] border border-dashed border-[#D3BE8F] space-y-2 text-[11px] font-bold text-[#6F5C43]">
+                  <div>{STRINGS.inspector.emptyHalf}</div>
+                  {state.level >= 2 &&
+                    (activeBuildTheme || inspectedShortTheme) && (
+                      <MaterialRequirementsCard
+                        themeId={
+                          (activeBuildTheme ?? inspectedShortTheme) as ThemeId
+                        }
+                        level={state.level}
+                        warehouse={state.warehouse}
+                        gold={state.gold}
+                        prices={state.prices}
+                        cubes={state.cubes}
+                        showActions
+                        onBuyMaterials={onBuyMaterials}
+                        onBuildProducer={onBuildProducer}
+                      />
+                    )}
                 </div>
               )}
             </div>

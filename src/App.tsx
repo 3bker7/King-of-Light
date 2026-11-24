@@ -11,12 +11,21 @@ import {
   SettingsModal,
 } from './components/Modals';
 import { Objectives } from './components/Objectives';
+import {
+  PalaceOfficesOverlay,
+  type PalaceOfficeTab,
+} from './components/PalaceOfficesOverlay';
 import { Ticker } from './components/Ticker';
 import { Toasts } from './components/Toasts';
 import { TopBar } from './components/TopBar';
 import { WorldCanvas, type WorldCanvasHandle } from './components/WorldCanvas';
 import { playAudioCue } from './game/audio';
-import { SAVE_THROTTLE_MS, THEMES, TICK_MS } from './game/constants';
+import {
+  MATERIAL_PRODUCER_THEME,
+  SAVE_THROTTLE_MS,
+  THEMES,
+  TICK_MS,
+} from './game/constants';
 import {
   createFreshGameState,
   gameReducer,
@@ -43,6 +52,7 @@ import type {
   ThemeCategory,
   ThemeId,
   ToastItem,
+  TradedResourceKey,
 } from './game/types';
 
 function initializeGame(): {
@@ -110,6 +120,8 @@ export default function App() {
   const [openBuildCategory, setOpenBuildCategory] =
     useState<ThemeCategory | null>(null);
   const [activeBuildTheme, setActiveBuildTheme] = useState<ThemeId | null>(null);
+  const [inspectedShortTheme, setInspectedShortTheme] =
+    useState<ThemeId | null>(null);
   const [pulsingTheme, setPulsingTheme] = useState<ThemeId | null>(null);
   const [objectivesOpen, setObjectivesOpen] = useState(false);
 
@@ -118,6 +130,9 @@ export default function App() {
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [showLevel2Modal, setShowLevel2Modal] = useState(false);
   const [showLevel3Modal, setShowLevel3Modal] = useState(false);
+  const [openOfficeTab, setOpenOfficeTab] = useState<PalaceOfficeTab | null>(
+    null
+  );
   const [resetSignal, setResetSignal] = useState(0);
 
   const latestStateRef = useRef(state);
@@ -203,20 +218,27 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [selectedCitizenId]);
 
-  // Element 6.1: Escape closes in strict stack order
-  // (citizen card -> cube/kingdom card -> build panel/placement -> objectives -> modals)
+  // Element 6.1 & 9: Escape closes in strict stack order
+  // (palace offices overlay -> citizen card -> cube/kingdom card -> build panel/placement -> objectives -> modals)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
-      if (selectedCitizenId !== null) {
+      if (openOfficeTab !== null) {
+        setOpenOfficeTab(null);
+      } else if (selectedCitizenId !== null) {
         setSelectedCitizenId(null);
         setFollowCitizenId(null);
         setCitizenInfo(null);
       } else if (selectedCubeId !== null || kingdomCardOpen) {
         setSelectedCubeId(null);
         setKingdomCardOpen(false);
-      } else if (activeBuildTheme !== null || openBuildCategory !== null) {
+      } else if (
+        activeBuildTheme !== null ||
+        openBuildCategory !== null ||
+        inspectedShortTheme !== null
+      ) {
         setActiveBuildTheme(null);
+        setInspectedShortTheme(null);
         setOpenBuildCategory(null);
         setPulsingTheme(null);
       } else if (objectivesOpen) {
@@ -236,10 +258,12 @@ export default function App() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [
+    openOfficeTab,
     selectedCitizenId,
     selectedCubeId,
     kingdomCardOpen,
     activeBuildTheme,
+    inspectedShortTheme,
     openBuildCategory,
     objectivesOpen,
     showLevel2Modal,
@@ -248,21 +272,21 @@ export default function App() {
     settingsModalOpen,
   ]);
 
-  // Cancel active build theme if gold or materials drop below its cost
+  // Cancel active build theme if gold or materials (Level 2+) drop below its cost
   useEffect(() => {
     if (
       activeBuildTheme &&
       (state.gold < THEMES[activeBuildTheme].cost ||
-        !checkMaterialCosts(state.warehouse, activeBuildTheme).ok)
+        !checkMaterialCosts(state.warehouse, activeBuildTheme, state.level).ok)
     ) {
       setActiveBuildTheme(null);
       setPulsingTheme(null);
     }
-  }, [activeBuildTheme, state.gold, state.warehouse]);
+  }, [activeBuildTheme, state.gold, state.warehouse, state.level]);
 
   const staffing = useMemo(
-    () => computeStaffing(state.cubes, state.population),
-    [state.cubes, state.population]
+    () => computeStaffing(state.cubes, state.population, state.citizens),
+    [state.cubes, state.population, state.citizens]
   );
 
   const selectedCube =
@@ -291,6 +315,7 @@ export default function App() {
   const handleCitizenClick = (agentId: number) => {
     // Placement mode cancels citizen selection and vice versa
     setActiveBuildTheme(null);
+    setInspectedShortTheme(null);
     setPulsingTheme(null);
     setOpenBuildCategory(null);
     setSelectedCubeId(null);
@@ -321,6 +346,7 @@ export default function App() {
 
   const handleToggleCategory = (cat: ThemeCategory | null) => {
     setOpenBuildCategory(cat);
+    setInspectedShortTheme(null);
     setPulsingTheme(null);
   };
 
@@ -333,6 +359,7 @@ export default function App() {
       setFollowCitizenId(null);
       setCitizenInfo(null);
       setActiveBuildTheme(null);
+      setInspectedShortTheme(null);
       setPulsingTheme(null);
       setOpenBuildCategory(null);
       setObjectivesOpen(false);
@@ -442,10 +469,14 @@ export default function App() {
     setCitizenInfo(null);
     setKingdomCardOpen(false);
     setOpenBuildCategory(def.category);
-    setActiveBuildTheme(producerTheme);
+    const canArm =
+      state.gold >= def.cost &&
+      checkMaterialCosts(state.warehouse, producerTheme, state.level).ok;
+    setActiveBuildTheme(canArm ? producerTheme : null);
+    setInspectedShortTheme(canArm ? null : producerTheme);
     setPulsingTheme(producerTheme);
 
-    if (def.rockyOnly) {
+    if (def.rockyOnly || producerTheme === 'quarry') {
       const ownedRocky = findNearestCube(
         state.cubes,
         (c) => c.owner === 'player' && c.isRocky && !c.themeId && !c.secondThemeId
@@ -460,16 +491,69 @@ export default function App() {
       );
       if (purchasableRocky) {
         worldRef.current?.focusOnCube(purchasableRocky.id);
+        return;
       }
     }
+
+    const emptyOwned = findNearestCube(
+      state.cubes,
+      (c) => c.owner === 'player' && !c.themeId && !c.secondThemeId
+    );
+    if (emptyOwned) {
+      worldRef.current?.focusOnCube(emptyOwned.id);
+    }
+  };
+
+  // Element 2.4: Build missing material producer (wood -> forest, stone -> quarry, etc.)
+  const handleBuildProducer = (resource: TradedResourceKey) => {
+    const producerTheme = MATERIAL_PRODUCER_THEME[resource];
+    if (!producerTheme) return;
+    handleFixHint(producerTheme);
+  };
+
+  const handleBuyMaterials = (
+    items: Partial<Record<TradedResourceKey, number>>
+  ) => {
+    dispatch({ type: 'BUY_MATERIALS', items });
   };
 
   const handleDemolish = (cubeId: number, slot: SlotIndex) => {
     dispatch({ type: 'DEMOLISH_THEME', cubeId, slot });
   };
 
+  // Element 7 & 9: Housing fax "ابنِ بيتاً" CTA -> close overlay, arm house (or show material card), focus land
+  const handleBuildHouseFromFax = () => {
+    setOpenOfficeTab(null);
+    setSelectedCubeId(null);
+    setSelectedCitizenId(null);
+    setFollowCitizenId(null);
+    setCitizenInfo(null);
+    setKingdomCardOpen(false);
+
+    const houseDef = THEMES.house;
+    setOpenBuildCategory(houseDef.category);
+    const canArm =
+      state.gold >= houseDef.cost &&
+      checkMaterialCosts(state.warehouse, 'house', state.level).ok;
+    setActiveBuildTheme(canArm ? 'house' : null);
+    setInspectedShortTheme(canArm ? null : 'house');
+    setPulsingTheme('house');
+
+    const emptyOwned = findNearestCube(
+      state.cubes,
+      (c) =>
+        c.owner === 'player' &&
+        (!c.themeId || (c.themeId === 'house' && !c.secondThemeId))
+    );
+    const target = emptyOwned ?? findPalaceCube(state.cubes);
+    if (target) {
+      worldRef.current?.focusOnCube(target.id);
+    }
+  };
+
   const handleNewGame = () => {
     setActiveBuildTheme(null);
+    setInspectedShortTheme(null);
     setPulsingTheme(null);
     setOpenBuildCategory(null);
     setObjectivesOpen(false);
@@ -482,6 +566,7 @@ export default function App() {
     setBourseModalOpen(false);
     setShowLevel2Modal(false);
     setShowLevel3Modal(false);
+    setOpenOfficeTab(null);
     setAwayReport(null);
     dispatch({ type: 'NEW_GAME' });
     setResetSignal((n) => n + 1);
@@ -550,12 +635,19 @@ export default function App() {
             gold={state.gold}
             level={state.level}
             warehouse={state.warehouse}
+            prices={state.prices}
+            cubes={state.cubes}
             activeBuildTheme={activeBuildTheme}
+            inspectedShortTheme={inspectedShortTheme}
             openCategory={openBuildCategory}
             pulsingTheme={pulsingTheme}
             kingdomOpen={kingdomCardOpen}
+            pendingLandRequests={state.landRequests.length}
             onToggleCategory={handleToggleCategory}
             onSelectTheme={handleSelectBuildTheme}
+            onInspectShortTheme={setInspectedShortTheme}
+            onBuyMaterials={handleBuyMaterials}
+            onBuildProducer={handleBuildProducer}
             onToggleKingdom={handleToggleKingdom}
           />
         </div>
@@ -578,6 +670,7 @@ export default function App() {
             onCitizenClick={handleCitizenClick}
             onCancelBuild={() => {
               setActiveBuildTheme(null);
+              setInspectedShortTheme(null);
               setPulsingTheme(null);
             }}
             onRecenter={() => setFollowCitizenId(null)}
@@ -604,16 +697,35 @@ export default function App() {
         kingdomOpen={kingdomCardOpen}
         staffing={staffing}
         activeTab={inspectorTab}
+        activeBuildTheme={activeBuildTheme}
+        inspectedShortTheme={inspectedShortTheme}
         onChangeTab={setInspectorTab}
         onClose={handleCloseOverlayCard}
         onToggleFollowCitizen={handleToggleFollowCitizen}
         onBuyCube={(cubeId) => dispatch({ type: 'BUY_CUBE', cubeId })}
         onDemolishTheme={handleDemolish}
         onFixHint={handleFixHint}
+        onBuyMaterials={handleBuyMaterials}
+        onBuildProducer={handleBuildProducer}
+        onOpenOffice={(tab) => setOpenOfficeTab(tab)}
+        onResolveLandRequest={(requestId, approve) =>
+          dispatch({ type: 'RESOLVE_LAND_REQUEST', requestId, approve })
+        }
         onTrade={(resource, side, quantity) =>
           dispatch({ type: 'TRADE_RESOURCE', resource, side, quantity })
         }
       />
+
+      {/* Element 7 & 9: Palace Offices Overlay (opens ONLY on explicit chip click, never auto-opens) */}
+      {openOfficeTab !== null && (
+        <PalaceOfficesOverlay
+          state={state}
+          activeTab={openOfficeTab}
+          onChangeTab={setOpenOfficeTab}
+          onBuildHouseFromFax={handleBuildHouseFromFax}
+          onClose={() => setOpenOfficeTab(null)}
+        />
+      )}
 
       {/* Element 1.5 & 5.3: Bottom-left Toasts (with clickable focusCubeId navigation) */}
       <Toasts

@@ -14,23 +14,33 @@ import { CATEGORY_ORDER, CATEGORY_THEMES, THEMES } from '../game/constants';
 import { checkMaterialCosts } from '../game/production';
 import { STRINGS } from '../game/strings';
 import type {
+  Cube,
+  PriceMap,
   ThemeCategory,
   ThemeId,
   TradedResourceKey,
   Warehouse,
 } from '../game/types';
+import { MaterialRequirementsCard } from './MaterialRequirementsCard';
 import { ThemeIcon } from './ResourceIcon';
 
 interface BuildDockProps {
   gold: number;
   level: 1 | 2;
   warehouse: Warehouse;
+  prices: PriceMap;
+  cubes: Cube[];
   activeBuildTheme: ThemeId | null;
+  inspectedShortTheme: ThemeId | null;
   openCategory: ThemeCategory | null;
   pulsingTheme: ThemeId | null;
   kingdomOpen: boolean;
+  pendingLandRequests?: number;
   onToggleCategory: (cat: ThemeCategory | null) => void;
   onSelectTheme: (themeId: ThemeId | null, closePanel?: boolean) => void;
+  onInspectShortTheme: (themeId: ThemeId | null) => void;
+  onBuyMaterials: (items: Partial<Record<TradedResourceKey, number>>) => void;
+  onBuildProducer: (resource: TradedResourceKey) => void;
   onToggleKingdom: () => void;
 }
 
@@ -59,18 +69,30 @@ export function BuildDock({
   gold,
   level,
   warehouse,
+  prices,
+  cubes,
   activeBuildTheme,
+  inspectedShortTheme,
   openCategory,
   pulsingTheme,
   kingdomOpen,
+  pendingLandRequests = 0,
   onToggleCategory,
   onSelectTheme,
+  onInspectShortTheme,
+  onBuyMaterials,
+  onBuildProducer,
   onToggleKingdom,
 }: BuildDockProps) {
   const getUnlockedThemes = (cat: ThemeCategory): ThemeId[] =>
     CATEGORY_THEMES[cat].filter((id) => THEMES[id].unlockLevel <= level);
 
-  const handlePickTheme = (id: ThemeId) => {
+  const handlePickTheme = (id: ThemeId, isShortMaterials: boolean) => {
+    if (isShortMaterials) {
+      onInspectShortTheme(inspectedShortTheme === id ? null : id);
+      return;
+    }
+    onInspectShortTheme(null);
     const next = activeBuildTheme === id ? null : id;
     // Element 1.2: choosing a theme collapses the panel back to the rail
     onSelectTheme(next, true);
@@ -82,74 +104,86 @@ export function BuildDock({
     <div className="space-y-1.5">
       {openUnlockedThemes.map((id) => {
         const def = THEMES[id];
-        const matCheck = checkMaterialCosts(warehouse, id);
-        const affordable = gold >= def.cost && matCheck.ok;
+        const matCheck = checkMaterialCosts(warehouse, id, level);
+        const hasGold = gold >= def.cost;
+        const affordable = hasGold && matCheck.ok;
+        const isShortMaterials = level >= 2 && !matCheck.ok;
         const isSelected = activeBuildTheme === id;
+        const isInspectedShort = inspectedShortTheme === id && isShortMaterials;
         const isPulsing = pulsingTheme === id;
-        const matEntries = def.materialCosts
-          ? (Object.entries(def.materialCosts) as Array<
-              [TradedResourceKey, number]
-            >)
-          : [];
+        const hasMaterialEntries =
+          level >= 2 &&
+          Boolean(
+            def.materialCosts &&
+              Object.values(def.materialCosts).some((v) => (v ?? 0) > 0)
+          );
 
         return (
-          <button
+          <div
             key={id}
-            type="button"
-            disabled={!affordable}
-            onClick={() => handlePickTheme(id)}
-            className={`w-full text-right p-2.5 rounded-xl border transition-all duration-150 space-y-1.5 ${
+            className={`w-full rounded-xl border transition-all duration-150 ${
               isPulsing
                 ? 'bg-[#F5E0AC] border-[#C9962E] ring-2 ring-[#C9962E] animate-pulse'
-                : isSelected
+                : isSelected || isInspectedShort
                   ? 'bg-[#F3E2BD] border-[#C9962E] ring-2 ring-[#C9962E]/60'
                   : affordable
                     ? 'bg-[#FDF8EC] border-[#E3D3AC] hover:border-[#C9962E] hover:bg-[#F7EBD0]'
-                    : 'bg-[#EFE6D2] border-[#DFD2B6] opacity-55 grayscale'
+                    : isShortMaterials
+                      ? 'bg-[#F9F0DD] border-[#DEC699] hover:border-[#C9962E]'
+                      : 'bg-[#EFE6D2] border-[#DFD2B6] opacity-55 grayscale'
             }`}
           >
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2 min-w-0">
-                <div className="w-8 h-8 rounded-lg bg-[#14524A]/10 text-[#14524A] flex items-center justify-center shrink-0">
-                  <ThemeIcon themeId={id} className="w-4 h-4" />
+            <button
+              type="button"
+              disabled={!affordable && !isShortMaterials}
+              onClick={() => handlePickTheme(id, isShortMaterials)}
+              className="w-full text-right p-2.5 space-y-1.5"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="w-8 h-8 rounded-lg bg-[#14524A]/10 text-[#14524A] flex items-center justify-center shrink-0">
+                    <ThemeIcon themeId={id} className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-xs font-extrabold text-[#2B2118] truncate">
+                      {STRINGS.themes[id].name}
+                    </div>
+                    <div className="text-[10px] font-semibold text-[#6F5C43]">
+                      {STRINGS.footprint[def.footprint]} ·{' '}
+                      {STRINGS.buildDock.workersNeeded(def.workers)}
+                    </div>
+                  </div>
                 </div>
-                <div className="min-w-0">
-                  <div className="text-xs font-extrabold text-[#2B2118] truncate">
-                    {STRINGS.themes[id].name}
-                  </div>
-                  <div className="text-[10px] font-semibold text-[#6F5C43]">
-                    {STRINGS.footprint[def.footprint]} ·{' '}
-                    {STRINGS.buildDock.workersNeeded(def.workers)}
-                  </div>
+                <div className="flex items-center gap-0.5 text-xs font-extrabold text-[#8A5F12] shrink-0">
+                  <Coins className="w-3.5 h-3.5 text-[#C9962E]" />
+                  <span className="tabular-nums-latin">{def.cost}</span>
                 </div>
               </div>
-              <div className="flex items-center gap-0.5 text-xs font-extrabold text-[#8A5F12] shrink-0">
-                <Coins className="w-3.5 h-3.5 text-[#C9962E]" />
-                <span className="tabular-nums-latin">{def.cost}</span>
-              </div>
-            </div>
 
-            {(matEntries.length > 0 || def.rockyOnly) && (
-              <div className="flex items-center flex-wrap gap-2 pt-1 border-t border-[#EFE3C5] text-[10px] font-bold">
-                {matEntries.map(([res, amt]) => (
-                  <span
-                    key={res}
-                    className={`tabular-nums-latin ${
-                      warehouse[res] < amt ? 'text-[#A83629]' : 'text-[#4F3F2B]'
-                    }`}
-                  >
-                    {STRINGS.resources[res]}: {amt}
-                  </span>
-                ))}
-                {def.rockyOnly && (
-                  <span className="flex items-center gap-0.5 text-[#6F5C43]">
-                    <Mountain className="w-3 h-3 shrink-0" />
-                    <span>{STRINGS.buildDock.rockyOnlyTag}</span>
-                  </span>
-                )}
+              {def.rockyOnly && (
+                <div className="flex items-center gap-1 text-[10px] font-bold text-[#6F5C43]">
+                  <Mountain className="w-3 h-3 shrink-0" />
+                  <span>{STRINGS.buildDock.rockyOnlyTag}</span>
+                </div>
+              )}
+            </button>
+
+            {hasMaterialEntries && (
+              <div className="px-2.5 pb-2.5 pt-1.5 border-t border-[#EFE3C5]">
+                <MaterialRequirementsCard
+                  themeId={id}
+                  level={level}
+                  warehouse={warehouse}
+                  gold={gold}
+                  prices={prices}
+                  cubes={cubes}
+                  showActions={isInspectedShort}
+                  onBuyMaterials={onBuyMaterials}
+                  onBuildProducer={onBuildProducer}
+                />
               </div>
             )}
-          </button>
+          </div>
         );
       })}
     </div>
@@ -169,13 +203,18 @@ export function BuildDock({
             onClick={onToggleKingdom}
             title={STRINGS.inspector.palaceTitle}
             aria-label={STRINGS.inspector.palaceTitle}
-            className={`w-10 h-10 rounded-xl flex items-center justify-center transition-colors border ${
+            className={`relative w-10 h-10 rounded-xl flex items-center justify-center transition-colors border ${
               kingdomOpen
                 ? 'bg-[#C9962E] border-[#F2CA6B] text-[#2B2118] shadow-md'
                 : 'bg-[#14524A] border-[#1F6A60] text-[#F2CA6B] hover:bg-[#1B685E]'
             }`}
           >
             <Crown className="w-5 h-5" />
+            {pendingLandRequests > 0 && (
+              <span className="absolute -top-1 -left-1 min-w-[16px] h-4 px-1 rounded-full bg-[#C9962E] text-[#2B2118] border border-[#FBF3DF] text-[10px] font-extrabold flex items-center justify-center tabular-nums-latin">
+                {pendingLandRequests}
+              </span>
+            )}
           </button>
 
           <div className="w-7 h-px bg-[#1E5E55]" />
@@ -299,13 +338,18 @@ export function BuildDock({
           onClick={onToggleKingdom}
           title={STRINGS.inspector.palaceTitle}
           aria-label={STRINGS.inspector.palaceTitle}
-          className={`w-11 h-11 rounded-xl flex items-center justify-center transition-colors border ${
+          className={`relative w-11 h-11 rounded-xl flex items-center justify-center transition-colors border ${
             kingdomOpen
               ? 'bg-[#C9962E] border-[#F2CA6B] text-[#2B2118]'
               : 'bg-[#14524A] border-[#1F6A60] text-[#F2CA6B]'
           }`}
         >
           <Crown className="w-5 h-5" />
+          {pendingLandRequests > 0 && (
+            <span className="absolute -top-1 -left-1 min-w-[16px] h-4 px-1 rounded-full bg-[#C9962E] text-[#2B2118] border border-[#FBF3DF] text-[10px] font-extrabold flex items-center justify-center tabular-nums-latin">
+              {pendingLandRequests}
+            </span>
+          )}
         </button>
 
         {CATEGORY_ORDER.map((cat) => {

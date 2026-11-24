@@ -1,12 +1,8 @@
 import {
   BASE_BUY_PRICES,
-  BOURSE_VOLUME_MODIFIER,
-  BOURSE_VOLUME_THRESHOLD,
   GRAND_MARKET_SELL_BONUS,
-  LEVEL_1_PRICE_DRIFT_RANGE,
-  LEVEL_2_PRICE_DRIFT_RANGE,
-  MAX_BOURSE_PRICE_MULTIPLIER,
-  MIN_BOURSE_PRICE,
+  INFLATION_BASKET_WEIGHTS,
+  PRICE_BANDS,
   SELL_PRICE_RATIO,
   TRADE_OFFICE_BUY_DISCOUNT,
   TRADED_RESOURCES,
@@ -48,11 +44,31 @@ export function generateTickerForMove(move: PriceMoveSummary | null): string {
   return STRINGS.bourse.tickerDown(move.resource, absPct);
 }
 
+export function computeInflationIndex(prices: PriceMap): number {
+  let weightedSum = 0;
+  let totalWeight = 0;
+
+  for (const [key, weight] of Object.entries(INFLATION_BASKET_WEIGHTS) as Array<
+    [TradedResourceKey, number]
+  >) {
+    const base = BASE_BUY_PRICES[key];
+    const current = prices[key] ?? base;
+    if (base > 0 && weight > 0) {
+      weightedSum += weight * (current / base);
+      totalWeight += weight;
+    }
+  }
+
+  if (totalWeight <= 0) return 100;
+  return Math.round((100 * weightedSum) / totalWeight);
+}
+
 export interface BourseRolloverResult {
   prices: PriceMap;
   previousPrices: PriceMap;
   biggestMove: PriceMoveSummary | null;
   tickerMessage: string;
+  inflationIndex: number;
 }
 
 export function rolloverBoursePrices(
@@ -64,28 +80,24 @@ export function rolloverBoursePrices(
   const previousPrices: PriceMap = { ...BASE_BUY_PRICES, ...currentPrices };
   const nextPrices: PriceMap = { ...BASE_BUY_PRICES, ...currentPrices };
 
-  const driftRange =
-    level === 1 ? LEVEL_1_PRICE_DRIFT_RANGE : LEVEL_2_PRICE_DRIFT_RANGE;
+  const band = level === 1 ? PRICE_BANDS.level1 : PRICE_BANDS.level2;
+  const noiseRange = level === 1 ? 0.035 : 0.07;
 
   let biggestMove: PriceMoveSummary | null = null;
 
   for (const resource of TRADED_RESOURCES) {
-    let r = (Math.random() * 2 - 1) * driftRange;
-
-    if (level >= 2) {
-      if ((dailySold[resource] ?? 0) > BOURSE_VOLUME_THRESHOLD) {
-        r -= BOURSE_VOLUME_MODIFIER;
-      }
-      if ((dailyBought[resource] ?? 0) > BOURSE_VOLUME_THRESHOLD) {
-        r += BOURSE_VOLUME_MODIFIER;
-      }
-    }
-
     const prev = previousPrices[resource];
     const base = BASE_BUY_PRICES[resource];
-    const maxPrice = base * MAX_BOURSE_PRICE_MULTIPLIER;
-    const rawNext = Math.round(prev * (1 + r));
-    const clampedNext = Math.max(MIN_BOURSE_PRICE, Math.min(maxPrice, rawNext));
+
+    const revert = (base - prev) * 0.1;
+    const netSold = (dailySold[resource] ?? 0) - (dailyBought[resource] ?? 0);
+    const pressurePct = Math.max(-0.06, Math.min(0.06, -netSold * 0.004));
+    const noisePct = (Math.random() * 2 - 1) * noiseRange;
+
+    const raw = prev + revert + prev * (pressurePct + noisePct);
+    const minPrice = Math.max(1, Math.floor(base * band.lo));
+    const maxPrice = Math.ceil(base * band.hi);
+    const clampedNext = Math.max(minPrice, Math.min(maxPrice, Math.round(raw)));
 
     nextPrices[resource] = clampedNext;
 
@@ -108,6 +120,7 @@ export function rolloverBoursePrices(
     previousPrices,
     biggestMove,
     tickerMessage: generateTickerForMove(biggestMove),
+    inflationIndex: computeInflationIndex(nextPrices),
   };
 }
 

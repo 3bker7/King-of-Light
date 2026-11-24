@@ -80,7 +80,7 @@ interface SeaSparkle {
   speed: number;
 }
 
-const HORIZON_COLOR = 0xe6d1a5;
+const HORIZON_COLOR = 0xe8d9b0;
 
 // Fixed RTS isometric angles: azimuth 45 deg, elevation 32 deg
 const ISO_ELEVATION = THREE.MathUtils.degToRad(32);
@@ -121,6 +121,96 @@ interface PurchasableTagItem {
   phase: number;
 }
 
+// Element 5.2: Cached golden pennant texture for built private-sector buildings
+function createPrivatePennantTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.clearRect(0, 0, 64, 64);
+    // Pole
+    ctx.fillStyle = '#6E4C1B';
+    ctx.fillRect(14, 10, 4, 48);
+    // Finial orb
+    ctx.beginPath();
+    ctx.arc(16, 9, 4.5, 0, Math.PI * 2);
+    ctx.fillStyle = '#F6D377';
+    ctx.fill();
+    // Golden swallowtail pennant
+    ctx.beginPath();
+    ctx.moveTo(18, 13);
+    ctx.lineTo(54, 21);
+    ctx.lineTo(44, 28);
+    ctx.lineTo(54, 35);
+    ctx.lineTo(18, 41);
+    ctx.closePath();
+    ctx.fillStyle = '#E8B844';
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#9E6E19';
+    ctx.stroke();
+    // Inner teal diamond emblem
+    ctx.beginPath();
+    ctx.moveTo(31, 22);
+    ctx.lineTo(37, 27);
+    ctx.lineTo(31, 32);
+    ctx.lineTo(25, 27);
+    ctx.closePath();
+    ctx.fillStyle = '#14524A';
+    ctx.fill();
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+// Element 5.2: Cached golden pennant texture for built private-sector buildings
+function createPrivatePennantTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.clearRect(0, 0, 64, 64);
+    // Pole
+    ctx.fillStyle = '#6E4C1B';
+    ctx.fillRect(14, 10, 4, 48);
+    // Finial orb
+    ctx.beginPath();
+    ctx.arc(16, 9, 4.5, 0, Math.PI * 2);
+    ctx.fillStyle = '#F6D377';
+    ctx.fill();
+    // Golden swallowtail pennant
+    ctx.beginPath();
+    ctx.moveTo(18, 13);
+    ctx.lineTo(54, 21);
+    ctx.lineTo(44, 28);
+    ctx.lineTo(54, 35);
+    ctx.lineTo(18, 41);
+    ctx.closePath();
+    ctx.fillStyle = '#E8B844';
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#9E6E19';
+    ctx.stroke();
+    // Inner teal diamond emblem
+    ctx.beginPath();
+    ctx.moveTo(31, 22);
+    ctx.lineTo(37, 27);
+    ctx.lineTo(31, 32);
+    ctx.lineTo(25, 27);
+    ctx.closePath();
+    ctx.fillStyle = '#14524A';
+    ctx.fill();
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
 export class WorldEngine {
   private readonly container: HTMLElement;
   private readonly onCubeClick: (cubeId: number) => void;
@@ -130,6 +220,7 @@ export class WorldEngine {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly scene: THREE.Scene;
   private readonly camera: THREE.OrthographicCamera;
+  private readonly sunLight: THREE.DirectionalLight;
   private readonly envTexture: THREE.Texture;
 
   private readonly sandTexture: THREE.CanvasTexture;
@@ -141,6 +232,7 @@ export class WorldEngine {
   private readonly unstaffedTexture: THREE.CanvasTexture;
   private readonly footprintTexture: THREE.CanvasTexture;
   private readonly blobShadowTexture: THREE.CanvasTexture;
+  private readonly privatePennantTexture: THREE.CanvasTexture;
 
   private readonly buildingLib: BuildingLibrary;
   private readonly wilderness: WildernessProps;
@@ -154,6 +246,7 @@ export class WorldEngine {
   private readonly waterGroup = new THREE.Group();
   private readonly buildingsGroup = new THREE.Group();
   private readonly purchasableGroup = new THREE.Group();
+  private readonly privatePennantGroup = new THREE.Group();
   private readonly fxGroup = new THREE.Group();
 
   private readonly waterMaterial: THREE.MeshStandardMaterial;
@@ -162,6 +255,7 @@ export class WorldEngine {
   private readonly purchasableShimmerMat: THREE.MeshBasicMaterial;
   private readonly priceTagCache = new Map<number, THREE.CanvasTexture>();
   private purchasableSprites: PurchasableTagItem[] = [];
+  private privatePennants: PurchasableTagItem[] = [];
 
   private readonly hoverDecalMesh: THREE.Mesh;
   private readonly hoverDecalMat: THREE.MeshBasicMaterial;
@@ -177,6 +271,7 @@ export class WorldEngine {
   private lastSeaSignature = '';
   private lastOwnedSignature = '';
   private lastVillageSignature = '';
+  private lastPrivateSignature = '';
   private initialSyncDone = false;
 
   // Camera pan/zoom state (damped)
@@ -232,7 +327,7 @@ export class WorldEngine {
     });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.06;
+    this.renderer.toneMappingExposure = 1.12;
     this.renderer.setPixelRatio(
       this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio || 1, 2)
     );
@@ -260,23 +355,20 @@ export class WorldEngine {
     // Fixed Orthographic Isometric Camera
     this.camera = new THREE.OrthographicCamera(-50, 50, 50, -50, 1, 600);
 
-    // Warm desert sun directional light + sky/ground hemisphere fill
-    const hemiLight = new THREE.HemisphereLight(0xbfe3ea, 0xd9b264, 0.95);
+    // Element 6.1: Warm golden-hour DirectionalLight at lower Crusader angle + sky/ground HemisphereLight
+    const hemiLight = new THREE.HemisphereLight(0xcfe8ef, 0xcaa96a, 0.75);
     this.scene.add(hemiLight);
 
-    const sunLight = new THREE.DirectionalLight(0xffe3b3, 2.15);
-    sunLight.position.set(85, 115, 55);
-    sunLight.castShadow = !this.isSoftwareGl;
-    sunLight.shadow.mapSize.set(2048, 2048);
-    sunLight.shadow.camera.near = 25;
-    sunLight.shadow.camera.far = 290;
-    sunLight.shadow.camera.left = -95;
-    sunLight.shadow.camera.right = 95;
-    sunLight.shadow.camera.top = 95;
-    sunLight.shadow.camera.bottom = -95;
-    sunLight.shadow.bias = -0.0005;
-    sunLight.shadow.normalBias = 0.03;
-    this.scene.add(sunLight);
+    this.sunLight = new THREE.DirectionalLight(0xffd9a0, 2.3);
+    this.sunLight.position.set(70, 78, 40);
+    this.sunLight.castShadow = !this.isSoftwareGl;
+    this.sunLight.shadow.mapSize.set(2048, 2048);
+    this.sunLight.shadow.camera.near = 15;
+    this.sunLight.shadow.camera.far = 260;
+    this.sunLight.shadow.bias = -0.0005;
+    this.sunLight.shadow.normalBias = 0.025;
+    this.scene.add(this.sunLight);
+    this.scene.add(this.sunLight.target);
 
     // Procedural Canvas Textures
     const maxAniso = this.renderer.capabilities.getMaxAnisotropy();
@@ -288,6 +380,8 @@ export class WorldEngine {
     this.unstaffedTexture = createUnstaffedBadgeTexture();
     this.footprintTexture = createFootprintDecalTexture();
     this.blobShadowTexture = createBlobShadowTexture();
+    this.privatePennantTexture = createPrivatePennantTexture();
+    this.privatePennantTexture = createPrivatePennantTexture();
 
     this.buildingLib = createBuildingLibrary(
       this.awningTexture,
@@ -396,6 +490,7 @@ export class WorldEngine {
       this.boundaryGroup,
       this.purchasableGroup,
       this.buildingsGroup,
+      this.privatePennantGroup,
       this.peopleAgents.group,
       this.fxGroup,
       this.hoverDecalMesh,
@@ -434,6 +529,37 @@ export class WorldEngine {
     if (immediate) {
       this.currentTarget.copy(this.desiredTarget);
       this.currentFrustumHeight = desiredFrustum;
+    }
+    this.refitSunShadowCamera(cubes);
+  }
+
+  // Element 6.2: Refit sun orthographic shadow frustum tightly around owned territory + 12u margin
+  private refitSunShadowCamera(cubes: Cube[]): void {
+    const bounds = getOwnedTerritoryBounds(cubes);
+    const frustumWidth = bounds.span + 24; // +12 units margin on every side
+    const half = frustumWidth / 2;
+
+    this.sunLight.target.position.set(bounds.centerX, 0, bounds.centerZ);
+    this.sunLight.position.set(bounds.centerX + 70, 78, bounds.centerZ + 40);
+    this.sunLight.target.updateMatrixWorld();
+
+    const shadowCam = this.sunLight.shadow.camera;
+    shadowCam.left = -half;
+    shadowCam.right = half;
+    shadowCam.top = half;
+    shadowCam.bottom = -half;
+    shadowCam.near = 15;
+    shadowCam.far = 260;
+    shadowCam.updateProjectionMatrix();
+
+    const desiredMapSize = frustumWidth < 70 ? 4096 : 2048;
+    if (this.sunLight.shadow.mapSize.width !== desiredMapSize) {
+      this.sunLight.shadow.mapSize.set(desiredMapSize, desiredMapSize);
+      if (this.sunLight.shadow.map) {
+        this.sunLight.shadow.map.dispose();
+        this.sunLight.shadow.map = null;
+      }
+      this.sunLight.shadow.needsUpdate = true;
     }
   }
 
@@ -508,10 +634,30 @@ export class WorldEngine {
       }
     }
 
-    // Element 3.2: Rebuild purchasable land markers ONLY when owned-set or village-set changes
+    // Element 3.2 & 6.2: Rebuild purchasable markers & refit sun shadow camera on owned territory change
     if (ownedChanged || villageChanged) {
       this.rebuildPurchasableMarkers(payload.cubes);
       this.lastVillageSignature = villageSignature;
+    }
+    if (ownedChanged) {
+      this.refitSunShadowCamera(payload.cubes);
+    }
+
+    // Element 5.2: Golden pennant over built private businesses
+    const privateSigParts: string[] = [];
+    for (const c of payload.cubes) {
+      if (
+        c.owner === 'player' &&
+        typeof c.privateOwnerId === 'number' &&
+        c.themeId !== null
+      ) {
+        privateSigParts.push(`${c.id}:${c.privateOwnerId}:${c.themeId}`);
+      }
+    }
+    const privateSignature = privateSigParts.join(',');
+    if (privateSignature !== this.lastPrivateSignature || seaChanged) {
+      this.rebuildPrivatePennants(payload.cubes);
+      this.lastPrivateSignature = privateSignature;
     }
 
     this.syncBuildings(payload);
@@ -584,6 +730,92 @@ export class WorldEngine {
         sprite,
         baseY,
         phase: cube.id * 0.75,
+      });
+    }
+  }
+
+  private rebuildPrivatePennants(cubes: Cube[]): void {
+    while (this.privatePennantGroup.children.length > 0) {
+      const child = this.privatePennantGroup.children[0];
+      this.privatePennantGroup.remove(child);
+      if ((child as THREE.Sprite).isSprite) {
+        (child as THREE.Sprite).material.dispose();
+      }
+    }
+    this.privatePennants = [];
+
+    for (let i = 0; i < cubes.length; i++) {
+      const cube = cubes[i];
+      if (
+        cube.owner !== 'player' ||
+        typeof cube.privateOwnerId !== 'number' ||
+        !cube.themeId
+      ) {
+        continue;
+      }
+      const def = THEMES[cube.themeId];
+      const pos = cellSlotToWorld(cube.row, cube.col, def.footprint, 0);
+      const groundY = getTerrainHeightAt(pos.x, pos.z, this.seaCoords);
+      const spriteMat = new THREE.SpriteMaterial({
+        map: this.privatePennantTexture,
+        transparent: true,
+        depthTest: false,
+      });
+      const sprite = new THREE.Sprite(spriteMat);
+      const baseY = groundY + (cube.themeId === 'hotel' ? 9.6 : 6.4);
+      sprite.position.set(pos.x, baseY, pos.z);
+      sprite.scale.set(2.1, 2.1, 1);
+      sprite.renderOrder = 21;
+      sprite.userData.cubeId = cube.id;
+      this.privatePennantGroup.add(sprite);
+
+      this.privatePennants.push({
+        sprite,
+        baseY,
+        phase: cube.id * 0.9,
+      });
+    }
+  }
+
+  private rebuildPrivatePennants(cubes: Cube[]): void {
+    while (this.privatePennantGroup.children.length > 0) {
+      const child = this.privatePennantGroup.children[0];
+      this.privatePennantGroup.remove(child);
+      if ((child as THREE.Sprite).isSprite) {
+        (child as THREE.Sprite).material.dispose();
+      }
+    }
+    this.privatePennants = [];
+
+    for (let i = 0; i < cubes.length; i++) {
+      const cube = cubes[i];
+      if (
+        cube.owner !== 'player' ||
+        typeof cube.privateOwnerId !== 'number' ||
+        !cube.themeId
+      ) {
+        continue;
+      }
+      const def = THEMES[cube.themeId];
+      const pos = cellSlotToWorld(cube.row, cube.col, def.footprint, 0);
+      const groundY = getTerrainHeightAt(pos.x, pos.z, this.seaCoords);
+      const spriteMat = new THREE.SpriteMaterial({
+        map: this.privatePennantTexture,
+        transparent: true,
+        depthTest: false,
+      });
+      const sprite = new THREE.Sprite(spriteMat);
+      const baseY = groundY + (cube.themeId === 'hotel' ? 9.6 : 6.4);
+      sprite.position.set(pos.x, baseY, pos.z);
+      sprite.scale.set(2.1, 2.1, 1);
+      sprite.renderOrder = 21;
+      sprite.userData.cubeId = cube.id;
+      this.privatePennantGroup.add(sprite);
+
+      this.privatePennants.push({
+        sprite,
+        baseY,
+        phase: cube.id * 0.9,
       });
     }
   }
@@ -1005,11 +1237,20 @@ export class WorldEngine {
     );
     for (let i = 0; i < hits.length; i++) {
       let obj: THREE.Object3D | null = hits[i].object;
+      let agentId: number | null = null;
+      let hidden = false;
       while (obj) {
-        if (typeof obj.userData.agentId === 'number') {
-          return obj.userData.agentId;
+        if (!obj.visible) {
+          hidden = true;
+          break;
+        }
+        if (agentId === null && typeof obj.userData.agentId === 'number') {
+          agentId = obj.userData.agentId;
         }
         obj = obj.parent;
+      }
+      if (!hidden && agentId !== null) {
+        return agentId;
       }
     }
     return null;
@@ -1425,6 +1666,24 @@ export class WorldEngine {
       }
     }
 
+    // Element 5.2: Subtle breeze flutter on built private-business golden pennants
+    if (this.privatePennants.length > 0) {
+      for (let i = 0; i < this.privatePennants.length; i++) {
+        const item = this.privatePennants[i];
+        item.sprite.position.y =
+          item.baseY + Math.sin(this.elapsedTime * 2.6 + item.phase) * 0.12;
+      }
+    }
+
+    // Element 5.2: Subtle breeze flutter on built private-business golden pennants
+    if (this.privatePennants.length > 0) {
+      for (let i = 0; i < this.privatePennants.length; i++) {
+        const item = this.privatePennants[i];
+        item.sprite.position.y =
+          item.baseY + Math.sin(this.elapsedTime * 2.6 + item.phase) * 0.12;
+      }
+    }
+
     // Gentle pulse on organic hover decal and selection ground ring
     if (this.hoverDecalMesh.visible) {
       this.hoverDecalMat.opacity = 0.28 + Math.sin(this.elapsedTime * 4.2) * 0.08;
@@ -1501,6 +1760,10 @@ export class WorldEngine {
       item.sprite.material.dispose();
     }
     this.purchasableSprites = [];
+    for (const item of this.privatePennants) {
+      item.sprite.material.dispose();
+    }
+    this.privatePennants = [];
     this.priceTagCache.forEach((tex) => tex.dispose());
     this.priceTagCache.clear();
     this.purchasableShimmerGeo.dispose();
@@ -1534,6 +1797,7 @@ export class WorldEngine {
     this.unstaffedTexture.dispose();
     this.footprintTexture.dispose();
     this.blobShadowTexture.dispose();
+    this.privatePennantTexture.dispose();
     this.envTexture.dispose();
 
     this.renderer.dispose();
