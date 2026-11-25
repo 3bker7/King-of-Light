@@ -1,13 +1,17 @@
-import { ArrowDownRight, ArrowUpRight, Gauge, Minus } from 'lucide-react';
+import { ArrowDownRight, ArrowUpRight, Gauge, Globe, Minus } from 'lucide-react';
 import { TRADE_BATCH_QUANTITIES, TRADED_RESOURCES } from '../game/constants';
 import { getEffectiveBuyPrice, getSellPrice } from '../game/economy';
 import { STRINGS } from '../game/strings';
 import type { GameState, TradedResourceKey } from '../game/types';
+import { ONLINE_BOURSE_DAILY_KINGDOM_CAP } from '../net/worldTypes';
 import { ResourceIcon } from './ResourceIcon';
 
 interface BoursePanelProps {
   state: GameState;
   compact?: boolean;
+  isWorldBourse?: boolean;
+  worldBourseDay?: number | null;
+  worldBourseUsedToday?: Partial<Record<TradedResourceKey, number>>;
   onTrade: (
     resource: TradedResourceKey,
     side: 'buy' | 'sell',
@@ -28,6 +32,9 @@ function getInflationBadgeClass(index: number): string {
 export function BoursePanel({
   state,
   compact = false,
+  isWorldBourse = false,
+  worldBourseDay = null,
+  worldBourseUsedToday,
   onTrade,
 }: BoursePanelProps) {
   if (state.level < 2) {
@@ -41,16 +48,36 @@ export function BoursePanel({
   return (
     <div className="space-y-2.5">
       <div className="flex items-center justify-between gap-2 flex-wrap">
-        <p className="text-[11px] leading-relaxed text-[#6F5C43]">
-          {STRINGS.bourse.subtitle}
-        </p>
-        <div
-          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-extrabold tabular-nums-latin shrink-0 ${getInflationBadgeClass(
-            state.inflationIndex
-          )}`}
-        >
-          <Gauge className="w-3.5 h-3.5 shrink-0" />
-          <span>مؤشر الغلاء: {state.inflationIndex}</span>
+        <div className="space-y-0.5">
+          <p className="text-[11px] leading-relaxed text-[#6F5C43]">
+            {STRINGS.bourse.subtitle}
+          </p>
+          {isWorldBourse && (
+            <p className="text-[10px] font-bold text-[#14524A] tabular-nums-latin">
+              حد التداول اليومي لكل مورد: {ONLINE_BOURSE_DAILY_KINGDOM_CAP} وحدة في يوم العالم
+            </p>
+          )}
+        </div>
+        <div className="flex items-center gap-1.5 flex-wrap shrink-0">
+          {isWorldBourse && (
+            <div className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border bg-[#E6F2EF] border-[#8CC3B8] text-[#14524A] text-xs font-extrabold">
+              <Globe className="w-3.5 h-3.5 shrink-0" />
+              <span>بورصة العالم</span>
+              {worldBourseDay !== null && (
+                <span className="text-[10px] opacity-80 tabular-nums-latin">
+                  · يوم {worldBourseDay}
+                </span>
+              )}
+            </div>
+          )}
+          <div
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-extrabold tabular-nums-latin shrink-0 ${getInflationBadgeClass(
+              state.inflationIndex
+            )}`}
+          >
+            <Gauge className="w-3.5 h-3.5 shrink-0" />
+            <span>مؤشر الغلاء: {state.inflationIndex}</span>
+          </div>
         </div>
       </div>
 
@@ -66,8 +93,17 @@ export function BoursePanel({
           const diff = state.prices[resource] - prevPrice;
           const pct = prevPrice > 0 ? Math.round((diff / prevPrice) * 100) : 0;
 
-          const maxBuy = buyPrice > 0 ? Math.floor(state.gold / buyPrice) : 0;
-          const canSellAny = stock > 0 && sellPrice > 0;
+          const usedToday = isWorldBourse
+            ? Math.max(0, Math.floor(worldBourseUsedToday?.[resource] ?? 0))
+            : 0;
+          const remainingCap = isWorldBourse
+            ? Math.max(0, ONLINE_BOURSE_DAILY_KINGDOM_CAP - usedToday)
+            : Infinity;
+
+          const rawMaxBuy = buyPrice > 0 ? Math.floor(state.gold / buyPrice) : 0;
+          const maxBuy = Math.min(rawMaxBuy, remainingCap);
+          const maxSell = Math.min(stock, remainingCap);
+          const canSellAny = maxSell > 0 && sellPrice > 0;
 
           return (
             <div
@@ -160,7 +196,7 @@ export function BoursePanel({
                   <button
                     key={`sell-${qty}`}
                     type="button"
-                    disabled={!canSellAny || stock < qty}
+                    disabled={!canSellAny || maxSell < qty}
                     onClick={() => onTrade(resource, 'sell', qty)}
                     className="flex-1 py-1 rounded-lg bg-[#EFE0BC] hover:bg-[#E5CF9D] disabled:opacity-40 text-[#2B2118] text-[11px] font-bold tabular-nums-latin transition-colors"
                   >

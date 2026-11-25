@@ -101,6 +101,9 @@ interface InspectorProps {
   onSetTaxPolicy?: (mode: TaxPolicyMode, percent: number) => void;
   onBuybackCube?: (cubeId: number) => void;
   onResolveLandRequest?: (requestId: string, approve: boolean) => void;
+  isWorldBourse?: boolean;
+  worldBourseDay?: number | null;
+  worldBourseUsedToday?: Partial<Record<TradedResourceKey, number>>;
   onTrade: (
     resource: TradedResourceKey,
     side: 'buy' | 'sell',
@@ -362,6 +365,9 @@ export function Inspector({
   onSetTaxPolicy,
   onBuybackCube,
   onResolveLandRequest,
+  isWorldBourse,
+  worldBourseDay,
+  worldBourseUsedToday,
   onTrade,
 }: InspectorProps) {
   const [draftTaxMode, setDraftTaxMode] = useState<TaxPolicyMode>(
@@ -1194,7 +1200,14 @@ export function Inspector({
       )}
 
       {state.level >= 2 && activeTab === 'bourse' ? (
-        <BoursePanel state={state} compact onTrade={onTrade} />
+        <BoursePanel
+          state={state}
+          compact
+          isWorldBourse={isWorldBourse}
+          worldBourseDay={worldBourseDay}
+          worldBourseUsedToday={worldBourseUsedToday}
+          onTrade={onTrade}
+        />
       ) : (
         <section className="space-y-2.5">
           <div className="flex items-center justify-between text-[11px] font-bold text-[#6F5C43]">

@@ -146,6 +146,9 @@ export function serializeGameState(state: GameState, now: number): PersistedSave
     camp: state.camp,
     pendingArrivals: state.pendingArrivals,
     provinceEvents: state.provinceEvents,
+    ...(state.myWorldPos !== undefined ? { myWorldPos: state.myWorldPos } : {}),
+    ...(state.kingdomNameAr !== undefined ? { kingdomNameAr: state.kingdomNameAr } : {}),
+    ...(state.rulerName !== undefined ? { rulerName: state.rulerName } : {}),
   };
 }
 

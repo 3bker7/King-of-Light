@@ -1,5 +1,6 @@
 import {
   Frown,
+  Globe,
   Meh,
   Settings,
   Smile,
@@ -13,10 +14,13 @@ import { countUnreadFaxes } from '../game/advisor';
 import { TICKS_PER_DAY, TRADED_RESOURCES } from '../game/constants';
 import { STRINGS } from '../game/strings';
 import type { GameState } from '../game/types';
+import type { CloudSyncStatus } from '../net/worldTypes';
 import { ResourceIcon } from './ResourceIcon';
 
 interface TopBarProps {
   state: GameState;
+  cloudSyncStatus: CloudSyncStatus;
+  onOpenSharedWorld: () => void;
   onOpenAdvisor: () => void;
   onOpenBourse: () => void;
   onOpenSettings: () => void;
@@ -24,6 +28,8 @@ interface TopBarProps {
 
 export function TopBar({
   state,
+  cloudSyncStatus,
+  onOpenSharedWorld,
   onOpenAdvisor,
   onOpenBourse,
   onOpenSettings,
@@ -149,6 +155,26 @@ export function TopBar({
             {roundedRep}
           </span>
         </div>
+
+        {/* Shared World Auth & Sync Chip */}
+        <button
+          type="button"
+          onClick={onOpenSharedWorld}
+          title="العالم المشترك"
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#0E3A34]/85 hover:bg-[#0B2E29] border border-[#2C7268] text-[#FBF3DF] text-xs font-extrabold transition-colors whitespace-nowrap shrink-0"
+        >
+          <Globe className="w-3.5 h-3.5 text-[#A7D8CE]" />
+          <span className="hidden md:inline">العالم المشترك</span>
+          <span
+            className={`w-2 h-2 rounded-full shrink-0 ${
+              cloudSyncStatus === 'synced'
+                ? 'bg-[#6FE387]'
+                : cloudSyncStatus === 'pending'
+                  ? 'bg-[#F5B954]'
+                  : 'bg-[#8AA6A1]'
+            }`}
+          />
+        </button>
 
         {/* Royal Advisor Trigger */}
         <button

@@ -141,19 +141,24 @@ export function executeTrade(
   dailySold: TradeVolumeMap,
   resource: TradedResourceKey,
   side: 'buy' | 'sell',
-  quantity: number | 'max'
+  quantity: number | 'max',
+  maxQuantityCap?: number
 ): TradeResult {
   const nextWarehouse: Warehouse = { ...warehouse };
   const nextBought: TradeVolumeMap = { ...dailyBought };
   const nextSold: TradeVolumeMap = { ...dailySold };
+  const hasCap =
+    typeof maxQuantityCap === 'number' && Number.isFinite(maxQuantityCap);
+  const cap = hasCap ? Math.max(0, Math.floor(maxQuantityCap)) : Infinity;
 
   if (side === 'buy') {
     const unitPrice = getEffectiveBuyPrice(prices[resource], cubes);
     const maxAffordable = unitPrice > 0 ? Math.floor(gold / unitPrice) : 0;
-    const actualQty =
+    const rawQty =
       quantity === 'max'
         ? maxAffordable
         : Math.max(0, Math.min(quantity, maxAffordable));
+    const actualQty = Math.min(rawQty, cap);
 
     if (actualQty <= 0) {
       return {
@@ -181,8 +186,9 @@ export function executeTrade(
   // Sell
   const unitSellPrice = getSellPrice(prices[resource], cubes);
   const inStock = Math.max(0, warehouse[resource] ?? 0);
-  const actualQty =
+  const rawQty =
     quantity === 'max' ? inStock : Math.max(0, Math.min(quantity, inStock));
+  const actualQty = Math.min(rawQty, cap);
 
   if (actualQty <= 0) {
     return {

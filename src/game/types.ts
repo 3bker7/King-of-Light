@@ -514,6 +514,10 @@ export interface GameState {
   provinceEvents: ProvinceEvent[];
   lastDefectedCubeId: number | null;
   lastDefectedSeq: number;
+  // Prompt 8 Shared World optional local profile & world position (null/undefined in local mode)
+  myWorldPos?: { wx: number; wy: number } | null;
+  kingdomNameAr?: string;
+  rulerName?: string;
 }
 
 export interface PersistedSaveData {
@@ -572,6 +576,10 @@ export interface PersistedSaveData {
   camp?: ArrivalCamp;
   pendingArrivals?: number;
   provinceEvents?: ProvinceEvent[];
+  // Prompt 8 optional persisted world spawn position & profile names
+  myWorldPos?: { wx: number; wy: number } | null;
+  kingdomNameAr?: string;
+  rulerName?: string;
 }
 
 export interface StaffingStatus {

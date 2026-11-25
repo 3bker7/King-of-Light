@@ -111,6 +111,7 @@ import type {
   ObjectiveState,
   OfficeFaxStatus,
   PersistedSaveData,
+  PriceMap,
   PrivateAd,
   Province,
   ProvinceEvent,
@@ -609,6 +610,9 @@ export function hydrateGameState(saved: PersistedSaveData): GameState {
     provinceEvents: hydratedProvinceEvents,
     lastDefectedCubeId: null,
     lastDefectedSeq: 0,
+    myWorldPos: saved.myWorldPos ?? null,
+    kingdomNameAr: saved.kingdomNameAr,
+    rulerName: saved.rulerName,
   };
 }
 
@@ -739,7 +743,7 @@ function evaluateObjectivesAndProgression(state: GameState): GameState {
 }
 
 export type GameAction =
-  | { type: 'TICK' }
+  | { type: 'TICK'; skipLocalBourseRoll?: boolean }
   | { type: 'PLACE_THEME'; cubeId: number; themeId: ThemeId }
   | { type: 'DEMOLISH_THEME'; cubeId: number; slot: SlotIndex }
   | { type: 'BUY_CUBE'; cubeId: number }
@@ -748,6 +752,7 @@ export type GameAction =
       resource: TradedResourceKey;
       side: 'buy' | 'sell';
       quantity: number | 'max';
+      maxQuantityCap?: number;
     }
   | {
       type: 'BUY_MATERIALS';
@@ -774,6 +779,24 @@ export type GameAction =
       labelAr: string;
       projectedAr: string;
       faxId?: string;
+    }
+  | {
+      type: 'SET_WORLD_PROFILE';
+      myWorldPos?: { wx: number; wy: number } | null;
+      kingdomNameAr?: string;
+      rulerName?: string;
+    }
+  | {
+      type: 'APPLY_CLOUD_SAVE';
+      save: PersistedSaveData;
+      toastMessage: string;
+    }
+  | {
+      type: 'SYNC_WORLD_BOURSE';
+      prices: PriceMap;
+      previousPrices?: PriceMap;
+      inflationIndex: number;
+      tickerMessage?: string;
     }
   | { type: 'DISMISS_TOAST'; id: string }
   | { type: 'CLEAR_LEVEL2_NOTICE' }
@@ -928,18 +951,25 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
           newToasts.push(createToast(STRINGS.toasts.familiesLeft, 'warning'));
         }
 
-        const bourseRes = rolloverBoursePrices(
-          nextPrices,
-          nextDailyBought,
-          nextDailySold,
-          state.level
-        );
-        nextPrices = bourseRes.prices;
-        nextPreviousPrices = bourseRes.previousPrices;
-        nextTicker = bourseRes.tickerMessage;
-        nextInflationIndex = bourseRes.inflationIndex;
-        nextDailyBought = createEmptyTradeVolumes();
-        nextDailySold = createEmptyTradeVolumes();
+        // Element 3.1: When online in Shared World, disable local daily bourse roll (worldBourse/current owns prices).
+        // In local mode (skipLocalBourseRoll falsy), run exact Prompt 2 daily roll.
+        if (!action.skipLocalBourseRoll) {
+          const bourseRes = rolloverBoursePrices(
+            nextPrices,
+            nextDailyBought,
+            nextDailySold,
+            state.level
+          );
+          nextPrices = bourseRes.prices;
+          nextPreviousPrices = bourseRes.previousPrices;
+          nextTicker = bourseRes.tickerMessage;
+          nextInflationIndex = bourseRes.inflationIndex;
+          nextDailyBought = createEmptyTradeVolumes();
+          nextDailySold = createEmptyTradeVolumes();
+        } else {
+          nextDailyBought = createEmptyTradeVolumes();
+          nextDailySold = createEmptyTradeVolumes();
+        }
 
         // Element 5.3: Once per month, warn if inflation index > 130 at rollover
         const currentMonth = Math.floor((nextDay - 1) / MONTH_DAYS) + 1;
@@ -1452,7 +1482,8 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         state.dailySold,
         action.resource,
         action.side,
-        action.quantity
+        action.quantity,
+        action.maxQuantityCap
       );
       if (result.tradedQty <= 0) {
         return {
@@ -1832,6 +1863,35 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         ...state,
         officeFaxes: nextFaxes,
         decrees: nextDecrees,
+      };
+    }
+
+    case 'SET_WORLD_PROFILE': {
+      return {
+        ...state,
+        ...(action.myWorldPos !== undefined ? { myWorldPos: action.myWorldPos } : {}),
+        ...(action.kingdomNameAr !== undefined ? { kingdomNameAr: action.kingdomNameAr } : {}),
+        ...(action.rulerName !== undefined ? { rulerName: action.rulerName } : {}),
+      };
+    }
+
+    case 'APPLY_CLOUD_SAVE': {
+      const hydrated = hydrateGameState(action.save);
+      return {
+        ...hydrated,
+        toasts: appendToasts(hydrated.toasts, [
+          createToast(action.toastMessage, 'success'),
+        ]),
+      };
+    }
+
+    case 'SYNC_WORLD_BOURSE': {
+      return {
+        ...state,
+        prices: action.prices,
+        previousPrices: action.previousPrices ?? state.previousPrices,
+        inflationIndex: action.inflationIndex,
+        ...(action.tickerMessage ? { tickerMessage: action.tickerMessage } : {}),
       };
     }
 

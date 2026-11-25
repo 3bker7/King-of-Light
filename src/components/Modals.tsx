@@ -16,6 +16,9 @@ import { BoursePanel } from './BoursePanel';
 
 interface BourseModalProps {
   state: GameState;
+  isWorldBourse?: boolean;
+  worldBourseDay?: number | null;
+  worldBourseUsedToday?: Partial<Record<TradedResourceKey, number>>;
   onTrade: (
     resource: TradedResourceKey,
     side: 'buy' | 'sell',
@@ -24,7 +27,14 @@ interface BourseModalProps {
   onClose: () => void;
 }
 
-export function BourseModal({ state, onTrade, onClose }: BourseModalProps) {
+export function BourseModal({
+  state,
+  isWorldBourse,
+  worldBourseDay,
+  worldBourseUsedToday,
+  onTrade,
+  onClose,
+}: BourseModalProps) {
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
@@ -61,7 +71,13 @@ export function BourseModal({ state, onTrade, onClose }: BourseModalProps) {
         </div>
 
         <div className="overflow-y-auto parchment-scroll pl-1">
-          <BoursePanel state={state} onTrade={onTrade} />
+          <BoursePanel
+            state={state}
+            isWorldBourse={isWorldBourse}
+            worldBourseDay={worldBourseDay}
+            worldBourseUsedToday={worldBourseUsedToday}
+            onTrade={onTrade}
+          />
         </div>
       </div>
     </div>

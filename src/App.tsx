@@ -18,6 +18,7 @@ import {
   type PalaceOfficeTab,
 } from './components/PalaceOfficesOverlay';
 import { ProvincePanel, ProvincePanelChip } from './components/ProvincePanel';
+import { SharedWorldOverlay } from './components/SharedWorldOverlay';
 import { Ticker } from './components/Ticker';
 import { Toasts } from './components/Toasts';
 import { TopBar } from './components/TopBar';
@@ -47,6 +48,10 @@ import {
   simulateOfflineProgress,
 } from './game/save';
 import { STRINGS } from './game/strings';
+import {
+  getEffectiveBuyPrice,
+  getSellPrice,
+} from './game/economy';
 import type {
   AdvisorAction,
   AwayReportData,
@@ -58,6 +63,34 @@ import type {
   ToastItem,
   TradedResourceKey,
 } from './game/types';
+import {
+  CLOUD_SYNC_TOAST_AR,
+  downloadCloudSaveIfNewer,
+  uploadCloudSave,
+} from './net/cloudSync';
+import { isOnlineWorldEnabled } from './net/firebase';
+import {
+  registerOrLoadWorldKingdom,
+  signInWithEmail,
+  signInWithGoogle,
+  signOutWorld,
+  signUpWithEmail,
+  subscribeAuthState,
+  updateWorldKingdomRegistry,
+} from './net/worldAuth';
+import {
+  ensureAndRollWorldBourse,
+  fetchMyWorldBourseUsage,
+  pushWorldBourseVolumeDeltas,
+  subscribeWorldBourse,
+} from './net/worldBourse';
+import {
+  ONLINE_BOURSE_DAILY_KINGDOM_CAP,
+  type CloudSyncStatus,
+  type OnlineWorldUser,
+  type WorldBourse,
+  type WorldKingdom,
+} from './net/worldTypes';
 
 function initializeGame(): {
   initialState: GameState;
@@ -143,19 +176,229 @@ export default function App() {
   const [advisorInitialTab, setAdvisorInitialTab] = useState<
     AdvisorTab | undefined
   >(undefined);
+  const [sharedWorldOpen, setSharedWorldOpen] = useState(false);
   const [resetSignal, setResetSignal] = useState(0);
+
+  // Prompt 8 Shared World state (inert in local mode when firebaseConfig === null)
+  const onlineConfigEnabled = isOnlineWorldEnabled();
+  const [worldUser, setWorldUser] = useState<OnlineWorldUser | null>(null);
+  const [myWorldKingdom, setMyWorldKingdom] = useState<WorldKingdom | null>(null);
+  const [cloudSyncStatus, setCloudSyncStatus] =
+    useState<CloudSyncStatus>('local-only');
+  const [worldBourse, setWorldBourse] = useState<WorldBourse | null>(null);
+  const [worldBourseUsedToday, setWorldBourseUsedToday] = useState<
+    Partial<Record<TradedResourceKey, number>>
+  >({});
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+
+  const isWorldBourseActive = Boolean(
+    onlineConfigEnabled && worldUser && worldBourse
+  );
+  const isWorldBourseActiveRef = useRef(isWorldBourseActive);
+  isWorldBourseActiveRef.current = isWorldBourseActive;
 
   const latestStateRef = useRef(state);
   latestStateRef.current = state;
   const lastSavedTimeRef = useRef<number>(0);
+  const lastSyncedMonthRef = useRef<number>(state.totalMonths);
+  const worldBourseDayRef = useRef<number | null>(null);
 
   // Single 1000ms real-time tick interval — NEVER pauses when panels or modals are open
   useEffect(() => {
     const timer = window.setInterval(() => {
-      dispatch({ type: 'TICK' });
+      dispatch({
+        type: 'TICK',
+        skipLocalBourseRoll: isWorldBourseActiveRef.current,
+      });
     }, TICK_MS);
     return () => window.clearInterval(timer);
   }, []);
+
+  // Element 1.1: Subscribe to Firebase Auth ONLY when firebaseConfig is non-null
+  useEffect(() => {
+    if (!onlineConfigEnabled) return;
+    let active = true;
+    let unsub: (() => void) | null = null;
+    void subscribeAuthState((u) => {
+      if (!active) return;
+      setWorldUser(u);
+      if (!u) {
+        setMyWorldKingdom(null);
+        setWorldBourse(null);
+        setWorldBourseUsedToday({});
+        setCloudSyncStatus('local-only');
+        worldBourseDayRef.current = null;
+      }
+    }).then((fn) => {
+      if (active) unsub = fn;
+      else fn();
+    });
+    return () => {
+      active = false;
+      if (unsub) unsub();
+    };
+  }, [onlineConfigEnabled]);
+
+  // Elements 1.2, 2.1, 3.1-3.2: On sign-in -> cloud download check, kingdom register/BFS spawn, world bourse subscribe
+  useEffect(() => {
+    if (!onlineConfigEnabled || !worldUser) return;
+    let active = true;
+    let unsubBourse: (() => void) | null = null;
+
+    const bootstrapOnlineSession = async () => {
+      setCloudSyncStatus('pending');
+      let workingState = latestStateRef.current;
+
+      // Element 2.1: Download cloud save ONLY if cloud.totalMonths > local.totalMonths
+      const cloudDownload = await downloadCloudSaveIfNewer(
+        worldUser.uid,
+        workingState.totalMonths
+      );
+      if (!active) return;
+      if (cloudDownload) {
+        const hydrated = hydrateGameState(cloudDownload.save);
+        workingState = hydrated;
+        lastSyncedMonthRef.current = hydrated.totalMonths;
+        dispatch({
+          type: 'APPLY_CLOUD_SAVE',
+          save: cloudDownload.save,
+          toastMessage: CLOUD_SYNC_TOAST_AR,
+        });
+        saveGameToStorage(hydrated);
+      }
+
+      // Element 1.2: Register or refresh worldKingdoms/{uid} with deterministic BFS spawn
+      try {
+        const { kingdom } = await registerOrLoadWorldKingdom(
+          worldUser,
+          workingState
+        );
+        if (!active) return;
+        setMyWorldKingdom(kingdom);
+        dispatch({
+          type: 'SET_WORLD_PROFILE',
+          myWorldPos: { wx: kingdom.wx, wy: kingdom.wy },
+          kingdomNameAr: kingdom.nameAr,
+          rulerName: kingdom.rulerName,
+        });
+      } catch (err) {
+        if (active) {
+          setAuthError(
+            err instanceof Error ? err.message : 'تعذر تسجيل المملكة في العالم المشترك'
+          );
+        }
+      }
+
+      // Element 3.1 & 3.2: Ensure/roll World Bourse and subscribe to live world prices
+      const initialBourse = await ensureAndRollWorldBourse(Date.now());
+      if (!active) return;
+      if (initialBourse) {
+        setWorldBourse(initialBourse);
+        worldBourseDayRef.current = initialBourse.day;
+        dispatch({
+          type: 'SYNC_WORLD_BOURSE',
+          prices: initialBourse.prices,
+          previousPrices: initialBourse.previousPrices,
+          inflationIndex: initialBourse.inflationIndex,
+        });
+        const usage = await fetchMyWorldBourseUsage(
+          worldUser.uid,
+          initialBourse.day
+        );
+        if (active) setWorldBourseUsedToday(usage);
+      }
+
+      unsubBourse = await subscribeWorldBourse((nextBourse) => {
+        if (!active) return;
+        const prevDay = worldBourseDayRef.current;
+        setWorldBourse(nextBourse);
+        worldBourseDayRef.current = nextBourse.day;
+        dispatch({
+          type: 'SYNC_WORLD_BOURSE',
+          prices: nextBourse.prices,
+          previousPrices: nextBourse.previousPrices,
+          inflationIndex: nextBourse.inflationIndex,
+        });
+        if (prevDay !== null && prevDay !== nextBourse.day) {
+          setWorldBourseUsedToday({});
+        }
+      });
+
+      if (active) {
+        setCloudSyncStatus('synced');
+      }
+    };
+
+    void bootstrapOnlineSession();
+    return () => {
+      active = false;
+      if (unsubBourse) unsubBourse();
+    };
+  }, [onlineConfigEnabled, worldUser]);
+
+  // Elements 1.3, 2.1, 3.3: Throttled month-boundary cloud save upload, registry refresh & People's Bank volume push
+  useEffect(() => {
+    if (!onlineConfigEnabled || !worldUser) {
+      lastSyncedMonthRef.current = state.totalMonths;
+      return;
+    }
+    if (state.totalMonths <= lastSyncedMonthRef.current) return;
+    lastSyncedMonthRef.current = state.totalMonths;
+
+    let cancelled = false;
+    setCloudSyncStatus('pending');
+
+    const snapshot = state;
+    const pos = myWorldKingdom
+      ? { wx: myWorldKingdom.wx, wy: myWorldKingdom.wy }
+      : snapshot.myWorldPos ?? null;
+
+    const runMonthSync = async () => {
+      // 1. Fire-and-forget cloud save backup
+      const up = await uploadCloudSave(worldUser.uid, snapshot);
+
+      // 2. Refresh worldKingdoms/{uid} stats (goldBand only, never exact gold)
+      if (pos) {
+        try {
+          const updatedKingdom = await updateWorldKingdomRegistry(
+            worldUser.uid,
+            snapshot,
+            pos,
+            worldUser.displayName
+          );
+          if (!cancelled && updatedKingdom) {
+            setMyWorldKingdom(updatedKingdom);
+          }
+        } catch {
+          // Non-fatal: keep local play uninterrupted
+        }
+      }
+
+      // 3. Push People's Bank monthly bourse volumes to worldBourse/current (Element 3.3)
+      const hasBankVol =
+        Object.values(snapshot.dailyBought).some((v) => v > 0) ||
+        Object.values(snapshot.dailySold).some((v) => v > 0);
+      if (hasBankVol) {
+        const nextCounts = await pushWorldBourseVolumeDeltas(worldUser.uid, {
+          bought: snapshot.dailyBought,
+          sold: snapshot.dailySold,
+        });
+        if (!cancelled && nextCounts) {
+          setWorldBourseUsedToday(nextCounts);
+        }
+      }
+
+      if (!cancelled) {
+        setCloudSyncStatus(up.ok ? 'synced' : 'local-only');
+      }
+    };
+
+    void runMonthSync();
+    return () => {
+      cancelled = true;
+    };
+  }, [onlineConfigEnabled, worldUser, myWorldKingdom, state]);
 
   // Throttled localStorage persistence (at most once per 2s)
   useEffect(() => {
@@ -233,7 +476,9 @@ export default function App() {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
-      if (advisorOverlayOpen) {
+      if (sharedWorldOpen) {
+        setSharedWorldOpen(false);
+      } else if (advisorOverlayOpen) {
         setAdvisorOverlayOpen(false);
       } else if (bankOverlayOpen) {
         setBankOverlayOpen(false);
@@ -274,6 +519,7 @@ export default function App() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [
+    sharedWorldOpen,
     advisorOverlayOpen,
     bankOverlayOpen,
     openOfficeTab,
@@ -616,6 +862,153 @@ export default function App() {
     }
   };
 
+  // Prompt 8 Element 3.3 & Harden 3: Trade handler enforces 500/day cap when online and pushes volume delta to worldBourse/current
+  const handleTradeResource = (
+    resource: TradedResourceKey,
+    side: 'buy' | 'sell',
+    quantity: number | 'max'
+  ) => {
+    if (!isWorldBourseActive || !worldUser) {
+      dispatch({ type: 'TRADE_RESOURCE', resource, side, quantity });
+      return;
+    }
+
+    const usedToday = Math.max(
+      0,
+      Math.floor(worldBourseUsedToday[resource] ?? 0)
+    );
+    const remainingCap = Math.max(0, ONLINE_BOURSE_DAILY_KINGDOM_CAP - usedToday);
+    if (remainingCap <= 0) return;
+
+    // Mirror exact traded quantity so local optimistic count matches Firestore transaction
+    const curState = latestStateRef.current;
+    let expectedQty = 0;
+    if (side === 'buy') {
+      const unitBuy = getEffectiveBuyPrice(curState.prices[resource], curState.cubes);
+      const maxAff = unitBuy > 0 ? Math.floor(curState.gold / unitBuy) : 0;
+      const raw = quantity === 'max' ? maxAff : Math.max(0, Math.min(quantity, maxAff));
+      expectedQty = Math.min(raw, remainingCap);
+    } else {
+      const unitSell = getSellPrice(curState.prices[resource], curState.cubes);
+      const inStock = Math.max(0, curState.warehouse[resource] ?? 0);
+      const raw = quantity === 'max' ? inStock : Math.max(0, Math.min(quantity, inStock));
+      expectedQty = unitSell > 0 ? Math.min(raw, remainingCap) : 0;
+    }
+
+    dispatch({
+      type: 'TRADE_RESOURCE',
+      resource,
+      side,
+      quantity,
+      maxQuantityCap: remainingCap,
+    });
+
+    if (expectedQty > 0) {
+      setWorldBourseUsedToday((prev) => ({
+        ...prev,
+        [resource]: Math.min(
+          ONLINE_BOURSE_DAILY_KINGDOM_CAP,
+          (prev[resource] ?? 0) + expectedQty
+        ),
+      }));
+      void ensureAndRollWorldBourse(Date.now()).then(() =>
+        pushWorldBourseVolumeDeltas(
+          worldUser.uid,
+          side === 'buy'
+            ? { bought: { [resource]: expectedQty } }
+            : { sold: { [resource]: expectedQty } }
+        ).then((serverCounts) => {
+          if (serverCounts) setWorldBourseUsedToday(serverCounts);
+        })
+      );
+    }
+  };
+
+  // Prompt 8 Element 1 & 2 Auth/Sync Handlers
+  const handleSignInEmail = async (email: string, password: string) => {
+    setAuthBusy(true);
+    setAuthError(null);
+    try {
+      await signInWithEmail(email, password);
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : 'تعذر تسجيل الدخول');
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleSignUpEmail = async (email: string, password: string) => {
+    setAuthBusy(true);
+    setAuthError(null);
+    try {
+      await signUpWithEmail(email, password);
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : 'تعذر إنشاء الحساب');
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleSignInGoogle = async () => {
+    setAuthBusy(true);
+    setAuthError(null);
+    try {
+      await signInWithGoogle();
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : 'تعذر الدخول بحساب Google');
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleSignOutWorld = async () => {
+    setAuthBusy(true);
+    setAuthError(null);
+    try {
+      if (worldUser) {
+        setCloudSyncStatus('pending');
+        await uploadCloudSave(worldUser.uid, latestStateRef.current);
+      }
+      await signOutWorld();
+      setCloudSyncStatus('local-only');
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : 'تعذر تسجيل الخروج');
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleUpdateWorldProfile = (kingdomNameAr: string, rulerName: string) => {
+    dispatch({
+      type: 'SET_WORLD_PROFILE',
+      kingdomNameAr,
+      rulerName,
+    });
+    if (onlineConfigEnabled && worldUser) {
+      const pos = myWorldKingdom
+        ? { wx: myWorldKingdom.wx, wy: myWorldKingdom.wy }
+        : latestStateRef.current.myWorldPos ?? null;
+      if (pos) {
+        void updateWorldKingdomRegistry(
+          worldUser.uid,
+          { ...latestStateRef.current, kingdomNameAr, rulerName },
+          pos,
+          worldUser.displayName
+        ).then((updated) => {
+          if (updated) setMyWorldKingdom(updated);
+        });
+      }
+    }
+  };
+
+  const handleSyncCloudNow = () => {
+    if (!onlineConfigEnabled || !worldUser) return;
+    setCloudSyncStatus('pending');
+    void uploadCloudSave(worldUser.uid, latestStateRef.current).then((res) => {
+      setCloudSyncStatus(res.ok ? 'synced' : 'local-only');
+    });
+  };
+
   const handleNewGame = () => {
     setActiveBuildTheme(null);
     setInspectedShortTheme(null);
@@ -635,6 +1028,7 @@ export default function App() {
     setOpenOfficeTab(null);
     setBankOverlayOpen(false);
     setAdvisorOverlayOpen(false);
+    setSharedWorldOpen(false);
     setAwayReport(null);
     dispatch({ type: 'NEW_GAME' });
     setResetSignal((n) => n + 1);
@@ -658,6 +1052,8 @@ export default function App() {
       {/* Slim Top Bar (48px) */}
       <TopBar
         state={state}
+        cloudSyncStatus={cloudSyncStatus}
+        onOpenSharedWorld={() => setSharedWorldOpen(true)}
         onOpenAdvisor={() => handleOpenAdvisor()}
         onOpenBourse={() => setBourseModalOpen(true)}
         onOpenSettings={() => setSettingsModalOpen(true)}
@@ -830,9 +1226,10 @@ export default function App() {
         onResolveLandRequest={(requestId, approve) =>
           dispatch({ type: 'RESOLVE_LAND_REQUEST', requestId, approve })
         }
-        onTrade={(resource, side, quantity) =>
-          dispatch({ type: 'TRADE_RESOURCE', resource, side, quantity })
-        }
+        isWorldBourse={isWorldBourseActive}
+        worldBourseDay={worldBourse?.day ?? null}
+        worldBourseUsedToday={worldBourseUsedToday}
+        onTrade={handleTradeResource}
       />
 
       {/* Element 7 & 9: Palace Offices Overlay (opens ONLY on explicit chip click, never auto-opens) */}
@@ -872,6 +1269,27 @@ export default function App() {
         />
       )}
 
+      {/* Prompt 8 Element 1: Shared World Auth, Registry & Cloud Sync Overlay (never auto-opens) */}
+      {sharedWorldOpen && (
+        <SharedWorldOverlay
+          state={state}
+          onlineConfigEnabled={onlineConfigEnabled}
+          user={worldUser}
+          myKingdom={myWorldKingdom}
+          syncStatus={cloudSyncStatus}
+          worldBourseDay={worldBourse?.day ?? null}
+          authBusy={authBusy}
+          authError={authError}
+          onSignInEmail={handleSignInEmail}
+          onSignUpEmail={handleSignUpEmail}
+          onSignInGoogle={handleSignInGoogle}
+          onSignOut={handleSignOutWorld}
+          onUpdateProfile={handleUpdateWorldProfile}
+          onSyncNow={handleSyncCloudNow}
+          onClose={() => setSharedWorldOpen(false)}
+        />
+      )}
+
       {/* Element 1.5 & 5.3: Bottom-left Toasts (with clickable focusCubeId navigation) */}
       <Toasts
         toasts={state.toasts}
@@ -888,9 +1306,10 @@ export default function App() {
       {bourseModalOpen && state.level >= 2 && (
         <BourseModal
           state={state}
-          onTrade={(resource, side, quantity) =>
-            dispatch({ type: 'TRADE_RESOURCE', resource, side, quantity })
-          }
+          isWorldBourse={isWorldBourseActive}
+          worldBourseDay={worldBourse?.day ?? null}
+          worldBourseUsedToday={worldBourseUsedToday}
+          onTrade={handleTradeResource}
           onClose={() => setBourseModalOpen(false)}
         />
       )}
