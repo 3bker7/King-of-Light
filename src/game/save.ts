@@ -389,6 +389,8 @@ export function simulateOfflineProgress(
   let nextPeoplesBank: PeoplesBank = saved.peoplesBank ?? {
     gold: BANK_START_GOLD,
     portfolio: {},
+    totalTrades: 0,
+    lastTradeMonth: null,
     lastTradeAr: null,
   };
   let nextLastBankNetWorthWarnMonth =

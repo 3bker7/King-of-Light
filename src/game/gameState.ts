@@ -289,7 +289,7 @@ export function createFreshGameState(now = Date.now()): GameState {
     palaceOfPeople: { gold: PALACE_START_GOLD },
     bankTrust: TRUST_START,
     bankLoans: [],
-    peoplesBank: { gold: BANK_START_GOLD, portfolio: {}, lastTradeAr: null },
+    peoplesBank: { gold: BANK_START_GOLD, portfolio: {}, totalTrades: 0, lastTradeMonth: null, lastTradeAr: null },
     lastBankNetWorthWarnMonth: 0,
   };
 }
@@ -464,6 +464,8 @@ export function hydrateGameState(saved: PersistedSaveData): GameState {
     peoplesBank: saved.peoplesBank ?? {
       gold: BANK_START_GOLD,
       portfolio: {},
+      totalTrades: 0,
+      lastTradeMonth: null,
       lastTradeAr: null,
     },
     lastBankNetWorthWarnMonth:

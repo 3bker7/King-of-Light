@@ -306,7 +306,7 @@ export function runMonthlyProcessor(
     palaceOfPeople,
     bankTrust: input.bankTrust ?? 70,
     bankLoans: input.bankLoans ?? [],
-    peoplesBank: input.peoplesBank ?? { gold: 5000, portfolio: {}, lastTradeAr: null },
+    peoplesBank: input.peoplesBank ?? { gold: 5000, portfolio: {}, totalTrades: 0, lastTradeMonth: null, lastTradeAr: null },
     prices: input.prices,
     dailyBought: input.dailyBought ?? {},
     dailySold: input.dailySold ?? {},

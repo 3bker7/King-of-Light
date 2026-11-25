@@ -313,7 +313,7 @@ export interface AwayReportData {
 
 export interface PalaceOfPeople {
   gold: number;
-  totalSinksCollected: number;
+  totalSinksCollected?: number;
 }
 
 export interface BankLoan {
@@ -321,11 +321,11 @@ export interface BankLoan {
   principal: number;
   profit: number;
   repayable: number;
-  term: number;
+  termMonths: number;
   startMonth: number;
-  monthsRemaining: number;
+  monthsElapsed: number;
   collateralCubeIds: number[];
-  missedInstallments: number;
+  missedCount: number;
   deferredDue: number;
   paidSoFar: number;
   status: 'active' | 'repaid' | 'defaulted';
@@ -336,7 +336,7 @@ export interface PeoplesBank {
   portfolio: Partial<Record<TradedResourceKey, number>>;
   totalTrades: number;
   lastTradeMonth: number | null;
-  lastTradeSummaryAr: string | null;
+  lastTradeAr: string | null;
 }
 
 export type ToastTone = 'info' | 'success' | 'warning';

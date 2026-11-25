@@ -23,9 +23,10 @@ import {
   MIN_LOAN,
   type LoanTermMonths,
 } from '../game/bank';
-import { BASE_BUY_PRICES, STRINGS, TRADED_RESOURCES } from '../game/constants';
+import { BASE_BUY_PRICES, TRADED_RESOURCES } from '../game/constants';
 import { findPalaceCube, getCubePurchasePrice, getManhattanDistanceToPalace } from '../game/production';
-import type { Cube, GameState } from '../game/types';
+import { STRINGS } from '../game/strings';
+import type { Cube, GameState, TradedResourceKey } from '../game/types';
 
 interface BankOverlayProps {
   state: GameState;
@@ -94,7 +95,7 @@ export function BankOverlay({
     let sum = 0;
     for (const [res, count] of Object.entries(state.peoplesBank.portfolio)) {
       if (typeof count === 'number' && count > 0) {
-        const price = state.prices[res] ?? BASE_BUY_PRICES[res as any] ?? 1;
+        const price = state.prices[res as TradedResourceKey] ?? BASE_BUY_PRICES[res as TradedResourceKey] ?? 1;
         sum += count * price;
       }
     }

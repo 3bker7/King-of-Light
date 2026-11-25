@@ -1,5 +1,6 @@
-import { BASE_BUY_PRICES, STRINGS, TRADED_RESOURCES } from './constants';
+import { BASE_BUY_PRICES, TRADED_RESOURCES } from './constants';
 import { findPalaceCube, getCubePurchasePrice } from './production';
+import { STRINGS } from './strings';
 import type {
   BankLoan,
   Cube,
@@ -183,6 +184,8 @@ export function processBankMonth(
   let peoplesBank: PeoplesBank = {
     gold: Math.max(0, Math.floor(input.peoplesBank.gold)),
     portfolio: { ...input.peoplesBank.portfolio },
+    totalTrades: input.peoplesBank.totalTrades ?? 0,
+    lastTradeMonth: input.peoplesBank.lastTradeMonth ?? null,
     lastTradeAr: input.peoplesBank.lastTradeAr,
   };
   const dailyBought = { ...input.dailyBought };
@@ -445,6 +448,7 @@ export function executeTakeLoan(
   const newLoan: BankLoan = {
     id: loanId,
     principal,
+    profit: repayable - principal,
     repayable,
     paidSoFar: 0,
     termMonths: action.termMonths,
