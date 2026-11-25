@@ -1295,65 +1295,6 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
       return evaluateObjectivesAndProgression(updated);
     }
 
-    case 'RESOLVE_LAND_REQUEST': {
-      const res = resolveLandRequest({
-        cubes: state.cubes,
-        citizens: state.citizens,
-        landRequests: state.landRequests,
-        gold: state.gold,
-        policeRecords: state.policeRecords,
-        totalMonths: state.totalMonths,
-        requestId: action.requestId,
-        approve: action.approve,
-      });
-
-      if (!res.resolved) {
-        if (res.landRequests === state.landRequests) {
-          return state;
-        }
-        return {
-          ...state,
-          landRequests: res.landRequests,
-          toasts: appendToasts(state.toasts, [
-            createToast('تعذّر تنفيذ طلب الأرض لانتفاء الشروط', 'warning'),
-          ]),
-          pendingAudioCue: makeCue('error'),
-        };
-      }
-
-      let nextLedger = state.ledger;
-      if (res.ledgerItem) {
-        nextLedger = appendLedger(
-          nextLedger,
-          state.day,
-          res.ledgerItem.kind,
-          res.ledgerItem.amount,
-          res.ledgerItem.labelAr
-        );
-      }
-
-      const toastMsg = res.approved
-        ? `تم بيع الأرض بنجاح (+${res.ledgerItem?.amount ?? 0} ذهب)`
-        : 'تم رفض طلب شراء الأرض';
-
-      const updated: GameState = {
-        ...state,
-        cubes: res.cubes,
-        citizens: res.citizens,
-        gold: res.gold,
-        citizenWealth: res.citizenWealth,
-        landRequests: res.landRequests,
-        policeRecords: res.policeRecords,
-        ledger: nextLedger,
-        toasts: appendToasts(state.toasts, [
-          createToast(toastMsg, res.approved ? 'success' : 'info'),
-        ]),
-        pendingAudioCue: makeCue(res.approved ? 'trade' : 'day'),
-      };
-
-      return evaluateObjectivesAndProgression(updated);
-    }
-
     case 'DISMISS_TOAST': {
       return {
         ...state,

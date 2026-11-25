@@ -344,60 +344,6 @@ export function PalaceOfficesOverlay({
                   </div>
                 )}
               </div>
-
-              {/* Element 5.1: Private sector job ads (إعلانات القطاع الخاص) */}
-              <div className="p-2.5 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="font-extrabold text-[#2B2118]">
-                    إعلانات القطاع الخاص
-                  </span>
-                  <span className="text-[11px] font-extrabold text-[#8A5F12] tabular-nums-latin">
-                    {state.privateAds.length} إعلان
-                  </span>
-                </div>
-                {state.privateAds.length === 0 ? (
-                  <p className="text-[11px] text-[#8A7759]">
-                    لا توجد إعلانات توظيف خاصة حالياً.
-                  </p>
-                ) : (
-                  <div className="space-y-1.5">
-                    {state.privateAds.map((ad) => {
-                      const owner = citizenById.get(ad.ownerId);
-                      const worker =
-                        ad.filledBy !== null
-                          ? citizenById.get(ad.filledBy)
-                          : null;
-                      return (
-                        <div
-                          key={ad.id}
-                          className="flex items-center justify-between gap-2 p-2 rounded-lg bg-[#F7EED8] border border-[#E7D8B4]"
-                        >
-                          <div className="min-w-0">
-                            <div className="font-extrabold text-[#2B2118] truncate">
-                              {STRINGS.themes[ad.themeId].name}
-                            </div>
-                            <div className="text-[10px] font-bold text-[#6F5C43] truncate">
-                              المالك: {owner?.name ?? 'مواطن'} · الأجر:{' '}
-                              <span className="tabular-nums-latin text-[#8A5F12]">
-                                {ad.wage} ذهب
-                              </span>
-                            </div>
-                          </div>
-                          {worker ? (
-                            <span className="px-2 py-0.5 rounded-md bg-[#E3F3E6] border border-[#9CD0A7] text-[#2D6E3B] text-[10px] font-extrabold shrink-0">
-                              {worker.name}
-                            </span>
-                          ) : (
-                            <span className="px-2 py-0.5 rounded-md bg-[#F8E7C1] border border-[#E2BA64] text-[#8A5F12] text-[10px] font-extrabold shrink-0">
-                              شاغرة
-                            </span>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
             </>
           )}
 

@@ -146,18 +146,6 @@ export function AwayReport({ report, onClose }: AwayReportProps) {
             </div>
           )}
 
-          {/* Element 6.3: Private sector & citizen spending offline summary */}
-          {((report.citizenSpentTotal ?? 0) > 0 ||
-            (report.businessTaxTotal ?? 0) > 0) && (
-            <div className="flex items-center gap-2 p-2.5 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] font-bold text-[#2B2118]">
-              <Coins className="w-4 h-4 text-[#C9962E] shrink-0" />
-              <span className="tabular-nums-latin">
-                أثناء غيابك: المواطنون أنفقوا {report.citizenSpentTotal ?? 0} ذهب،
-                وضرائب الأعمال {report.businessTaxTotal ?? 0}
-              </span>
-            </div>
-          )}
-
           {/* Biggest market move */}
           <div className="p-2.5 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] space-y-1">
             <div className="flex items-center gap-1.5 font-extrabold text-[#2B2118]">

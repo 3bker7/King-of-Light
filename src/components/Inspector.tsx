@@ -30,7 +30,6 @@ import {
   VILLAGE_JOIN_REQUIRED_DAYS,
 } from '../game/constants';
 import { ageYears } from '../game/citizens';
-import { ageYears } from '../game/citizens';
 import { getHousingQueue } from '../game/housingOffice';
 import { getActiveCVs } from '../game/laborOffice';
 import {
@@ -721,102 +720,6 @@ export function Inspector({
           )}
         </div>
 
-        {/* Element 5.2: Private Land Purchase Requests (طلبات شراء أراضٍ) */}
-        <div className="p-3 rounded-xl bg-[#FDF8EC] border border-[#C9962E] space-y-2">
-          <div className="flex items-center justify-between gap-2 border-b border-[#EFE3C5] pb-1.5">
-            <div className="flex items-center gap-1.5 text-[#2B2118]">
-              <MapPin className="w-4 h-4 text-[#C9962E] shrink-0" />
-              <h4 className="text-xs font-extrabold">طلبات شراء أراضٍ</h4>
-            </div>
-            <span className="px-1.5 py-0.5 rounded-md bg-[#F8E7C1] border border-[#E2BA64] text-[10px] font-extrabold text-[#8A5F12] tabular-nums-latin">
-              {state.landRequests.length}
-            </span>
-          </div>
-
-          {state.landRequests.length === 0 ? (
-            <p className="text-[11px] text-[#8A7759]">
-              لا توجد طلبات شراء أراضٍ معلّقة حالياً.
-            </p>
-          ) : (
-            <div className="space-y-2">
-              {state.landRequests.map((req) => {
-                const applicant = state.citizens.find(
-                  (c) => c.id === req.citizenId
-                );
-                const targetCube = state.cubes[req.cubeId];
-                const dist = targetCube
-                  ? getManhattanDistanceToPalace(state.cubes, targetCube)
-                  : 0;
-                const applicantAge = applicant
-                  ? ageYears(applicant, state.totalMonths)
-                  : 0;
-                const jobLabel = applicant?.jobThemeId
-                  ? STRINGS.themes[applicant.jobThemeId].name
-                  : 'باحث عن عمل';
-                return (
-                  <div
-                    key={req.id}
-                    className="p-2.5 rounded-lg bg-[#F7EED8] border border-[#DFC996] space-y-1.5 text-[11px]"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-extrabold text-[#2B2118] truncate">
-                        {applicant?.name ?? 'مواطن'}{' '}
-                        <span className="font-bold text-[#6F5C43] tabular-nums-latin">
-                          ({applicantAge} سنة)
-                        </span>
-                      </span>
-                      <span className="font-extrabold text-[#8A5F12] shrink-0 tabular-nums-latin">
-                        {req.price} ذهب
-                      </span>
-                    </div>
-                    <div className="text-[10px] font-bold text-[#4F3F2B] space-y-0.5">
-                      <div>
-                        العمل: {jobLabel} · الثروة:{' '}
-                        <span className="tabular-nums-latin">
-                          {applicant?.wealth ?? 0} ذهب
-                        </span>{' '}
-                        · الذكاء:{' '}
-                        <span className="tabular-nums-latin">
-                          {applicant?.attrs.intelligence ?? 0}
-                        </span>
-                      </div>
-                      <div>
-                        المشروع:{' '}
-                        <span className="text-[#14524A]">
-                          {STRINGS.themes[req.businessThemeId].name}
-                        </span>{' '}
-                        · البُعد عن القصر:{' '}
-                        <span className="tabular-nums-latin">{dist}</span>
-                      </div>
-                      <div className="text-[#7C684C]">
-                        إن تعذّر البناء 3 أشهر تعود الأرض للتاج.
-                      </div>
-                    </div>
-                    {onResolveLandRequest && (
-                      <div className="grid grid-cols-2 gap-1.5 pt-1">
-                        <button
-                          type="button"
-                          onClick={() => onResolveLandRequest(req.id, true)}
-                          className="py-1.5 px-2 rounded-lg bg-[#14524A] hover:bg-[#1B685E] text-white text-[11px] font-extrabold transition-colors"
-                        >
-                          موافقة
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onResolveLandRequest(req.id, false)}
-                          className="py-1.5 px-2 rounded-lg border border-[#DFB9B3] bg-[#FBF0EE] hover:bg-[#F5DDD9] text-[#A83629] text-[11px] font-extrabold transition-colors"
-                        >
-                          رفض
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
         {/* Element 4.3: Kingdom Treasury Section (خزنة المملكة) */}
         <div className="p-3 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] space-y-2.5">
           <div className="flex items-center justify-between gap-2 border-b border-[#EFE3C5] pb-2">
@@ -877,26 +780,6 @@ export function Inspector({
               </span>
               <span className="font-extrabold text-[#2B2118] tabular-nums-latin">
                 {avgCitizenWealth} ذهب
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-[#6F5C43] font-bold">
-                إيراد غذاء وترفيه المواطنين
-              </span>
-              <span className="font-extrabold text-[#2D6E3B] tabular-nums-latin">
-                {state.lastMonthStats.foodRevenue +
-                  state.lastMonthStats.leisureRevenue}{' '}
-                ذهب
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-[#6F5C43] font-bold">
-                ضرائب الأعمال الخاصة
-              </span>
-              <span className="font-extrabold text-[#2D6E3B] tabular-nums-latin">
-                {state.lastMonthStats.businessTax} ذهب
               </span>
             </div>
 

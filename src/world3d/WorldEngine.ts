@@ -166,51 +166,6 @@ function createPrivatePennantTexture(): THREE.CanvasTexture {
   return tex;
 }
 
-// Element 5.2: Cached golden pennant texture for built private-sector buildings
-function createPrivatePennantTexture(): THREE.CanvasTexture {
-  const canvas = document.createElement('canvas');
-  canvas.width = 64;
-  canvas.height = 64;
-  const ctx = canvas.getContext('2d');
-  if (ctx) {
-    ctx.clearRect(0, 0, 64, 64);
-    // Pole
-    ctx.fillStyle = '#6E4C1B';
-    ctx.fillRect(14, 10, 4, 48);
-    // Finial orb
-    ctx.beginPath();
-    ctx.arc(16, 9, 4.5, 0, Math.PI * 2);
-    ctx.fillStyle = '#F6D377';
-    ctx.fill();
-    // Golden swallowtail pennant
-    ctx.beginPath();
-    ctx.moveTo(18, 13);
-    ctx.lineTo(54, 21);
-    ctx.lineTo(44, 28);
-    ctx.lineTo(54, 35);
-    ctx.lineTo(18, 41);
-    ctx.closePath();
-    ctx.fillStyle = '#E8B844';
-    ctx.fill();
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = '#9E6E19';
-    ctx.stroke();
-    // Inner teal diamond emblem
-    ctx.beginPath();
-    ctx.moveTo(31, 22);
-    ctx.lineTo(37, 27);
-    ctx.lineTo(31, 32);
-    ctx.lineTo(25, 27);
-    ctx.closePath();
-    ctx.fillStyle = '#14524A';
-    ctx.fill();
-  }
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.needsUpdate = true;
-  return tex;
-}
-
 export class WorldEngine {
   private readonly container: HTMLElement;
   private readonly onCubeClick: (cubeId: number) => void;
@@ -380,7 +335,6 @@ export class WorldEngine {
     this.unstaffedTexture = createUnstaffedBadgeTexture();
     this.footprintTexture = createFootprintDecalTexture();
     this.blobShadowTexture = createBlobShadowTexture();
-    this.privatePennantTexture = createPrivatePennantTexture();
     this.privatePennantTexture = createPrivatePennantTexture();
 
     this.buildingLib = createBuildingLibrary(
@@ -730,49 +684,6 @@ export class WorldEngine {
         sprite,
         baseY,
         phase: cube.id * 0.75,
-      });
-    }
-  }
-
-  private rebuildPrivatePennants(cubes: Cube[]): void {
-    while (this.privatePennantGroup.children.length > 0) {
-      const child = this.privatePennantGroup.children[0];
-      this.privatePennantGroup.remove(child);
-      if ((child as THREE.Sprite).isSprite) {
-        (child as THREE.Sprite).material.dispose();
-      }
-    }
-    this.privatePennants = [];
-
-    for (let i = 0; i < cubes.length; i++) {
-      const cube = cubes[i];
-      if (
-        cube.owner !== 'player' ||
-        typeof cube.privateOwnerId !== 'number' ||
-        !cube.themeId
-      ) {
-        continue;
-      }
-      const def = THEMES[cube.themeId];
-      const pos = cellSlotToWorld(cube.row, cube.col, def.footprint, 0);
-      const groundY = getTerrainHeightAt(pos.x, pos.z, this.seaCoords);
-      const spriteMat = new THREE.SpriteMaterial({
-        map: this.privatePennantTexture,
-        transparent: true,
-        depthTest: false,
-      });
-      const sprite = new THREE.Sprite(spriteMat);
-      const baseY = groundY + (cube.themeId === 'hotel' ? 9.6 : 6.4);
-      sprite.position.set(pos.x, baseY, pos.z);
-      sprite.scale.set(2.1, 2.1, 1);
-      sprite.renderOrder = 21;
-      sprite.userData.cubeId = cube.id;
-      this.privatePennantGroup.add(sprite);
-
-      this.privatePennants.push({
-        sprite,
-        baseY,
-        phase: cube.id * 0.9,
       });
     }
   }
@@ -1663,15 +1574,6 @@ export class WorldEngine {
         const item = this.purchasableSprites[i];
         item.sprite.position.y =
           item.baseY + Math.sin(this.elapsedTime * 2.1 + item.phase) * 0.16;
-      }
-    }
-
-    // Element 5.2: Subtle breeze flutter on built private-business golden pennants
-    if (this.privatePennants.length > 0) {
-      for (let i = 0; i < this.privatePennants.length; i++) {
-        const item = this.privatePennants[i];
-        item.sprite.position.y =
-          item.baseY + Math.sin(this.elapsedTime * 2.6 + item.phase) * 0.12;
       }
     }
 
