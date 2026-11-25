@@ -149,6 +149,11 @@ export function serializeGameState(state: GameState, now: number): PersistedSave
     ...(state.myWorldPos !== undefined ? { myWorldPos: state.myWorldPos } : {}),
     ...(state.kingdomNameAr !== undefined ? { kingdomNameAr: state.kingdomNameAr } : {}),
     ...(state.rulerName !== undefined ? { rulerName: state.rulerName } : {}),
+    ...(state.embassyPlots.length > 0 ? { embassyPlots: state.embassyPlots } : {}),
+    ...(state.borderOpen === false ? { borderOpen: false } : {}),
+    ...(state.visaHistory && state.visaHistory.length > 0 ? { visaHistory: state.visaHistory } : {}),
+    ...(state.lastMarketClaimAt !== undefined ? { lastMarketClaimAt: state.lastMarketClaimAt } : {}),
+    ...(state.lastEmbassyPaymentAt !== undefined ? { lastEmbassyPaymentAt: state.lastEmbassyPaymentAt } : {}),
   };
 }
 
@@ -447,11 +452,19 @@ export function simulateOfflineProgress(
     citizens: nextCitizens,
     population: nextPopulation,
   });
+  const savedEmbassyCubeIds = new Set<number>(
+    Array.isArray(saved.embassyPlots)
+      ? saved.embassyPlots
+          .filter((p) => p && typeof p.cubeId === 'number')
+          .map((p) => p.cubeId)
+      : []
+  );
   const hydratedCamp = sanitizeArrivalCampOnHydrate(
     nextCitizens,
     nextCubes,
     startTotalMonths,
-    saved.camp
+    saved.camp,
+    savedEmbassyCubeIds.size > 0 ? savedEmbassyCubeIds : undefined
   );
   nextCitizens = hydratedCamp.citizens;
   let nextCamp = hydratedCamp.camp;
@@ -817,6 +830,7 @@ export function simulateOfflineProgress(
       provinces: currentProvinces,
       camp: nextCamp,
       provinceEvents: nextProvinceEvents,
+      embassyCubeIds: savedEmbassyCubeIds.size > 0 ? savedEmbassyCubeIds : undefined,
       hungerFlag: nextHungerFlag,
       skipBriefing: m < monthsToRun - 1,
       isOffline: true,
@@ -885,7 +899,8 @@ export function simulateOfflineProgress(
     nextCitizens,
     nextCubes,
     nextTotalMonths,
-    nextCamp.cubeId
+    nextCamp.cubeId,
+    savedEmbassyCubeIds.size > 0 ? savedEmbassyCubeIds : undefined
   );
   nextCitizens = finalCampSync.citizens;
   nextCamp = finalCampSync.camp;

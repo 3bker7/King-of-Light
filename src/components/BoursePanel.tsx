@@ -1,9 +1,19 @@
-import { ArrowDownRight, ArrowUpRight, Gauge, Globe, Minus } from 'lucide-react';
+import {
+  ArrowDownRight,
+  ArrowUpRight,
+  Gauge,
+  Globe,
+  Minus,
+  Newspaper,
+} from 'lucide-react';
 import { TRADE_BATCH_QUANTITIES, TRADED_RESOURCES } from '../game/constants';
 import { getEffectiveBuyPrice, getSellPrice } from '../game/economy';
 import { STRINGS } from '../game/strings';
 import type { GameState, TradedResourceKey } from '../game/types';
-import { ONLINE_BOURSE_DAILY_KINGDOM_CAP } from '../net/worldTypes';
+import {
+  ONLINE_BOURSE_DAILY_KINGDOM_CAP,
+  type WorldNewsletter,
+} from '../net/worldTypes';
 import { ResourceIcon } from './ResourceIcon';
 
 interface BoursePanelProps {
@@ -12,6 +22,8 @@ interface BoursePanelProps {
   isWorldBourse?: boolean;
   worldBourseDay?: number | null;
   worldBourseUsedToday?: Partial<Record<TradedResourceKey, number>>;
+  worldNewsletter?: WorldNewsletter | null;
+  worldFromLocalLines?: string[];
   onTrade: (
     resource: TradedResourceKey,
     side: 'buy' | 'sell',
@@ -35,6 +47,8 @@ export function BoursePanel({
   isWorldBourse = false,
   worldBourseDay = null,
   worldBourseUsedToday,
+  worldNewsletter = null,
+  worldFromLocalLines,
   onTrade,
 }: BoursePanelProps) {
   if (state.level < 2) {
@@ -216,6 +230,37 @@ export function BoursePanel({
           );
         })}
       </div>
+      {isWorldBourse && worldNewsletter && worldNewsletter.lines.length > 0 && (
+        <div className="p-3 rounded-xl bg-[#F4E7C8] border border-[#C9962E] space-y-1.5">
+          <div className="flex items-center justify-between gap-2 text-xs font-extrabold text-[#2B2118]">
+            <span className="flex items-center gap-1.5">
+              <Newspaper className="w-4 h-4 text-[#14524A]" />
+              <span>نشرة العالم</span>
+            </span>
+            <span className="text-[10px] font-bold text-[#6F5C43] tabular-nums-latin">
+              يوم {worldNewsletter.day}
+            </span>
+          </div>
+          <ul className="space-y-1 text-[11px] font-bold text-[#3B2F20] leading-relaxed">
+            {worldNewsletter.lines.map((line, idx) => (
+              <li key={`wn-${idx}`}>• {line}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {isWorldBourse && worldFromLocalLines && worldFromLocalLines.length > 0 && (
+        <div className="p-2.5 rounded-xl bg-[#E6F2EF] border border-[#8CC3B8] space-y-1">
+          <div className="text-[11px] font-extrabold text-[#14524A]">
+            من العالم
+          </div>
+          <ul className="space-y-0.5 text-[11px] font-bold text-[#1E4B44] leading-relaxed">
+            {worldFromLocalLines.map((line, idx) => (
+              <li key={`fw-${idx}`}>• {line}</li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }

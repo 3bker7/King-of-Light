@@ -282,7 +282,6 @@ export function runCitizenSpending(
   let privateOwnerGains = 0;
   let foodUnitsSold = 0;
   let importedFoodUnits = 0;
-  let importedFoodUnits = 0;
 
   // =========================================================================
   // 2.2 FOOD SPENDING (essentials BEFORE luxuries)

@@ -92,7 +92,10 @@ import {
   sanitizeProvinceEventsOnHydrate,
 } from './provinces';
 import { clearSavedGame } from './save';
-import { createZeroLastMonthStats } from './spending';
+import {
+  createZeroLastMonthStats,
+  settleOnlineCitizenImport,
+} from './spending';
 import { STRINGS } from './strings';
 import {
   computeTaxMoodDelta,
@@ -104,6 +107,7 @@ import {
 import type {
   AudioCue,
   Cube,
+  EmbassyPlotMarker,
   GameState,
   LastMonthStats,
   LedgerEntry,
@@ -121,7 +125,14 @@ import type {
   ToastItem,
   ToastTone,
   TradedResourceKey,
+  VisaGrantRecord,
 } from './types';
+import {
+  applyVisaArrivalsLocally,
+  applyVisaDepartureLocally,
+} from './visas';
+import { sanitizeEmbassyPlotsOnHydrate } from '../net/worldEmbassies';
+import type { CitizenSnapshot } from '../net/worldTypes';
 
 let toastCounter = 1;
 let audioCounter = 1;
@@ -364,6 +375,10 @@ export function createFreshGameState(now = Date.now()): GameState {
     provinceEvents: [],
     lastDefectedCubeId: null,
     lastDefectedSeq: 0,
+    embassyPlots: [],
+    borderOpen: true,
+    visaHistory: [],
+    lastImportedFoodUnits: 0,
   };
 }
 
@@ -510,11 +525,22 @@ export function hydrateGameState(saved: PersistedSaveData): GameState {
       : 1
   );
 
+  const hydratedEmbassyPlots = sanitizeEmbassyPlotsOnHydrate(
+    saved.embassyPlots,
+    cleanPrivate.cubes,
+    saved.camp?.cubeId ?? null
+  );
+  const embassyCubeIds =
+    hydratedEmbassyPlots.length > 0
+      ? new Set(hydratedEmbassyPlots.map((p) => p.cubeId))
+      : undefined;
+
   const hydratedCamp = sanitizeArrivalCampOnHydrate(
     syncedAds.citizens,
     cleanPrivate.cubes,
     totalMonths,
-    saved.camp
+    saved.camp,
+    embassyCubeIds
   );
   const hydratedProvinces = computeProvinces({
     cubes: cleanPrivate.cubes,
@@ -613,6 +639,22 @@ export function hydrateGameState(saved: PersistedSaveData): GameState {
     myWorldPos: saved.myWorldPos ?? null,
     kingdomNameAr: saved.kingdomNameAr,
     rulerName: saved.rulerName,
+    embassyPlots: hydratedEmbassyPlots,
+    borderOpen: saved.borderOpen !== false,
+    visaHistory: Array.isArray(saved.visaHistory)
+      ? saved.visaHistory.slice(-40)
+      : [],
+    lastMarketClaimAt:
+      typeof saved.lastMarketClaimAt === 'number' &&
+      Number.isFinite(saved.lastMarketClaimAt)
+        ? saved.lastMarketClaimAt
+        : undefined,
+    lastEmbassyPaymentAt:
+      typeof saved.lastEmbassyPaymentAt === 'number' &&
+      Number.isFinite(saved.lastEmbassyPaymentAt)
+        ? saved.lastEmbassyPaymentAt
+        : undefined,
+    lastImportedFoodUnits: 0,
   };
 }
 
@@ -798,6 +840,71 @@ export type GameAction =
       inflationIndex: number;
       tickerMessage?: string;
     }
+  | { type: 'SET_BORDER_OPEN'; open: boolean }
+  | {
+      type: 'RESERVE_MARKET_LISTING';
+      resource: TradedResourceKey;
+      qty: number;
+    }
+  | {
+      type: 'RETURN_MARKET_STOCK';
+      resource: TradedResourceKey;
+      qty: number;
+      toastMessage?: string;
+    }
+  | {
+      type: 'APPLY_MARKET_PURCHASE';
+      resource: TradedResourceKey;
+      qty: number;
+      buyerPays: number;
+      sellerNameAr: string;
+    }
+  | {
+      type: 'COLLECT_MARKET_CLAIMS';
+      collectedGold: number;
+      claimUpdatedAt: number;
+    }
+  | {
+      type: 'SETTLE_CITIZEN_MARKET_IMPORT';
+      buyerPays: number;
+      boughtQty: number;
+    }
+  | {
+      type: 'SET_EMBASSY_PLOTS';
+      plots: EmbassyPlotMarker[];
+    }
+  | {
+      type: 'APPLY_EMBASSY_FEE_PAYMENT';
+      amount: number;
+      toastMessage?: string;
+    }
+  | {
+      type: 'APPLY_EMBASSY_PRICE_SETTLEMENT';
+      amount: number;
+      toastMessage?: string;
+    }
+  | {
+      type: 'COLLECT_EMBASSY_PAYMENTS';
+      collectedGold: number;
+      claimUpdatedAt: number;
+    }
+  | {
+      type: 'APPLY_VISA_DEPARTURE';
+      citizenId: number;
+      toUid: string;
+      toKingdomNameAr: string;
+      visaId: string;
+    }
+  | {
+      type: 'APPLY_VISA_ARRIVALS';
+      arrivals: Array<{
+        visaId: string;
+        fromUid: string;
+        fromKingdomNameAr: string;
+        month: number;
+        snapshot: CitizenSnapshot;
+      }>;
+    }
   | { type: 'DISMISS_TOAST'; id: string }
   | { type: 'CLEAR_LEVEL2_NOTICE' }
   | { type: 'CLEAR_LEVEL2_COMPLETED_NOTICE' }
@@ -864,6 +971,11 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
       let nextCamp = state.camp;
       let nextPendingArrivals = state.pendingArrivals;
       let nextProvinceEvents = state.provinceEvents;
+      let nextLastImportedFoodUnits = state.lastImportedFoodUnits ?? 0;
+      const tickEmbassyCubeIds =
+        state.embassyPlots.length > 0
+          ? new Set(state.embassyPlots.map((p) => p.cubeId))
+          : undefined;
       const joinedVillagesThisTick: Array<{ id: number; name: string }> = [];
       const newToasts: ToastItem[] = [];
       let pendingAudioCue = state.pendingAudioCue;
@@ -1019,6 +1131,7 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
             provinces: nextProvinces,
             camp: nextCamp,
             provinceEvents: nextProvinceEvents,
+            embassyCubeIds: tickEmbassyCubeIds,
             hungerFlag: nextHungerFlag,
             isOffline: false,
             day: nextDay,
@@ -1052,6 +1165,7 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
           nextCamp = mp.camp;
           nextPendingArrivals = mp.pendingArrivals;
           nextProvinceEvents = mp.provinceEvents;
+          nextLastImportedFoodUnits = mp.importedFoodUnits;
 
           for (const item of mp.ledgerItems) {
             nextLedger = appendLedger(
@@ -1173,7 +1287,8 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
           nextCitizens,
           nextCubes,
           nextTotalMonths,
-          nextCamp.cubeId
+          nextCamp.cubeId,
+          tickEmbassyCubeIds
         );
         nextCitizens = campSync.citizens;
         if (
@@ -1246,6 +1361,7 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         camp: nextCamp,
         pendingArrivals: nextPendingArrivals,
         provinceEvents: nextProvinceEvents,
+        lastImportedFoodUnits: nextLastImportedFoodUnits,
         toasts: appendToasts(state.toasts, newToasts),
         pendingAudioCue,
       };
@@ -1288,6 +1404,16 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
           ...state,
           toasts: appendToasts(state.toasts, [
             createToast('لا يمكن البناء على أرض مرهونة للبنك الشرعي', 'warning'),
+          ]),
+          pendingAudioCue: makeCue('error'),
+        };
+      }
+
+      if (state.embassyPlots.some((p) => p.cubeId === cube.id)) {
+        return {
+          ...state,
+          toasts: appendToasts(state.toasts, [
+            createToast('هذه الأرض مخصصة لمقر سفارة دبلوماسية', 'warning'),
           ]),
           pendingAudioCue: makeCue('error'),
         };
@@ -1892,6 +2018,272 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         previousPrices: action.previousPrices ?? state.previousPrices,
         inflationIndex: action.inflationIndex,
         ...(action.tickerMessage ? { tickerMessage: action.tickerMessage } : {}),
+      };
+    }
+
+    case 'SET_BORDER_OPEN': {
+      if (state.borderOpen === action.open) return state;
+      return {
+        ...state,
+        borderOpen: action.open,
+        toasts: appendToasts(state.toasts, [
+          createToast(
+            action.open
+              ? 'تم فتح حدود المملكة لتأشيرات السفر'
+              : 'تم إغلاق حدود المملكة أمام تأشيرات السفر الجديدة',
+            'info'
+          ),
+        ]),
+      };
+    }
+
+    case 'RESERVE_MARKET_LISTING': {
+      const qty = Math.max(0, Math.floor(action.qty));
+      if (qty <= 0) return state;
+      const cur = Math.max(0, state.warehouse[action.resource] ?? 0);
+      const deducted = Math.min(cur, qty);
+      if (deducted <= 0) return state;
+      return {
+        ...state,
+        warehouse: {
+          ...state.warehouse,
+          [action.resource]: cur - deducted,
+        },
+        toasts: appendToasts(state.toasts, [
+          createToast(
+            `تم عرض ${deducted} ${STRINGS.resources[action.resource]} في السوق العالمي`,
+            'success'
+          ),
+        ]),
+        pendingAudioCue: makeCue('trade'),
+      };
+    }
+
+    case 'RETURN_MARKET_STOCK': {
+      const qty = Math.max(0, Math.floor(action.qty));
+      if (qty <= 0) return state;
+      return {
+        ...state,
+        warehouse: {
+          ...state.warehouse,
+          [action.resource]: (state.warehouse[action.resource] ?? 0) + qty,
+        },
+        ...(action.toastMessage
+          ? {
+              toasts: appendToasts(state.toasts, [
+                createToast(action.toastMessage, 'info'),
+              ]),
+            }
+          : {}),
+      };
+    }
+
+    case 'APPLY_MARKET_PURCHASE': {
+      const qty = Math.max(0, Math.floor(action.qty));
+      const cost = Math.max(0, Math.floor(action.buyerPays));
+      if (qty <= 0) return state;
+      const nextGold = Math.max(0, state.gold - cost);
+      const nextLedger =
+        cost > 0
+          ? appendLedger(
+              state.ledger,
+              state.day,
+              'trade',
+              -cost,
+              `شراء ${STRINGS.resources[action.resource]} من ${action.sellerNameAr}`
+            )
+          : state.ledger;
+      return evaluateObjectivesAndProgression({
+        ...state,
+        gold: nextGold,
+        warehouse: {
+          ...state.warehouse,
+          [action.resource]: (state.warehouse[action.resource] ?? 0) + qty,
+        },
+        ledger: nextLedger,
+        toasts: appendToasts(state.toasts, [
+          createToast(
+            `تم شراء ${qty} ${STRINGS.resources[action.resource]} مقابل ${cost} ذهب`,
+            'success'
+          ),
+        ]),
+        pendingAudioCue: makeCue('trade'),
+      });
+    }
+
+    case 'COLLECT_MARKET_CLAIMS': {
+      const amount = Math.max(0, Math.floor(action.collectedGold));
+      if (amount <= 0) return state;
+      if (
+        state.lastMarketClaimAt !== undefined &&
+        action.claimUpdatedAt <= state.lastMarketClaimAt
+      ) {
+        return state;
+      }
+      const nextLedger = appendLedger(
+        state.ledger,
+        state.day,
+        'trade',
+        amount,
+        'مبيعات السوق العالمي'
+      );
+      return evaluateObjectivesAndProgression({
+        ...state,
+        gold: state.gold + amount,
+        ledger: nextLedger,
+        lastMarketClaimAt: action.claimUpdatedAt,
+        toasts: appendToasts(state.toasts, [
+          createToast(`تم تحصيل ${amount} ذهب من مبيعات السوق العالمي`, 'success'),
+        ]),
+        pendingAudioCue: makeCue('reward'),
+      });
+    }
+
+    case 'SETTLE_CITIZEN_MARKET_IMPORT': {
+      const pays = Math.max(0, Math.floor(action.buyerPays));
+      if (pays <= 0) return state;
+      const settledPalace = settleOnlineCitizenImport(state.palaceOfPeople, pays);
+      return {
+        ...state,
+        palaceOfPeople: settledPalace,
+        lastImportedFoodUnits: Math.max(
+          0,
+          (state.lastImportedFoodUnits ?? 0) - Math.max(0, Math.floor(action.boughtQty))
+        ),
+      };
+    }
+
+    case 'SET_EMBASSY_PLOTS': {
+      return {
+        ...state,
+        embassyPlots: action.plots,
+      };
+    }
+
+    case 'APPLY_EMBASSY_FEE_PAYMENT': {
+      const amount = Math.max(0, Math.floor(action.amount));
+      if (amount <= 0) return state;
+      const paid = Math.min(state.gold, amount);
+      const nextLedger =
+        paid > 0
+          ? appendLedger(state.ledger, state.day, 'trade', -paid, 'رسوم السفارات الشهرية')
+          : state.ledger;
+      return {
+        ...state,
+        gold: Math.max(0, state.gold - paid),
+        ledger: nextLedger,
+        ...(action.toastMessage
+          ? {
+              toasts: appendToasts(state.toasts, [
+                createToast(action.toastMessage, 'info'),
+              ]),
+            }
+          : {}),
+      };
+    }
+
+    case 'APPLY_EMBASSY_PRICE_SETTLEMENT': {
+      const amount = Math.max(0, Math.floor(action.amount));
+      if (amount <= 0) return state;
+      const paid = Math.min(state.gold, amount);
+      const nextLedger =
+        paid > 0
+          ? appendLedger(state.ledger, state.day, 'trade', -paid, 'ثمن أرض السفارة')
+          : state.ledger;
+      return {
+        ...state,
+        gold: Math.max(0, state.gold - paid),
+        ledger: nextLedger,
+        ...(action.toastMessage
+          ? {
+              toasts: appendToasts(state.toasts, [
+                createToast(action.toastMessage, 'info'),
+              ]),
+            }
+          : {}),
+      };
+    }
+
+    case 'COLLECT_EMBASSY_PAYMENTS': {
+      const amount = Math.max(0, Math.floor(action.collectedGold));
+      if (amount <= 0) return state;
+      if (
+        state.lastEmbassyPaymentAt !== undefined &&
+        action.claimUpdatedAt <= state.lastEmbassyPaymentAt
+      ) {
+        return state;
+      }
+      const nextLedger = appendLedger(
+        state.ledger,
+        state.day,
+        'trade',
+        amount,
+        'عائد استضافة سفارة'
+      );
+      return evaluateObjectivesAndProgression({
+        ...state,
+        gold: state.gold + amount,
+        ledger: nextLedger,
+        lastEmbassyPaymentAt: action.claimUpdatedAt,
+        toasts: appendToasts(state.toasts, [
+          createToast(`تم تحصيل ${amount} ذهب من عائد استضافة السفارات`, 'success'),
+        ]),
+        pendingAudioCue: makeCue('reward'),
+      });
+    }
+
+    case 'APPLY_VISA_DEPARTURE': {
+      const dep = applyVisaDepartureLocally(
+        state,
+        action.citizenId,
+        state.totalMonths
+      );
+      if (!dep) return state;
+      const rec: VisaGrantRecord = {
+        id: action.visaId,
+        month: state.totalMonths,
+        direction: 'out',
+        citizenName: dep.citizenName,
+        toUid: action.toUid,
+        toKingdomNameAr: action.toKingdomNameAr,
+      };
+      const prevHist = state.visaHistory ?? [];
+      const nextHist = [...prevHist, rec].slice(-40);
+      return {
+        ...dep.nextState,
+        visaHistory: nextHist,
+      };
+    }
+
+    case 'APPLY_VISA_ARRIVALS': {
+      if (action.arrivals.length === 0) return state;
+      const prevHist = state.visaHistory ?? [];
+      const seenIds = new Set(prevHist.map((h) => h.id));
+      const fresh = action.arrivals.filter((a) => !seenIds.has(a.visaId));
+      if (fresh.length === 0) return state;
+
+      const arr = applyVisaArrivalsLocally(
+        state,
+        fresh.map((f) => f.snapshot),
+        state.totalMonths
+      );
+      const newRecs: VisaGrantRecord[] = fresh.map((f) => ({
+        id: f.visaId,
+        month: state.totalMonths,
+        direction: 'in',
+        citizenName: f.snapshot.name,
+        toUid: f.fromUid,
+        toKingdomNameAr: f.fromKingdomNameAr,
+      }));
+      return {
+        ...arr.nextState,
+        visaHistory: [...prevHist, ...newRecs].slice(-40),
+        toasts: appendToasts(arr.nextState.toasts, [
+          createToast(
+            `وصل ${arr.addedCount} مسافر بتأشيرة إلى مملكتك`,
+            'success'
+          ),
+        ]),
       };
     }
 

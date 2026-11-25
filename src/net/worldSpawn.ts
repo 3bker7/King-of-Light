@@ -15,6 +15,10 @@ export function chebyshevOriginDistance(pos: WorldPos): number {
   return Math.max(Math.abs(pos.wx), Math.abs(pos.wy));
 }
 
+export function chebyshevWorldDistance(a: WorldPos, b: WorldPos): number {
+  return Math.max(Math.abs(a.wx - b.wx), Math.abs(a.wy - b.wy));
+}
+
 export function isChebyshevAdjacentToAny(
   pos: WorldPos,
   occupiedSet: ReadonlySet<string>

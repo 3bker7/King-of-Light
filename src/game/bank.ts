@@ -59,13 +59,15 @@ export function isEligibleCollateralCube(
   cubes: Cube[],
   cube: Cube,
   palaceCubeId: number | null,
-  campCubeId: number | null = null
+  campCubeId: number | null = null,
+  embassyCubeIds?: ReadonlySet<number>
 ): boolean {
   if (cube.owner !== 'player') return false;
   if (cube.themeId !== null || cube.secondThemeId !== null) return false;
   if (cube.isRocky) return false;
   if (palaceCubeId !== null && cube.id === palaceCubeId) return false;
   if (campCubeId !== null && cube.id === campCubeId) return false;
+  if (embassyCubeIds && embassyCubeIds.has(cube.id)) return false;
   if (cube.privateOwnerId != null) return false;
   if (cube.collateralLoanId != null) return false;
   return true;
@@ -433,12 +435,22 @@ export function executeTakeLoan(
   const palaceCubeId = palace ? palace.id : null;
 
   const campCubeId = state.camp?.cubeId ?? null;
+  const embassyCubeIds =
+    state.embassyPlots && state.embassyPlots.length > 0
+      ? new Set(state.embassyPlots.map((p) => p.cubeId))
+      : undefined;
   let collateralTotalValue = 0;
   for (const cid of action.collateralCubeIds) {
     const cube = state.cubes[cid];
     if (
       !cube ||
-      !isEligibleCollateralCube(state.cubes, cube, palaceCubeId, campCubeId)
+      !isEligibleCollateralCube(
+        state.cubes,
+        cube,
+        palaceCubeId,
+        campCubeId,
+        embassyCubeIds
+      )
     ) {
       return { state, success: false, errorAr: 'أحد الأراضي المختارة غير مؤهلة للرهن' };
     }

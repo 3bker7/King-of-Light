@@ -13,6 +13,7 @@ import type {
   ArrivalCamp,
   Citizen,
   Cube,
+  EmbassyPlotMarker,
   Province,
   ThemeId,
 } from '../game/types';
@@ -42,6 +43,7 @@ interface WorldCanvasProps {
   lastJoinedVillageSeq: number;
   lastDefectedCubeId: number | null;
   lastDefectedSeq: number;
+  embassyPlots?: EmbassyPlotMarker[];
   resetSignal: number;
   onCubeClick: (cubeId: number) => void;
   onCitizenClick: (agentId: number) => void;
@@ -69,6 +71,7 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
       lastJoinedVillageSeq,
       lastDefectedCubeId,
       lastDefectedSeq,
+      embassyPlots,
       resetSignal,
       onCubeClick,
       onCitizenClick,
@@ -105,6 +108,7 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
       lastJoinedVillageSeq,
       lastDefectedCubeId,
       lastDefectedSeq,
+      embassyPlots,
     });
 
     const [webglError, setWebglError] = useState(false);
@@ -168,6 +172,7 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
         lastJoinedVillageSeq,
         lastDefectedCubeId,
         lastDefectedSeq,
+        embassyPlots,
       });
     }, [
       cubes,
@@ -186,6 +191,7 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
       lastJoinedVillageSeq,
       lastDefectedCubeId,
       lastDefectedSeq,
+      embassyPlots,
     ]);
 
     // Element 4.1: Smoothly refit camera ONLY when owned-cell count changes (purchases & village joins)

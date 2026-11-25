@@ -4,6 +4,7 @@ import {
   Hammer,
   Heart,
   Home,
+  Plane,
   ScrollText,
   Shield,
   Users,
@@ -21,12 +22,15 @@ import type {
   PoliceRecordKind,
   ThemeId,
 } from '../game/types';
+import { pickVisaApplicants, VISA_FEE_GOLD } from '../game/visas';
+import type { WorldKingdom, WorldPos } from '../net/worldTypes';
 
 export type PalaceOfficeTab =
   | 'labor'
   | 'housing'
   | 'marriage'
   | 'police'
+  | 'travel'
   | 'citizens';
 
 interface PalaceOfficesOverlayProps {
@@ -35,6 +39,11 @@ interface PalaceOfficesOverlayProps {
   onChangeTab: (tab: PalaceOfficeTab) => void;
   onBuildHouseFromFax: () => void;
   onClose: () => void;
+  isOnlineWorld?: boolean;
+  myUid?: string | null;
+  myWorldPos?: WorldPos | null;
+  worldKingdoms?: WorldKingdom[];
+  onToggleBorderOpen?: (open: boolean) => void;
 }
 
 const ATTR_LABELS_AR: Record<CitizenAttrKey, string> = {
@@ -76,6 +85,11 @@ export function PalaceOfficesOverlay({
   onChangeTab,
   onBuildHouseFromFax,
   onClose,
+  isOnlineWorld = false,
+  myUid = null,
+  myWorldPos = null,
+  worldKingdoms = [],
+  onToggleBorderOpen,
 }: PalaceOfficesOverlayProps) {
   const { citizens, totalMonths, policeRecords, officeFaxes } = state;
 
@@ -136,6 +150,21 @@ export function PalaceOfficesOverlay({
   );
   const remainingCitizensCount = Math.max(0, citizens.length - MAX_CITIZEN_ROWS);
 
+  const visaApplicants = useMemo(() => {
+    if (!isOnlineWorld) return [];
+    return pickVisaApplicants(
+      state,
+      worldKingdoms,
+      myWorldPos ?? { wx: 0, wy: 0 },
+      myUid
+    );
+  }, [isOnlineWorld, myUid, myWorldPos, state, worldKingdoms]);
+
+  const visaHistory = useMemo(
+    () => (state.visaHistory ?? []).slice(-20).reverse(),
+    [state.visaHistory]
+  );
+
   const tabs: Array<{
     id: PalaceOfficeTab;
     label: string;
@@ -145,6 +174,7 @@ export function PalaceOfficesOverlay({
     { id: 'housing', label: 'الإسكان', icon: Home },
     { id: 'marriage', label: 'الزواج', icon: Heart },
     { id: 'police', label: 'الشرطة', icon: Shield },
+    { id: 'travel', label: 'مكتب السفر', icon: Plane },
     { id: 'citizens', label: 'سجل المواطنين', icon: Users },
   ];
 
@@ -514,6 +544,134 @@ export function PalaceOfficesOverlay({
                   })}
                 </div>
               )}
+            </div>
+          )}
+
+          {activeTab === 'travel' && (
+            <div className="space-y-3">
+              <div className="p-3 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <div className="font-extrabold text-[#2B2118]">
+                      سياسة الحدود والسفر
+                    </div>
+                    <div className="text-[10px] font-bold text-[#6F5C43]">
+                      رسوم التأشيرة {VISA_FEE_GOLD} ذهب يدفعها المسافر لقصر العالم (حتى 3 شهرياً)
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={!onToggleBorderOpen}
+                    onClick={() => onToggleBorderOpen?.(!state.borderOpen)}
+                    className={`px-3 py-1.5 rounded-lg text-[11px] font-extrabold transition-colors disabled:opacity-60 ${
+                      state.borderOpen
+                        ? 'bg-[#14524A] hover:bg-[#1B685E] text-white'
+                        : 'bg-[#A83629] hover:bg-[#8E2B20] text-white'
+                    }`}
+                  >
+                    {state.borderOpen ? 'الحدود مفتوحة' : 'الحدود مغلقة'}
+                  </button>
+                </div>
+                {!state.borderOpen && (
+                  <p className="text-[11px] font-bold text-[#8E2B20] bg-[#FBE2DF] border border-[#E5ABA3] rounded-lg px-2.5 py-1.5 leading-relaxed">
+                    الحدود مغلقة حالياً: لا تُصدر تأشيرات سفر جديدة، ويبقى المواطنون المستاؤون داخل المملكة مع استمرار أثر الاستياء على الرضا العام.
+                  </p>
+                )}
+              </div>
+
+              <div className="p-2.5 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-extrabold text-[#2B2118]">
+                    المتقدمون للسفر هذا الشهر
+                  </span>
+                  <span className="text-[11px] font-extrabold text-[#14524A] tabular-nums-latin">
+                    {visaApplicants.length} / 3
+                  </span>
+                </div>
+                {!isOnlineWorld ? (
+                  <p className="text-[11px] text-[#8A7759]">
+                    تُصدر تأشيرات السفر بين الممالك المجاورة عند الاتصال بالعالم المشترك فقط.
+                  </p>
+                ) : visaApplicants.length === 0 ? (
+                  <p className="text-[11px] text-[#8A7759]">
+                    لا يوجد مواطنون مؤهلون للسفر هذا الشهر أو لا توجد مملكة مجاورة بسمعة أعلى بـ 15 نقطة على الأقل ضمن مسافة 6 خطوات.
+                  </p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {visaApplicants.map((app) => {
+                      const c = citizenById.get(app.citizenId);
+                      return (
+                        <div
+                          key={app.citizenId}
+                          className="flex items-center justify-between gap-2 p-2 rounded-lg bg-[#F7EED8] border border-[#E7D8B4]"
+                        >
+                          <div className="min-w-0">
+                            <div className="font-extrabold text-[#2B2118] truncate">
+                              {c?.name ?? `مواطن #${app.citizenId}`}
+                            </div>
+                            <div className="text-[10px] font-bold text-[#6F5C43]">
+                              {app.reasonAr} · الثروة:{' '}
+                              <span className="tabular-nums-latin">
+                                {c?.wealth ?? 0}
+                              </span>{' '}
+                              ذهب
+                            </div>
+                          </div>
+                          <span className="px-2 py-0.5 rounded-md bg-[#E0EFEF] border border-[#8EC5C0] text-[#14524A] text-[10px] font-extrabold shrink-0">
+                            إلى {app.toKingdomNameAr}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <div className="p-2.5 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-extrabold text-[#2B2118]">
+                    سجل التأشيرات (المغادرون والقادمون)
+                  </span>
+                  <span className="text-[11px] font-extrabold text-[#8A5F12] tabular-nums-latin">
+                    {visaHistory.length} قيد
+                  </span>
+                </div>
+                {visaHistory.length === 0 ? (
+                  <p className="text-[11px] text-[#8A7759]">
+                    لم تُسجَّل حركات سفر بتأشيرات بعد.
+                  </p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {visaHistory.map((rec) => (
+                      <div
+                        key={rec.id}
+                        className="flex items-center justify-between gap-2 p-2 rounded-lg bg-[#F7EED8] border border-[#E7D8B4]"
+                      >
+                        <div className="min-w-0">
+                          <div className="font-extrabold text-[#2B2118] truncate">
+                            {rec.citizenName}
+                          </div>
+                          <div className="text-[10px] font-bold text-[#6F5C43]">
+                            {rec.direction === 'out'
+                              ? `غادر إلى ${rec.toKingdomNameAr ?? rec.toUid}`
+                              : `وصل من ${rec.toKingdomNameAr ?? rec.toUid}`}
+                          </div>
+                        </div>
+                        <span
+                          className={`px-2 py-0.5 rounded border text-[10px] font-extrabold shrink-0 tabular-nums-latin ${
+                            rec.direction === 'in'
+                              ? 'bg-[#E3F3E6] border-[#9CD0A7] text-[#2D6E3B]'
+                              : 'bg-[#F8E7C1] border-[#E2BA64] text-[#8A5F12]'
+                          }`}
+                        >
+                          {rec.direction === 'in' ? 'قادم' : 'مغادر'} · شهر{' '}
+                          {rec.month}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           )}
 

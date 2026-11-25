@@ -13,6 +13,8 @@ import {
 } from './components/Modals';
 import { Objectives, ObjectivesChip } from './components/Objectives';
 import { BankOverlay } from './components/BankOverlay';
+import { EmbassyOverlay } from './components/EmbassyOverlay';
+import { MarketOverlay } from './components/MarketOverlay';
 import {
   PalaceOfficesOverlay,
   type PalaceOfficeTab,
@@ -23,6 +25,7 @@ import { Ticker } from './components/Ticker';
 import { Toasts } from './components/Toasts';
 import { TopBar } from './components/TopBar';
 import { WorldCanvas, type WorldCanvasHandle } from './components/WorldCanvas';
+import { WorldMapOverlay } from './components/WorldMapOverlay';
 import { playAudioCue } from './game/audio';
 import {
   MATERIAL_PRODUCER_THEME,
@@ -64,6 +67,10 @@ import type {
   TradedResourceKey,
 } from './game/types';
 import {
+  applyVisaDepartureLocally,
+  pickVisaApplicants,
+} from './game/visas';
+import {
   CLOUD_SYNC_TOAST_AR,
   downloadCloudSaveIfNewer,
   uploadCloudSave,
@@ -81,15 +88,52 @@ import {
 import {
   ensureAndRollWorldBourse,
   fetchMyWorldBourseUsage,
+  getWorldEpochDay,
   pushWorldBourseVolumeDeltas,
   subscribeWorldBourse,
 } from './net/worldBourse';
 import {
+  approveEmbassyProposal,
+  collectEmbassyPayments,
+  fetchMyEmbassyAgreements,
+  fetchMyEmbassyPayment,
+  getActiveAlliedUids,
+  processEmbassyMonthlyFees,
+  proposeEmbassy,
+  reconcileEmbassyPlots,
+  rejectEmbassyProposal,
+  requestDissolveEmbassy,
+  settleEmbassyPricesDue,
+} from './net/worldEmbassies';
+import { fetchWorldKingdomsNearest } from './net/worldMap';
+import {
+  buyListing,
+  cancelListing,
+  checkMarketReturnsDue,
+  collectClaims,
+  executeOnlineCitizenFoodImport,
+  fetchActiveMarketListings,
+  fetchMyMarketClaim,
+  fetchMyMarketListings,
+  listResource,
+} from './net/worldMarket';
+import {
+  buildLocalFromWorldLines,
+  fetchOrCreateDailyWorldNewsletter,
+} from './net/worldNewsletter';
+import {
+  grantVisaTransaction,
+  receiveGrantedVisas,
+} from './net/worldVisas';
+import {
   ONLINE_BOURSE_DAILY_KINGDOM_CAP,
   type CloudSyncStatus,
+  type EmbassyAgreement,
+  type MarketListing,
   type OnlineWorldUser,
   type WorldBourse,
   type WorldKingdom,
+  type WorldNewsletter,
 } from './net/worldTypes';
 
 function initializeGame(): {
@@ -177,6 +221,11 @@ export default function App() {
     AdvisorTab | undefined
   >(undefined);
   const [sharedWorldOpen, setSharedWorldOpen] = useState(false);
+  const [marketOverlayOpen, setMarketOverlayOpen] = useState(false);
+  const [marketFilterSellerUid, setMarketFilterSellerUid] = useState<string | null>(null);
+  const [embassyOverlayOpen, setEmbassyOverlayOpen] = useState(false);
+  const [embassyTargetHostUid, setEmbassyTargetHostUid] = useState<string | null>(null);
+  const [worldMapOpen, setWorldMapOpen] = useState(false);
   const [resetSignal, setResetSignal] = useState(0);
 
   // Prompt 8 Shared World state (inert in local mode when firebaseConfig === null)
@@ -189,9 +238,19 @@ export default function App() {
   const [worldBourseUsedToday, setWorldBourseUsedToday] = useState<
     Partial<Record<TradedResourceKey, number>>
   >({});
+  const [worldKingdoms, setWorldKingdoms] = useState<WorldKingdom[]>([]);
+  const [marketListings, setMarketListings] = useState<MarketListing[]>([]);
+  const [myMarketListings, setMyMarketListings] = useState<MarketListing[]>([]);
+  const [pendingMarketClaimGold, setPendingMarketClaimGold] = useState(0);
+  const [embassyAgreements, setEmbassyAgreements] = useState<EmbassyAgreement[]>([]);
+  const [pendingEmbassyPaymentGold, setPendingEmbassyPaymentGold] = useState(0);
+  const [worldNewsletter, setWorldNewsletter] = useState<WorldNewsletter | null>(null);
+  const [worldPanelBusy, setWorldPanelBusy] = useState(false);
+  const [worldPanelError, setWorldPanelError] = useState<string | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
+  const isOnlineSession = Boolean(onlineConfigEnabled && worldUser);
   const isWorldBourseActive = Boolean(
     onlineConfigEnabled && worldUser && worldBourse
   );
@@ -200,6 +259,12 @@ export default function App() {
 
   const latestStateRef = useRef(state);
   latestStateRef.current = state;
+  const worldBourseRef = useRef(worldBourse);
+  worldBourseRef.current = worldBourse;
+  const worldKingdomsRef = useRef(worldKingdoms);
+  worldKingdomsRef.current = worldKingdoms;
+  const embassyAgreementsRef = useRef(embassyAgreements);
+  embassyAgreementsRef.current = embassyAgreements;
   const lastSavedTimeRef = useRef<number>(0);
   const lastSyncedMonthRef = useRef<number>(state.totalMonths);
   const worldBourseDayRef = useRef<number | null>(null);
@@ -227,6 +292,14 @@ export default function App() {
         setMyWorldKingdom(null);
         setWorldBourse(null);
         setWorldBourseUsedToday({});
+        setWorldKingdoms([]);
+        setMarketListings([]);
+        setMyMarketListings([]);
+        setPendingMarketClaimGold(0);
+        setEmbassyAgreements([]);
+        setPendingEmbassyPaymentGold(0);
+        setWorldNewsletter(null);
+        setWorldPanelError(null);
         setCloudSyncStatus('local-only');
         worldBourseDayRef.current = null;
       }
@@ -326,6 +399,118 @@ export default function App() {
       });
 
       if (active) {
+        // Hydrate Shared World directory, market, embassies, visas & daily newsletter
+        const myPosNow = workingState.myWorldPos ?? { wx: 0, wy: 0 };
+        const epochDay = getWorldEpochDay(Date.now());
+        const [
+          nearestKingdoms,
+          agreements,
+          activeListings,
+          mineListings,
+          claimGold,
+          embassyPayGold,
+        ] = await Promise.all([
+          fetchWorldKingdomsNearest(myPosNow, 200),
+          fetchMyEmbassyAgreements(worldUser.uid),
+          fetchActiveMarketListings(epochDay),
+          fetchMyMarketListings(worldUser.uid),
+          fetchMyMarketClaim(worldUser.uid),
+          fetchMyEmbassyPayment(worldUser.uid),
+        ]);
+        if (!active) return;
+
+        setWorldKingdoms(nearestKingdoms);
+        setEmbassyAgreements(agreements);
+        setMarketListings(activeListings);
+        setMyMarketListings(mineListings);
+        setPendingMarketClaimGold(claimGold);
+        setPendingEmbassyPaymentGold(embassyPayGold);
+
+        const reconciledPlots = reconcileEmbassyPlots(
+          workingState.embassyPlots,
+          agreements,
+          worldUser.uid,
+          workingState.cubes,
+          workingState.camp.cubeId
+        );
+        dispatch({ type: 'SET_EMBASSY_PLOTS', plots: reconciledPlots });
+
+        const awayWorldLines: string[] = [];
+
+        // Return any expired market listings
+        const expiredReturns = await checkMarketReturnsDue(worldUser.uid, epochDay);
+        if (!active) return;
+        let returnedUnitsTotal = 0;
+        for (const [resKey, qty] of Object.entries(
+          expiredReturns.returned
+        ) as Array<[TradedResourceKey, number | undefined]>) {
+          if (!qty || qty <= 0) continue;
+          returnedUnitsTotal += qty;
+          dispatch({
+            type: 'RETURN_MARKET_STOCK',
+            resource: resKey,
+            qty,
+            toastMessage: `استرداد ${qty} ${STRINGS.resources[resKey]} بعد انتهاء العرض`,
+          });
+          awayWorldLines.push(
+            `عادت ${qty} وحدة ${STRINGS.resources[resKey]} من عرض منتهي في السوق العالمي`
+          );
+        }
+
+        // Receive pending granted visas (atomic granted -> received)
+        const arrivedVisas = await receiveGrantedVisas(worldUser.uid);
+        if (!active) return;
+        if (arrivedVisas.length > 0) {
+          dispatch({ type: 'APPLY_VISA_ARRIVALS', arrivals: arrivedVisas });
+          awayWorldLines.push(
+            `وصل ${arrivedVisas.length} مسافر بتأشيرة من الممالك المجاورة`
+          );
+        }
+
+        if (claimGold > 0) {
+          awayWorldLines.push(`لديك ${claimGold} ذهب مستحقات مبيعات السوق العالمي بانتظار التحصيل`);
+        }
+        if (embassyPayGold > 0) {
+          awayWorldLines.push(`لديك ${embassyPayGold} ذهب عائد استضافة سفارات بانتظار التحصيل`);
+        }
+
+        if (awayWorldLines.length > 0) {
+          setAwayReport((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  worldSummary: {
+                    feesPaid: prev.worldSummary?.feesPaid ?? 0,
+                    arrearsAdded: prev.worldSummary?.arrearsAdded ?? 0,
+                    settlementsPaid: prev.worldSummary?.settlementsPaid ?? 0,
+                    settlementsCollected: prev.worldSummary?.settlementsCollected ?? 0,
+                    visasDeparted: prev.worldSummary?.visasDeparted ?? 0,
+                    visasArrived:
+                      (prev.worldSummary?.visasArrived ?? 0) + arrivedVisas.length,
+                    marketReturnsUnits:
+                      (prev.worldSummary?.marketReturnsUnits ?? 0) + returnedUnitsTotal,
+                    lines: [
+                      ...(prev.worldSummary?.lines ?? []),
+                      ...awayWorldLines,
+                    ],
+                  },
+                }
+              : prev
+          );
+        }
+
+        const activeEmbCount = agreements.filter((a) => a.status === 'active').length;
+        const nl = await fetchOrCreateDailyWorldNewsletter({
+          epochDay,
+          localState: workingState,
+          worldBourse: initialBourse,
+          kingdoms: nearestKingdoms,
+          activeEmbassiesCount: activeEmbCount,
+        });
+        if (active && nl) {
+          setWorldNewsletter(nl);
+        }
+
         setCloudSyncStatus('synced');
       }
     };
@@ -337,7 +522,14 @@ export default function App() {
     };
   }, [onlineConfigEnabled, worldUser]);
 
-  // Elements 1.3, 2.1, 3.3: Throttled month-boundary cloud save upload, registry refresh & People's Bank volume push
+  // Element N5.1: Online-only monthly append order AFTER local monthly processor completes
+  // 1. Citizen living-demand market import (M1.4)
+  // 2. Embassy monthly fees (N1.4)
+  // 3. Embassy land-price settlements due (N1.2)
+  // 4. Visa grants (N3.3)
+  // 5. Visa arrivals intake (N3.4)
+  // 6. Market returns-due (M1.2)
+  // 7. Cloud sync + registry update + People's Bank volume push (Part 1) + newsletter refresh
   useEffect(() => {
     if (!onlineConfigEnabled || !worldUser) {
       lastSyncedMonthRef.current = state.totalMonths;
@@ -352,44 +544,192 @@ export default function App() {
     const snapshot = state;
     const pos = myWorldKingdom
       ? { wx: myWorldKingdom.wx, wy: myWorldKingdom.wy }
-      : snapshot.myWorldPos ?? null;
+      : snapshot.myWorldPos ?? { wx: 0, wy: 0 };
 
     const runMonthSync = async () => {
-      // 1. Fire-and-forget cloud save backup
-      const up = await uploadCloudSave(worldUser.uid, snapshot);
+      const epochDay = getWorldEpochDay(Date.now());
+      let workingGold = snapshot.gold;
 
-      // 2. Refresh worldKingdoms/{uid} stats (goldBand only, never exact gold)
-      if (pos) {
-        try {
-          const updatedKingdom = await updateWorldKingdomRegistry(
-            worldUser.uid,
-            snapshot,
-            pos,
-            worldUser.displayName
-          );
-          if (!cancelled && updatedKingdom) {
-            setMyWorldKingdom(updatedKingdom);
-          }
-        } catch {
-          // Non-fatal: keep local play uninterrupted
+      // (1) Citizen living-demand online market import (M1.4)
+      if (
+        (snapshot.lastImportedFoodUnits ?? 0) > 0 &&
+        snapshot.lastMonthStats.importSink > 0
+      ) {
+        const importRes = await executeOnlineCitizenFoodImport({
+          buyerUid: worldUser.uid,
+          myReputation: snapshot.reputation,
+          neededUnits: snapshot.lastImportedFoodUnits ?? 0,
+          availableCitizenImportGold: snapshot.lastMonthStats.importSink,
+          currentWorldDay: epochDay,
+        });
+        if (!cancelled && importRes.boughtQty > 0 && importRes.buyerPays > 0) {
+          dispatch({
+            type: 'SETTLE_CITIZEN_MARKET_IMPORT',
+            buyerPays: importRes.buyerPays,
+            boughtQty: importRes.boughtQty,
+          });
         }
       }
 
-      // 3. Push People's Bank monthly bourse volumes to worldBourse/current (Element 3.3)
+      // Refresh agreements before embassy fee/settlement steps
+      let liveAgreements = await fetchMyEmbassyAgreements(worldUser.uid);
+      if (cancelled) return;
+
+      // (2) Embassy monthly fees (N1.4) — uses held worldInflationIndex, never guesses
+      const feeRes = await processEmbassyMonthlyFees({
+        guestUid: worldUser.uid,
+        totalMonths: snapshot.totalMonths,
+        worldInflationIndex: worldBourseRef.current?.inflationIndex ?? null,
+        availableGold: workingGold,
+        agreements: liveAgreements,
+      });
+      if (!cancelled && feeRes.totalFeesPaid > 0) {
+        workingGold = Math.max(0, workingGold - feeRes.totalFeesPaid);
+        dispatch({
+          type: 'APPLY_EMBASSY_FEE_PAYMENT',
+          amount: feeRes.totalFeesPaid,
+        });
+      }
+
+      // (3) Embassy land-price settlements due (N1.2)
+      const latestAgreementsAfterFee =
+        feeRes.updatedAgreements.length > 0
+          ? await fetchMyEmbassyAgreements(worldUser.uid)
+          : liveAgreements;
+      if (cancelled) return;
+      liveAgreements = latestAgreementsAfterFee;
+
+      const settleRes = await settleEmbassyPricesDue({
+        guestUid: worldUser.uid,
+        agreements: liveAgreements,
+        availableGold: workingGold,
+      });
+      if (!cancelled && settleRes.totalSettledGold > 0) {
+        workingGold = Math.max(0, workingGold - settleRes.totalSettledGold);
+        dispatch({
+          type: 'APPLY_EMBASSY_PRICE_SETTLEMENT',
+          amount: settleRes.totalSettledGold,
+        });
+      }
+
+      if (settleRes.settledAgreements.length > 0) {
+        liveAgreements = await fetchMyEmbassyAgreements(worldUser.uid);
+        if (cancelled) return;
+      }
+      setEmbassyAgreements(liveAgreements);
+      const nextPlots = reconcileEmbassyPlots(
+        latestStateRef.current.embassyPlots,
+        liveAgreements,
+        worldUser.uid,
+        latestStateRef.current.cubes,
+        latestStateRef.current.camp.cubeId
+      );
+      dispatch({ type: 'SET_EMBASSY_PLOTS', plots: nextPlots });
+
+      // (4) Visa grants (N3.3) — only when borderOpen
+      if (snapshot.borderOpen) {
+        const applicants = pickVisaApplicants(
+          snapshot,
+          worldKingdomsRef.current,
+          pos,
+          worldUser.uid
+        );
+        for (const app of applicants) {
+          if (cancelled) return;
+          const preview = applyVisaDepartureLocally(
+            latestStateRef.current,
+            app.citizenId,
+            snapshot.totalMonths
+          );
+          if (!preview) continue; // Wealth < 20 -> lapses silently, no debt, no departure
+          const gRes = await grantVisaTransaction({
+            fromUid: worldUser.uid,
+            fromKingdomNameAr: snapshot.kingdomNameAr ?? STRINGS.appName,
+            toUid: app.toUid,
+            snapshot: preview.snapshot,
+            month: snapshot.totalMonths,
+            citizenId: app.citizenId,
+          });
+          if (!cancelled && gRes.ok && gRes.visaId) {
+            dispatch({
+              type: 'APPLY_VISA_DEPARTURE',
+              citizenId: app.citizenId,
+              toUid: app.toUid,
+              toKingdomNameAr: app.toKingdomNameAr,
+              visaId: gRes.visaId,
+            });
+          }
+        }
+      }
+
+      // (5) Visa arrivals intake (N3.4)
+      const arrivedVisas = await receiveGrantedVisas(worldUser.uid);
+      if (!cancelled && arrivedVisas.length > 0) {
+        dispatch({ type: 'APPLY_VISA_ARRIVALS', arrivals: arrivedVisas });
+      }
+
+      // (6) Market returns-due (M1.2)
+      const returns = await checkMarketReturnsDue(worldUser.uid, epochDay);
+      if (!cancelled) {
+        for (const [resKey, qty] of Object.entries(
+          returns.returned
+        ) as Array<[TradedResourceKey, number | undefined]>) {
+          if (!qty || qty <= 0) continue;
+          dispatch({
+            type: 'RETURN_MARKET_STOCK',
+            resource: resKey,
+            qty,
+            toastMessage: `عادت ${qty} ${STRINGS.resources[resKey]} بعد انتهاء مدة العرض`,
+          });
+        }
+      }
+
+      // (7) Cloud save backup + registry update + People's Bank volume push + newsletter check
+      const finalSnap = latestStateRef.current;
+      const up = await uploadCloudSave(worldUser.uid, finalSnap);
+
+      try {
+        const updatedKingdom = await updateWorldKingdomRegistry(
+          worldUser.uid,
+          finalSnap,
+          pos,
+          worldUser.displayName
+        );
+        if (!cancelled && updatedKingdom) {
+          setMyWorldKingdom(updatedKingdom);
+        }
+      } catch {
+        // Non-fatal
+      }
+
       const hasBankVol =
-        Object.values(snapshot.dailyBought).some((v) => v > 0) ||
-        Object.values(snapshot.dailySold).some((v) => v > 0);
+        Object.values(finalSnap.dailyBought).some((v) => v > 0) ||
+        Object.values(finalSnap.dailySold).some((v) => v > 0);
       if (hasBankVol) {
         const nextCounts = await pushWorldBourseVolumeDeltas(worldUser.uid, {
-          bought: snapshot.dailyBought,
-          sold: snapshot.dailySold,
+          bought: finalSnap.dailyBought,
+          sold: finalSnap.dailySold,
         });
         if (!cancelled && nextCounts) {
           setWorldBourseUsedToday(nextCounts);
         }
       }
 
+      const [claimGold, embassyPayGold, nl] = await Promise.all([
+        fetchMyMarketClaim(worldUser.uid),
+        fetchMyEmbassyPayment(worldUser.uid),
+        fetchOrCreateDailyWorldNewsletter({
+          epochDay,
+          localState: finalSnap,
+          worldBourse: worldBourseRef.current,
+          kingdoms: worldKingdomsRef.current,
+          activeEmbassiesCount: liveAgreements.filter((a) => a.status === 'active').length,
+        }),
+      ]);
       if (!cancelled) {
+        setPendingMarketClaimGold(claimGold);
+        setPendingEmbassyPaymentGold(embassyPayGold);
+        if (nl) setWorldNewsletter(nl);
         setCloudSyncStatus(up.ok ? 'synced' : 'local-only');
       }
     };
@@ -476,7 +816,13 @@ export default function App() {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
-      if (sharedWorldOpen) {
+      if (worldMapOpen) {
+        setWorldMapOpen(false);
+      } else if (embassyOverlayOpen) {
+        setEmbassyOverlayOpen(false);
+      } else if (marketOverlayOpen) {
+        setMarketOverlayOpen(false);
+      } else if (sharedWorldOpen) {
         setSharedWorldOpen(false);
       } else if (advisorOverlayOpen) {
         setAdvisorOverlayOpen(false);
@@ -519,6 +865,9 @@ export default function App() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [
+    worldMapOpen,
+    embassyOverlayOpen,
+    marketOverlayOpen,
     sharedWorldOpen,
     advisorOverlayOpen,
     bankOverlayOpen,
@@ -1009,6 +1358,292 @@ export default function App() {
     });
   };
 
+  // Prompt 8 Part 2 & 3 interactive Shared World handlers (Market, Embassies, World Map)
+  const alliedUids = useMemo(
+    () => getActiveAlliedUids(embassyAgreements, worldUser?.uid ?? null),
+    [embassyAgreements, worldUser]
+  );
+
+  const kingdomsByUid = useMemo(() => {
+    const map = new Map<string, WorldKingdom>();
+    for (const k of worldKingdoms) map.set(k.uid, k);
+    return map;
+  }, [worldKingdoms]);
+
+  const pendingIncomingEmbassyCount = useMemo(() => {
+    if (!worldUser) return 0;
+    return embassyAgreements.filter(
+      (a) => a.hostUid === worldUser.uid && a.status === 'pending'
+    ).length;
+  }, [embassyAgreements, worldUser]);
+
+  const worldFromLocalLines = useMemo(() => {
+    if (!isWorldBourseActive || !worldBourse) return [];
+    return buildLocalFromWorldLines(worldBourse, state.inflationIndex);
+  }, [isWorldBourseActive, worldBourse, state.inflationIndex]);
+
+  const refreshMarketState = async () => {
+    if (!onlineConfigEnabled || !worldUser) return;
+    setWorldPanelBusy(true);
+    setWorldPanelError(null);
+    try {
+      const epochDay = getWorldEpochDay(Date.now());
+      const [activeL, mineL, claimGold] = await Promise.all([
+        fetchActiveMarketListings(epochDay),
+        fetchMyMarketListings(worldUser.uid),
+        fetchMyMarketClaim(worldUser.uid),
+      ]);
+      setMarketListings(activeL);
+      setMyMarketListings(mineL);
+      setPendingMarketClaimGold(claimGold);
+    } catch {
+      setWorldPanelError('تعذر تحديث بيانات السوق العالمي');
+    } finally {
+      setWorldPanelBusy(false);
+    }
+  };
+
+  const refreshEmbassyAndMapState = async () => {
+    if (!onlineConfigEnabled || !worldUser) return;
+    setWorldPanelBusy(true);
+    setWorldPanelError(null);
+    try {
+      const myPos = myWorldKingdom
+        ? { wx: myWorldKingdom.wx, wy: myWorldKingdom.wy }
+        : latestStateRef.current.myWorldPos ?? { wx: 0, wy: 0 };
+      const [kingdoms, agreements, payGold] = await Promise.all([
+        fetchWorldKingdomsNearest(myPos, 200),
+        fetchMyEmbassyAgreements(worldUser.uid),
+        fetchMyEmbassyPayment(worldUser.uid),
+      ]);
+      setWorldKingdoms(kingdoms);
+      setEmbassyAgreements(agreements);
+      setPendingEmbassyPaymentGold(payGold);
+      const nextPlots = reconcileEmbassyPlots(
+        latestStateRef.current.embassyPlots,
+        agreements,
+        worldUser.uid,
+        latestStateRef.current.cubes,
+        latestStateRef.current.camp.cubeId
+      );
+      dispatch({ type: 'SET_EMBASSY_PLOTS', plots: nextPlots });
+    } catch {
+      setWorldPanelError('تعذر تحديث بيانات السفارات والخريطة');
+    } finally {
+      setWorldPanelBusy(false);
+    }
+  };
+
+  const handleListMarketResource = async (
+    resource: TradedResourceKey,
+    qty: number,
+    unitPrice: number,
+    embassyOnly: boolean
+  ) => {
+    if (!onlineConfigEnabled || !worldUser) return;
+    setWorldPanelBusy(true);
+    setWorldPanelError(null);
+    try {
+      const cur = latestStateRef.current;
+      const res = await listResource({
+        uid: worldUser.uid,
+        sellerNameAr: cur.kingdomNameAr ?? STRINGS.appName,
+        sellerReputation: cur.reputation,
+        resource,
+        qty,
+        unitPrice,
+        embassyOnly,
+        localWarehouseStock: cur.warehouse[resource] ?? 0,
+      });
+      if (!res.ok) {
+        setWorldPanelError(res.errorAr ?? 'تعذر نشر العرض');
+      } else {
+        dispatch({ type: 'RESERVE_MARKET_LISTING', resource, qty });
+        await refreshMarketState();
+      }
+    } finally {
+      setWorldPanelBusy(false);
+    }
+  };
+
+  const handleCancelMarketListing = async (listingId: string) => {
+    if (!onlineConfigEnabled || !worldUser) return;
+    setWorldPanelBusy(true);
+    setWorldPanelError(null);
+    try {
+      const res = await cancelListing(worldUser.uid, listingId);
+      if (!res.ok) {
+        setWorldPanelError(res.errorAr ?? 'تعذر إلغاء العرض');
+      } else {
+        if (res.resource && res.returnedQty && res.returnedQty > 0) {
+          dispatch({
+            type: 'RETURN_MARKET_STOCK',
+            resource: res.resource,
+            qty: res.returnedQty,
+            toastMessage: `تم إلغاء العرض واسترداد ${res.returnedQty} ${STRINGS.resources[res.resource]}`,
+          });
+        }
+        await refreshMarketState();
+      }
+    } finally {
+      setWorldPanelBusy(false);
+    }
+  };
+
+  const handleBuyMarketListing = async (listingId: string, qty: number) => {
+    if (!onlineConfigEnabled || !worldUser) return;
+    setWorldPanelBusy(true);
+    setWorldPanelError(null);
+    try {
+      const cur = latestStateRef.current;
+      const res = await buyListing({
+        buyerUid: worldUser.uid,
+        listingId,
+        qty,
+        availableGold: cur.gold,
+      });
+      if (!res.ok || !res.resource || !res.boughtQty || res.buyerPays === undefined) {
+        setWorldPanelError(res.errorAr ?? 'تعذر إتمام الشراء');
+      } else {
+        dispatch({
+          type: 'APPLY_MARKET_PURCHASE',
+          resource: res.resource,
+          qty: res.boughtQty,
+          buyerPays: res.buyerPays,
+          sellerNameAr: res.sellerNameAr ?? 'مملكة',
+        });
+        await refreshMarketState();
+      }
+    } finally {
+      setWorldPanelBusy(false);
+    }
+  };
+
+  const handleCollectMarketClaims = async () => {
+    if (!onlineConfigEnabled || !worldUser) return;
+    setWorldPanelBusy(true);
+    setWorldPanelError(null);
+    try {
+      const res = await collectClaims(worldUser.uid);
+      if (!res.ok) {
+        setWorldPanelError(res.errorAr ?? 'تعذر تحصيل المستحقات');
+      } else if (res.collectedGold > 0) {
+        dispatch({
+          type: 'COLLECT_MARKET_CLAIMS',
+          collectedGold: res.collectedGold,
+          claimUpdatedAt: res.claimUpdatedAt,
+        });
+        setPendingMarketClaimGold(0);
+      }
+    } finally {
+      setWorldPanelBusy(false);
+    }
+  };
+
+  const handleProposeEmbassy = async (hostUid: string, priceAgreed: number) => {
+    if (!onlineConfigEnabled || !worldUser) return;
+    setWorldPanelBusy(true);
+    setWorldPanelError(null);
+    try {
+      const cur = latestStateRef.current;
+      const host = kingdomsByUid.get(hostUid);
+      const res = await proposeEmbassy({
+        guestUid: worldUser.uid,
+        guestNameAr: cur.kingdomNameAr ?? STRINGS.appName,
+        hostUid,
+        hostNameAr: host?.nameAr ?? 'مملكة مضيفة',
+        priceAgreed,
+        createdMonth: cur.totalMonths,
+      });
+      if (!res.ok) {
+        setWorldPanelError(res.errorAr ?? 'تعذر إرسال طلب السفارة');
+      } else {
+        await refreshEmbassyAndMapState();
+      }
+    } finally {
+      setWorldPanelBusy(false);
+    }
+  };
+
+  const handleApproveEmbassy = async (agreementId: string) => {
+    if (!onlineConfigEnabled || !worldUser) return;
+    setWorldPanelBusy(true);
+    setWorldPanelError(null);
+    try {
+      const res = await approveEmbassyProposal({
+        hostUid: worldUser.uid,
+        agreementId,
+        cubes: latestStateRef.current.cubes,
+        campCubeId: latestStateRef.current.camp.cubeId,
+        existingPlots: latestStateRef.current.embassyPlots,
+      });
+      if (!res.ok) {
+        setWorldPanelError(res.errorAr ?? 'تعذر قبول السفارة');
+      } else {
+        await refreshEmbassyAndMapState();
+      }
+    } finally {
+      setWorldPanelBusy(false);
+    }
+  };
+
+  const handleRejectEmbassy = async (agreementId: string) => {
+    if (!onlineConfigEnabled || !worldUser) return;
+    setWorldPanelBusy(true);
+    setWorldPanelError(null);
+    try {
+      const res = await rejectEmbassyProposal(worldUser.uid, agreementId);
+      if (!res.ok) {
+        setWorldPanelError(res.errorAr ?? 'تعذر رفض الطلب');
+      } else {
+        await refreshEmbassyAndMapState();
+      }
+    } finally {
+      setWorldPanelBusy(false);
+    }
+  };
+
+  const handleDissolveEmbassy = async (agreementId: string) => {
+    if (!onlineConfigEnabled || !worldUser) return;
+    setWorldPanelBusy(true);
+    setWorldPanelError(null);
+    try {
+      const res = await requestDissolveEmbassy({
+        actorUid: worldUser.uid,
+        agreementId,
+        currentTotalMonths: latestStateRef.current.totalMonths,
+      });
+      if (!res.ok) {
+        setWorldPanelError(res.errorAr ?? 'تعذر طلب حل السفارة');
+      } else {
+        await refreshEmbassyAndMapState();
+      }
+    } finally {
+      setWorldPanelBusy(false);
+    }
+  };
+
+  const handleCollectEmbassyPayments = async () => {
+    if (!onlineConfigEnabled || !worldUser) return;
+    setWorldPanelBusy(true);
+    setWorldPanelError(null);
+    try {
+      const res = await collectEmbassyPayments(worldUser.uid);
+      if (!res.ok) {
+        setWorldPanelError(res.errorAr ?? 'تعذر تحصيل عائد السفارات');
+      } else if (res.collectedGold > 0) {
+        dispatch({
+          type: 'COLLECT_EMBASSY_PAYMENTS',
+          collectedGold: res.collectedGold,
+          claimUpdatedAt: res.claimUpdatedAt,
+        });
+        setPendingEmbassyPaymentGold(0);
+      }
+    } finally {
+      setWorldPanelBusy(false);
+    }
+  };
+
   const handleNewGame = () => {
     setActiveBuildTheme(null);
     setInspectedShortTheme(null);
@@ -1029,6 +1664,9 @@ export default function App() {
     setBankOverlayOpen(false);
     setAdvisorOverlayOpen(false);
     setSharedWorldOpen(false);
+    setMarketOverlayOpen(false);
+    setEmbassyOverlayOpen(false);
+    setWorldMapOpen(false);
     setAwayReport(null);
     dispatch({ type: 'NEW_GAME' });
     setResetSignal((n) => n + 1);
@@ -1053,7 +1691,23 @@ export default function App() {
       <TopBar
         state={state}
         cloudSyncStatus={cloudSyncStatus}
+        isOnlineWorld={isOnlineSession}
+        pendingEmbassyProposals={pendingIncomingEmbassyCount}
         onOpenSharedWorld={() => setSharedWorldOpen(true)}
+        onOpenMarket={() => {
+          setMarketFilterSellerUid(null);
+          setMarketOverlayOpen(true);
+          void refreshMarketState();
+        }}
+        onOpenEmbassies={() => {
+          setEmbassyTargetHostUid(null);
+          setEmbassyOverlayOpen(true);
+          void refreshEmbassyAndMapState();
+        }}
+        onOpenWorldMap={() => {
+          setWorldMapOpen(true);
+          void refreshEmbassyAndMapState();
+        }}
         onOpenAdvisor={() => handleOpenAdvisor()}
         onOpenBourse={() => setBourseModalOpen(true)}
         onOpenSettings={() => setSettingsModalOpen(true)}
@@ -1133,6 +1787,7 @@ export default function App() {
             provinces={state.provinces}
             camp={state.camp}
             citizens={state.citizens}
+            embassyPlots={state.embassyPlots}
             lastJoinedVillageCubeId={state.lastJoinedVillageCubeId}
             lastJoinedVillageSeq={state.lastJoinedVillageSeq}
             lastDefectedCubeId={state.lastDefectedCubeId}
@@ -1240,6 +1895,15 @@ export default function App() {
           onChangeTab={setOpenOfficeTab}
           onBuildHouseFromFax={handleBuildHouseFromFax}
           onClose={() => setOpenOfficeTab(null)}
+          isOnlineWorld={isOnlineSession}
+          myUid={worldUser?.uid ?? null}
+          myWorldPos={
+            myWorldKingdom
+              ? { wx: myWorldKingdom.wx, wy: myWorldKingdom.wy }
+              : state.myWorldPos ?? null
+          }
+          worldKingdoms={worldKingdoms}
+          onToggleBorderOpen={(open) => dispatch({ type: 'SET_BORDER_OPEN', open })}
         />
       )}
 
@@ -1290,6 +1954,82 @@ export default function App() {
         />
       )}
 
+      {/* Prompt 8 Part 2 & 3 Overlays (ALL closed by default, never auto-open) */}
+      {marketOverlayOpen && (
+        <MarketOverlay
+          state={state}
+          isOnline={isOnlineSession}
+          myUid={worldUser?.uid ?? null}
+          listings={marketListings}
+          myListings={myMarketListings}
+          pendingClaimGold={pendingMarketClaimGold}
+          alliedUids={alliedUids}
+          kingdomsByUid={kingdomsByUid}
+          filterSellerUid={marketFilterSellerUid}
+          busy={worldPanelBusy}
+          errorMessage={worldPanelError}
+          onClearSellerFilter={() => setMarketFilterSellerUid(null)}
+          onRefresh={() => void refreshMarketState()}
+          onListResource={(r, q, p, e) => void handleListMarketResource(r, q, p, e)}
+          onCancelListing={(id) => void handleCancelMarketListing(id)}
+          onBuyListing={(id, q) => void handleBuyMarketListing(id, q)}
+          onCollectClaims={() => void handleCollectMarketClaims()}
+          onClose={() => setMarketOverlayOpen(false)}
+        />
+      )}
+
+      {embassyOverlayOpen && (
+        <EmbassyOverlay
+          isOnline={isOnlineSession}
+          myUid={worldUser?.uid ?? null}
+          worldInflationIndex={worldBourse?.inflationIndex ?? null}
+          agreements={embassyAgreements}
+          embassyPlots={state.embassyPlots}
+          kingdoms={worldKingdoms}
+          pendingEmbassyPaymentGold={pendingEmbassyPaymentGold}
+          initialTargetHostUid={embassyTargetHostUid}
+          busy={worldPanelBusy}
+          errorMessage={worldPanelError}
+          onRefresh={() => void refreshEmbassyAndMapState()}
+          onPropose={(hostUid, priceAgreed) =>
+            void handleProposeEmbassy(hostUid, priceAgreed)
+          }
+          onApprove={(id) => void handleApproveEmbassy(id)}
+          onReject={(id) => void handleRejectEmbassy(id)}
+          onDissolve={(id) => void handleDissolveEmbassy(id)}
+          onCollectPayments={() => void handleCollectEmbassyPayments()}
+          onClose={() => setEmbassyOverlayOpen(false)}
+        />
+      )}
+
+      {worldMapOpen && (
+        <WorldMapOverlay
+          myUid={worldUser?.uid ?? null}
+          myPos={
+            myWorldKingdom
+              ? { wx: myWorldKingdom.wx, wy: myWorldKingdom.wy }
+              : state.myWorldPos ?? { wx: 0, wy: 0 }
+          }
+          kingdoms={worldKingdoms}
+          agreements={embassyAgreements}
+          loading={worldPanelBusy}
+          onRefresh={() => void refreshEmbassyAndMapState()}
+          onProposeEmbassy={(hostUid) => {
+            setWorldMapOpen(false);
+            setEmbassyTargetHostUid(hostUid);
+            setEmbassyOverlayOpen(true);
+            void refreshEmbassyAndMapState();
+          }}
+          onOpenSellerMarket={(sellerUid) => {
+            setWorldMapOpen(false);
+            setMarketFilterSellerUid(sellerUid);
+            setMarketOverlayOpen(true);
+            void refreshMarketState();
+          }}
+          onClose={() => setWorldMapOpen(false)}
+        />
+      )}
+
       {/* Element 1.5 & 5.3: Bottom-left Toasts (with clickable focusCubeId navigation) */}
       <Toasts
         toasts={state.toasts}
@@ -1309,6 +2049,8 @@ export default function App() {
           isWorldBourse={isWorldBourseActive}
           worldBourseDay={worldBourse?.day ?? null}
           worldBourseUsedToday={worldBourseUsedToday}
+          worldNewsletter={worldNewsletter}
+          worldFromLocalLines={worldFromLocalLines}
           onTrade={handleTradeResource}
           onClose={() => setBourseModalOpen(false)}
         />

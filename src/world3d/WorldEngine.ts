@@ -11,6 +11,7 @@ import type {
   ArrivalCamp,
   Citizen,
   Cube,
+  EmbassyPlotMarker,
   Province,
   SlotIndex,
   ThemeId,
@@ -81,6 +82,8 @@ export interface WorldSyncPayload {
   lastJoinedVillageSeq?: number;
   lastDefectedCubeId?: number | null;
   lastDefectedSeq?: number;
+  // Prompt 8 Element N1.3: Hosted Embassy plots (presentation only)
+  embassyPlots?: EmbassyPlotMarker[];
 }
 
 interface ProvinceFlagAnim {
@@ -314,6 +317,13 @@ export class WorldEngine {
   private readonly purchasableGroup = new THREE.Group();
   private readonly privatePennantGroup = new THREE.Group();
   private readonly bankPennantGroup = new THREE.Group();
+  private readonly embassyGroup = new THREE.Group();
+  private readonly embassyBuildingHandles: BuildingVisualHandle[] = [];
+  private readonly embassyFlagDisposables: Array<{
+    geo: THREE.BufferGeometry;
+    mat: THREE.Material;
+  }> = [];
+  private lastEmbassySignature = '';
   private readonly fxGroup = new THREE.Group();
 
   private readonly waterMaterial: THREE.MeshStandardMaterial;
@@ -601,6 +611,7 @@ export class WorldEngine {
       this.campGroup,
       this.privatePennantGroup,
       this.bankPennantGroup,
+      this.embassyGroup,
       this.peopleAgents.group,
       this.fxGroup,
       this.hoverDecalMesh,
@@ -807,6 +818,7 @@ export class WorldEngine {
     this.syncBuildings(payload);
     this.syncProvinceVisuals(payload);
     this.syncArrivalCampVisuals(payload);
+    this.syncEmbassyPlots(payload, seaChanged);
     this.peopleAgents.sync(
       payload.cubes,
       payload.population,
@@ -1553,6 +1565,113 @@ export class WorldEngine {
         phase: cube.id * 0.9,
       });
     }
+  }
+
+  // Element N1.3: Render hosted embassy plots as reduced-scale palaces + guest province-color flag.
+  // Truth rule: exists ONLY for plots in payload.embassyPlots whose cube still qualifies (free player land cube).
+  private syncEmbassyPlots(
+    payload: WorldSyncPayload,
+    seaChanged: boolean
+  ): void {
+    const plots = payload.embassyPlots ?? [];
+    const sigParts: string[] = [];
+    for (let i = 0; i < plots.length; i++) {
+      const p = plots[i];
+      const c = payload.cubes[p.cubeId];
+      const valid =
+        c != null &&
+        c.owner === 'player' &&
+        c.themeId === null &&
+        c.secondThemeId === null &&
+        !c.isRocky &&
+        c.privateOwnerId == null &&
+        c.collateralLoanId == null;
+      if (valid) {
+        sigParts.push(`${p.agreementId}:${p.cubeId}:${p.guestColor ?? '#C9962E'}`);
+      }
+    }
+    const sig = sigParts.join('|');
+    if (sig === this.lastEmbassySignature && !seaChanged) return;
+    this.lastEmbassySignature = sig;
+
+    this.clearEmbassyPlots();
+
+    for (let i = 0; i < plots.length; i++) {
+      const p = plots[i];
+      const cube = payload.cubes[p.cubeId];
+      if (
+        !cube ||
+        cube.owner !== 'player' ||
+        cube.themeId !== null ||
+        cube.secondThemeId !== null ||
+        cube.isRocky ||
+        cube.privateOwnerId != null ||
+        cube.collateralLoanId != null
+      ) {
+        continue;
+      }
+
+      const center = cellToWorldCenter(cube.row, cube.col);
+      const groundY = getTerrainHeightAt(center.x, center.z, this.seaCoords);
+
+      // Reuse palace model builder at reduced scale (0.52)
+      const handle = createBuildingVisual(
+        this.buildingLib,
+        `embassy-${p.agreementId}`,
+        cube.id,
+        0,
+        'palace',
+        false
+      );
+      handle.root.scale.setScalar(0.52);
+      handle.root.position.set(center.x, groundY + 0.04, center.z);
+      handle.root.userData.cubeId = cube.id;
+      this.embassyGroup.add(handle.root);
+      this.embassyBuildingHandles.push(handle);
+
+      // Guest province-color flag beside the embassy (following Prompt 7 pennant machinery)
+      const flagColor =
+        typeof p.guestColor === 'string' && /^#[0-9A-Fa-f]{6}$/.test(p.guestColor)
+          ? p.guestColor
+          : '#C9962E';
+      const poleGeo = new THREE.CylinderGeometry(0.06, 0.08, 3.6, 6);
+      const poleMat = new THREE.MeshStandardMaterial({
+        color: 0x5c4630,
+        roughness: 0.7,
+      });
+      const pole = new THREE.Mesh(poleGeo, poleMat);
+      pole.position.set(center.x + 1.65, groundY + 1.8, center.z + 1.45);
+      pole.userData.cubeId = cube.id;
+      this.embassyGroup.add(pole);
+      this.embassyFlagDisposables.push({ geo: poleGeo, mat: poleMat });
+
+      const clothGeo = new THREE.PlaneGeometry(1.35, 0.78);
+      const clothMat = new THREE.MeshStandardMaterial({
+        color: new THREE.Color(flagColor),
+        roughness: 0.55,
+        side: THREE.DoubleSide,
+      });
+      const cloth = new THREE.Mesh(clothGeo, clothMat);
+      cloth.position.set(center.x + 2.3, groundY + 3.15, center.z + 1.45);
+      cloth.userData.cubeId = cube.id;
+      this.embassyGroup.add(cloth);
+      this.embassyFlagDisposables.push({ geo: clothGeo, mat: clothMat });
+    }
+  }
+
+  private clearEmbassyPlots(): void {
+    while (this.embassyGroup.children.length > 0) {
+      this.embassyGroup.remove(this.embassyGroup.children[0]);
+    }
+    for (const handle of this.embassyBuildingHandles) {
+      disposeBuildingVisual(handle, this.buildingLib);
+    }
+    this.embassyBuildingHandles.length = 0;
+    for (const item of this.embassyFlagDisposables) {
+      item.geo.dispose();
+      item.mat.dispose();
+    }
+    this.embassyFlagDisposables.length = 0;
   }
 
   private rebuildTerrainVerticesAndColors(
@@ -2556,6 +2675,7 @@ export class WorldEngine {
     this.resizeObserver.disconnect();
     this.unbindEvents();
 
+    this.clearEmbassyPlots();
     for (const handle of this.buildingsMap.values()) {
       disposeBuildingVisual(handle, this.buildingLib);
     }

@@ -93,6 +93,7 @@ export interface MonthlyProcessorInput {
   provinces?: Province[];
   camp?: ArrivalCamp;
   provinceEvents?: ProvinceEvent[];
+  embassyCubeIds?: ReadonlySet<number>;
   hungerFlag?: boolean;
   skipBriefing?: boolean;
   isOffline?: boolean;
@@ -136,6 +137,7 @@ export interface MonthlyProcessorResult {
   paid: number;
   unheldSlots: number;
   citizenSpentTotal: number;
+  importedFoodUnits: number;
   businessTaxCollected: number;
   offlineBankStats?: {
     loanInstallmentsPaid: number;
@@ -399,6 +401,7 @@ export function runMonthlyProcessor(
     landRequests: input.landRequests,
     totalMonths: nextTotalMonths,
     campCubeId: input.camp?.cubeId ?? null,
+    embassyCubeIds: input.embassyCubeIds,
   });
   const nextLandRequests = landReqRes.landRequests;
 
@@ -500,7 +503,8 @@ export function runMonthlyProcessor(
     citizens,
     cubes,
     nextTotalMonths,
-    prevCamp.cubeId
+    prevCamp.cubeId,
+    input.embassyCubeIds
   );
   citizens = campResult.citizens;
   const nextCamp = campResult.camp;
@@ -607,6 +611,7 @@ export function runMonthlyProcessor(
     paid,
     unheldSlots: distRes.unheldSlots,
     citizenSpentTotal: spendRes.totalCitizenSpent,
+    importedFoodUnits: spendRes.importedFoodUnits ?? 0,
     businessTaxCollected,
     offlineBankStats: bankRes.offlineStats,
     summary: {

@@ -239,6 +239,8 @@ export interface Citizen {
   employerId?: number | null;
   // Prompt 7 Arrival Camp marker (derived view over housing queue head)
   inCamp?: boolean;
+  // Prompt 8 Visa 12-month cooldown marker (hydrate default null)
+  lastVisaMonth?: number | null;
 }
 
 export type OfficeFaxStatus = 'unread' | 'read' | 'acted' | 'dismissed';
@@ -373,6 +375,36 @@ export interface AwayReportData {
   bankTradesCount?: number;
   // Prompt 7 Province offline events
   provinceEvents?: ProvinceEvent[];
+  // Prompt 8 Online away-report world settlements
+  worldSummary?: WorldAwaySummary;
+}
+
+export interface EmbassyPlotMarker {
+  agreementId: string;
+  cubeId: number;
+  guestUid: string;
+  guestNameAr?: string;
+  guestColor?: string;
+}
+
+export interface VisaGrantRecord {
+  id: string;
+  month: number;
+  citizenName: string;
+  toUid: string;
+  toKingdomNameAr?: string;
+  direction: 'out' | 'in';
+}
+
+export interface WorldAwaySummary {
+  feesPaid: number;
+  arrearsAdded: number;
+  settlementsPaid: number;
+  settlementsCollected: number;
+  visasDeparted: number;
+  visasArrived: number;
+  marketReturnsUnits: number;
+  lines: string[];
 }
 
 export interface Province {
@@ -518,6 +550,13 @@ export interface GameState {
   myWorldPos?: { wx: number; wy: number } | null;
   kingdomNameAr?: string;
   rulerName?: string;
+  // Prompt 8 Part 3 state fields (hydrate defaults: embassyPlots [], borderOpen true)
+  embassyPlots: EmbassyPlotMarker[];
+  borderOpen: boolean;
+  visaHistory?: VisaGrantRecord[];
+  lastMarketClaimAt?: number;
+  lastEmbassyPaymentAt?: number;
+  lastImportedFoodUnits?: number;
 }
 
 export interface PersistedSaveData {
@@ -580,6 +619,11 @@ export interface PersistedSaveData {
   myWorldPos?: { wx: number; wy: number } | null;
   kingdomNameAr?: string;
   rulerName?: string;
+  embassyPlots?: EmbassyPlotMarker[];
+  borderOpen?: boolean;
+  visaHistory?: VisaGrantRecord[];
+  lastMarketClaimAt?: number;
+  lastEmbassyPaymentAt?: number;
 }
 
 export interface StaffingStatus {

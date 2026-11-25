@@ -1,8 +1,11 @@
 import {
+  Compass,
   Frown,
   Globe,
+  Handshake,
   Meh,
   Settings,
+  ShoppingBag,
   Smile,
   Sparkles,
   Star,
@@ -20,7 +23,12 @@ import { ResourceIcon } from './ResourceIcon';
 interface TopBarProps {
   state: GameState;
   cloudSyncStatus: CloudSyncStatus;
+  isOnlineWorld?: boolean;
+  pendingEmbassyProposals?: number;
   onOpenSharedWorld: () => void;
+  onOpenMarket?: () => void;
+  onOpenEmbassies?: () => void;
+  onOpenWorldMap?: () => void;
   onOpenAdvisor: () => void;
   onOpenBourse: () => void;
   onOpenSettings: () => void;
@@ -29,7 +37,12 @@ interface TopBarProps {
 export function TopBar({
   state,
   cloudSyncStatus,
+  isOnlineWorld = false,
+  pendingEmbassyProposals = 0,
   onOpenSharedWorld,
+  onOpenMarket,
+  onOpenEmbassies,
+  onOpenWorldMap,
   onOpenAdvisor,
   onOpenBourse,
   onOpenSettings,
@@ -175,6 +188,48 @@ export function TopBar({
             }`}
           />
         </button>
+
+        {/* Online-only Shared World Overlays: Market, Embassies, World Map (hidden in local mode) */}
+        {isOnlineWorld && onOpenMarket && (
+          <button
+            type="button"
+            onClick={onOpenMarket}
+            title="السوق العالمي"
+            className="flex items-center gap-1 px-2 py-1 rounded-lg bg-[#0E3A34]/85 hover:bg-[#0B2E29] border border-[#2C7268] text-[#FBF3DF] text-xs font-extrabold transition-colors whitespace-nowrap shrink-0"
+          >
+            <ShoppingBag className="w-3.5 h-3.5 text-[#F2CA6B]" />
+            <span className="hidden xl:inline">السوق</span>
+          </button>
+        )}
+
+        {isOnlineWorld && onOpenEmbassies && (
+          <button
+            type="button"
+            onClick={onOpenEmbassies}
+            title="السفارات"
+            className="relative flex items-center gap-1 px-2 py-1 rounded-lg bg-[#0E3A34]/85 hover:bg-[#0B2E29] border border-[#2C7268] text-[#FBF3DF] text-xs font-extrabold transition-colors whitespace-nowrap shrink-0"
+          >
+            <Handshake className="w-3.5 h-3.5 text-[#A7D8CE]" />
+            <span className="hidden xl:inline">السفارات</span>
+            {pendingEmbassyProposals > 0 && (
+              <span className="px-1.5 py-0.2 rounded-md bg-[#C9962E] text-[#2B2118] text-[10px] font-black tabular-nums-latin leading-tight">
+                {pendingEmbassyProposals}
+              </span>
+            )}
+          </button>
+        )}
+
+        {isOnlineWorld && onOpenWorldMap && (
+          <button
+            type="button"
+            onClick={onOpenWorldMap}
+            title="خريطة العالم"
+            className="flex items-center gap-1 px-2 py-1 rounded-lg bg-[#0E3A34]/85 hover:bg-[#0B2E29] border border-[#2C7268] text-[#FBF3DF] text-xs font-extrabold transition-colors whitespace-nowrap shrink-0"
+          >
+            <Compass className="w-3.5 h-3.5 text-[#F2CA6B]" />
+            <span className="hidden xl:inline">الخريطة</span>
+          </button>
+        )}
 
         {/* Royal Advisor Trigger */}
         <button

@@ -60,7 +60,8 @@ export function isEligiblePrivateTargetCube(
   cube: Cube,
   pendingCubeIds: ReadonlySet<number>,
   palaceCubeId: number | null,
-  campCubeId: number | null = null
+  campCubeId: number | null = null,
+  embassyCubeIds?: ReadonlySet<number>
 ): boolean {
   if (cube.owner !== 'player') return false;
   if (cube.privateOwnerId != null) return false;
@@ -69,6 +70,7 @@ export function isEligiblePrivateTargetCube(
   if (cube.isRocky) return false;
   if (palaceCubeId !== null && cube.id === palaceCubeId) return false;
   if (campCubeId !== null && cube.id === campCubeId) return false;
+  if (embassyCubeIds && embassyCubeIds.has(cube.id)) return false;
   if (pendingCubeIds.has(cube.id)) return false;
   return true;
 }
@@ -231,6 +233,7 @@ export function runMonthlyLandRequests(input: {
   landRequests: LandRequest[];
   totalMonths: number;
   campCubeId?: number | null;
+  embassyCubeIds?: ReadonlySet<number>;
 }): {
   landRequests: LandRequest[];
   generated: LandRequest | null;
@@ -238,6 +241,7 @@ export function runMonthlyLandRequests(input: {
 } {
   const currentMonth = Math.max(0, Math.trunc(input.totalMonths));
   const campCubeId = input.campCubeId ?? null;
+  const embassyCubeIds = input.embassyCubeIds;
   const palace = findPalaceCube(input.cubes);
   const palaceCubeId = palace ? palace.id : null;
 
@@ -278,6 +282,7 @@ export function runMonthlyLandRequests(input: {
       cube.isRocky ||
       (palaceCubeId !== null && cube.id === palaceCubeId) ||
       (campCubeId !== null && cube.id === campCubeId) ||
+      (embassyCubeIds && embassyCubeIds.has(cube.id)) ||
       pendingCubeIds.has(cube.id) ||
       pendingCitizenIds.has(cit.id)
     ) {
@@ -303,7 +308,8 @@ export function runMonthlyLandRequests(input: {
       cube,
       pendingCubeIds,
       palaceCubeId,
-      campCubeId
+      campCubeId,
+      embassyCubeIds
     )
   );
   if (eligibleCubes.length === 0) {

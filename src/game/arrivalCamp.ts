@@ -29,7 +29,8 @@ export function borderDistance(cube: Pick<Cube, 'row' | 'col'>): number {
  */
 export function isValidCampCube(
   cube: Cube | undefined,
-  palaceCubeId: number | null
+  palaceCubeId: number | null,
+  embassyCubeIds?: ReadonlySet<number>
 ): boolean {
   if (!cube) return false;
   if (cube.owner !== 'player') return false;
@@ -39,6 +40,7 @@ export function isValidCampCube(
   if (cube.collateralLoanId != null) return false;
   if (cube.isRocky) return false;
   if (palaceCubeId !== null && cube.id === palaceCubeId) return false;
+  if (embassyCubeIds && embassyCubeIds.has(cube.id)) return false;
   return true;
 }
 
@@ -51,7 +53,8 @@ export function isValidCampCube(
 export function pickCampCubeId(
   cubes: Cube[],
   currentCampCubeId: number | null,
-  hasResidents: boolean
+  hasResidents: boolean,
+  embassyCubeIds?: ReadonlySet<number>
 ): number | null {
   if (!hasResidents) return null;
 
@@ -60,7 +63,7 @@ export function pickCampCubeId(
 
   if (
     currentCampCubeId !== null &&
-    isValidCampCube(cubes[currentCampCubeId], palaceCubeId)
+    isValidCampCube(cubes[currentCampCubeId], palaceCubeId, embassyCubeIds)
   ) {
     return currentCampCubeId;
   }
@@ -70,7 +73,7 @@ export function pickCampCubeId(
 
   for (let i = 0; i < cubes.length; i++) {
     const c = cubes[i];
-    if (!isValidCampCube(c, palaceCubeId)) continue;
+    if (!isValidCampCube(c, palaceCubeId, embassyCubeIds)) continue;
     const bd = borderDistance(c);
     if (bd < bestBorder || (bd === bestBorder && (!best || c.id < best.id))) {
       bestBorder = bd;
@@ -122,11 +125,17 @@ export function syncArrivalCamp(
   citizens: Citizen[],
   cubes: Cube[],
   totalMonths: number,
-  currentCampCubeId: number | null
+  currentCampCubeId: number | null,
+  embassyCubeIds?: ReadonlySet<number>
 ): SyncArrivalCampResult {
   const unhousedIds = getUnhousedQueueApplicantIds(citizens, totalMonths);
   const hasUnhoused = unhousedIds.length > 0;
-  const cubeId = pickCampCubeId(cubes, currentCampCubeId, hasUnhoused);
+  const cubeId = pickCampCubeId(
+    cubes,
+    currentCampCubeId,
+    hasUnhoused,
+    embassyCubeIds
+  );
 
   const residentIds =
     cubeId !== null ? unhousedIds.slice(0, CAMP_CAPACITY) : [];
@@ -165,7 +174,8 @@ export function sanitizeArrivalCampOnHydrate(
   citizens: Citizen[],
   cubes: Cube[],
   totalMonths: number,
-  rawCamp: ArrivalCamp | undefined
+  rawCamp: ArrivalCamp | undefined,
+  embassyCubeIds?: ReadonlySet<number>
 ): SyncArrivalCampResult {
   const candidateCubeId =
     rawCamp &&
@@ -176,7 +186,13 @@ export function sanitizeArrivalCampOnHydrate(
       ? rawCamp.cubeId
       : null;
 
-  return syncArrivalCamp(citizens, cubes, totalMonths, candidateCubeId);
+  return syncArrivalCamp(
+    citizens,
+    cubes,
+    totalMonths,
+    candidateCubeId,
+    embassyCubeIds
+  );
 }
 
 /**

@@ -13,11 +13,14 @@ Copy and paste the rules block below into **Firebase Console → Firestore Datab
 | `cloudKingdoms/{uid}` | Owner `uid` only | Owner `uid` only (`create`, `update`, `delete`) | Self-regarding backup only; `saveJson` string <= 900,000 bytes; `totalMonths >= 0`; `updatedAt` number. |
 | `worldBourse/current` | Any signed-in user | Signed-in user via **two** transaction shapes only | **(A) Volume increment:** `day`, `prices`, `inflationIndex` unchanged; each resource's `dailyBought`/`dailySold` increases by `0..500`. **(B) Day roll:** `day == prev.day + 1`, all volumes reset to `0`, all 16 prices within Prompt 2 Level 2 bands `[max(1, floor(base*0.6)), ceil(base*1.6)]`. |
 | `worldBourseVolumes/{dayUid}` | Owner `uid` only | Owner `uid` only (`create`, `update`) | Enforces per-kingdom daily volume cap of **500 units per resource** per world day (`dayUid == day + '_' + uid`). |
-| `worldPalace/current` | Any signed-in user | Signed-in user (`create`, `update` monotonic add only) | World fees flow IN only: `gold >= prev.gold` and delta `<= 100000`. Clients cannot withdraw or burn World Palace gold. |
-| `marketListings/{listingId}` | Any signed-in user | Seller (`create`/`update`/`delete`) OR Buyer claim (`update` qty decrease only) | `qty` in `1..10000`, `unitPrice` inside Prompt 2 bands for `resource`. Buyer claim may ONLY reduce `qty` (never change `sellerUid`, `resource`, `unitPrice`, `createdDay`, `expiresDay`, `embassyOnly`). |
-| `embassies/{agreementId}` | Signed-in user (host or guest, or directory read) | `hostUid` or `guestUid` only | Valid status in `['pending','active','suspended','dissolved']`, `priceAgreed >= 0 && <= 100000`, `feeArrearsMonths >= 0 && <= 12`. |
-| `worldKingdoms/{destUid}/visas/{visaId}` | Destination `destUid` or sender `fromUid` | Sender `fromUid` (`create` with `status == 'pending'`); Destination `destUid` (`update` status only) | Prevents forging sender identity or self-approving visas. |
-| `worldNewsletters/{day}` | Any signed-in user | Signed-in user (`create` once per day only; immutable) | `lines` list length `1..20`, `day >= 1`. |
+| `worldPalace/current` | Any signed-in user | Signed-in user (`create`, `update` monotonic add only) | World fees (5% market fees, monthly embassy fees, 20g visa fees) flow IN only: `gold >= prev.gold` and delta `<= 100000`. Clients cannot withdraw or burn World Palace gold. |
+| `marketListings/{listingId}` | Any signed-in user | Seller (`create`/`update`/`delete`) OR Buyer claim (`update` qty decrease only) | `qty` in `1..10000`, `unitPrice` in `[1, basePrice * 10]`. Buyer claim may ONLY reduce `qty` (never change `sellerUid`, `resource`, `unitPrice`, `createdDay`, `expiresDay`, `embassyOnly`). |
+| `marketClaims/{uid}` | Owner `uid` only (or buyer tx read) | Signed-in buyer (`create`/`update` monotonic increase `<= 1000000`) OR Owner `uid` (`update` to `pendingGold == 0` on collect) | Prevents stealing or reducing another seller's pending proceeds; only `uid` may zero `pendingGold` inside `collectClaims`. |
+| `marketStats/{day}` | Any signed-in user | Signed-in user (`create`/`update` monotonic volume add inside buy tx) | `totalVolume >= prev.totalVolume`, `delta <= 10000`, `largestSaleAmount >= prev.largestSaleAmount`. |
+| `embassyAgreements/{agreementId}` | Signed-in user | `hostUid` or `guestUid` only (`create`, `update`; no `delete`) | `agreementId == hostUid + '__' + guestUid`, `hostUid != guestUid`, `status in ['pending','active','suspended','dissolved']`, `priceAgreed in [100, 100000]`, `feeArrearsMonths in [0, 3]`, immutable `hostUid`/`guestUid`. |
+| `embassyPayments/{uid}` | Owner `uid` (or guest tx read) | Signed-in guest (`create`/`update` monotonic increase `<= 100000`) OR Owner `uid` (`update` to `pendingGold == 0` on collect) | Only the host `uid` may zero `embassyPayments/{uid}.pendingGold` inside `collectEmbassyPayments`. |
+| `visaApplications/{visaId}` | Sender `fromUid` or Destination `toUid` | Sender `fromUid` (`create` with `status == 'granted'`); Destination `toUid` (`update` `granted -> received` only) | Prevents forging sender identity, tampering with `citizenSnapshot`, or replaying an already-received visa. |
+| `worldNewsletter/{day}` | Any signed-in user | Signed-in user (`create` once per day only; immutable) | `lines` list length `1..7`, `day >= 0`, `day == string(data.day)`. |
 
 ---
 
@@ -72,6 +75,27 @@ service cloud.firestore {
         (r == 'tools'   && p >= 24  && p <= 64)  ||
         (r == 'jewelry' && p >= 132 && p <= 352) ||
         (r == 'oil'     && p >= 15  && p <= 40)
+      );
+    }
+
+    function isValidMarketUnitPrice(r, p) {
+      return p is int && p >= 1 && (
+        (r == 'fish'    && p <= 60)   ||
+        (r == 'crops'   && p <= 50)   ||
+        (r == 'wheat'   && p <= 50)   ||
+        (r == 'fruit'   && p <= 80)   ||
+        (r == 'meat'    && p <= 90)   ||
+        (r == 'bread'   && p <= 120)  ||
+        (r == 'wood'    && p <= 40)   ||
+        (r == 'water'   && p <= 20)   ||
+        (r == 'stone'   && p <= 70)   ||
+        (r == 'iron'    && p <= 140)  ||
+        (r == 'copper'  && p <= 180)  ||
+        (r == 'goldOre' && p <= 600)  ||
+        (r == 'gem'     && p <= 1200) ||
+        (r == 'tools'   && p <= 400)  ||
+        (r == 'jewelry' && p <= 2200) ||
+        (r == 'oil'     && p <= 250)
       );
     }
 
@@ -172,23 +196,6 @@ service cloud.firestore {
         && request.resource.data.updatedAt is int;
 
       allow delete: if false;
-
-      // 9. Visa Applications subcollection (readable by destination kingdom or sender)
-      match /visas/{visaId} {
-        allow read: if isSignedIn() && (request.auth.uid == uid || resource.data.fromUid == request.auth.uid);
-        allow create: if isSignedIn()
-          && request.resource.data.fromUid == request.auth.uid
-          && request.resource.data.fromUid != uid
-          && request.resource.data.status == 'pending'
-          && request.resource.data.month is int && request.resource.data.month >= 0
-          && request.resource.data.citizenSnapshot is map;
-        allow update: if isOwner(uid)
-          && request.resource.data.fromUid == resource.data.fromUid
-          && request.resource.data.month == resource.data.month
-          && request.resource.data.citizenSnapshot == resource.data.citizenSnapshot
-          && request.resource.data.status in ['approved', 'rejected', 'expired'];
-        allow delete: if false;
-      }
     }
 
     // 2. Atomic World Spawn Cell Locks (prevents position squatting)
@@ -295,18 +302,19 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // 7. Player-to-Player Market Listings
+    // 7. Player-to-Player Market Listings (price 1..10x base; buyer may only reduce qty)
     match /marketListings/{listingId} {
       allow read: if isSignedIn();
       allow create: if isSignedIn()
         && request.resource.data.sellerUid == request.auth.uid
         && isValidResource(request.resource.data.resource)
         && isIntInRange(request.resource.data.qty, 1, 10000)
-        && isValidPriceForResource(request.resource.data.resource, request.resource.data.unitPrice)
+        && isValidMarketUnitPrice(request.resource.data.resource, request.resource.data.unitPrice)
         && request.resource.data.embassyOnly is bool
         && request.resource.data.createdDay is int
         && request.resource.data.expiresDay is int
-        && request.resource.data.expiresDay >= request.resource.data.createdDay;
+        && request.resource.data.expiresDay >= request.resource.data.createdDay
+        && (request.resource.data.expiresDay - request.resource.data.createdDay) <= 30;
 
       allow update: if isSignedIn() && (
         // Seller edit
@@ -315,7 +323,7 @@ service cloud.firestore {
           && request.resource.data.sellerUid == resource.data.sellerUid
           && isValidResource(request.resource.data.resource)
           && isIntInRange(request.resource.data.qty, 0, 10000)
-          && isValidPriceForResource(request.resource.data.resource, request.resource.data.unitPrice)
+          && isValidMarketUnitPrice(request.resource.data.resource, request.resource.data.unitPrice)
         )
         ||
         // Buyer claim transaction: may ONLY decrease qty, all listing terms immutable
@@ -337,15 +345,75 @@ service cloud.firestore {
       allow delete: if isSignedIn() && resource.data.sellerUid == request.auth.uid;
     }
 
-    // 8. Embassy Agreements (host or guest only)
-    match /embassies/{agreementId} {
+    // 8. Seller Market Claims (buyers may only add; ONLY owner uid may zero on collect)
+    match /marketClaims/{uid} {
       allow read: if isSignedIn();
       allow create: if isSignedIn()
-        && (request.resource.data.hostUid == request.auth.uid || request.resource.data.guestUid == request.auth.uid)
+        && request.resource.data.keys().hasOnly(['uid', 'pendingGold', 'updatedAt'])
+        && request.resource.data.uid == uid
+        && isIntInRange(request.resource.data.pendingGold, 0, 1000000)
+        && request.resource.data.updatedAt is int;
+      allow update: if isSignedIn()
+        && request.resource.data.keys().hasOnly(['uid', 'pendingGold', 'updatedAt'])
+        && request.resource.data.uid == uid
+        && request.resource.data.updatedAt is int
+        && (
+          // Buyer crediting seller's claim (monotonic increase bounded)
+          (
+            request.resource.data.pendingGold is int
+            && request.resource.data.pendingGold >= resource.data.pendingGold
+            && (request.resource.data.pendingGold - resource.data.pendingGold) <= 1000000
+          )
+          ||
+          // Owner collecting claims (zeroing own pendingGold only)
+          (
+            isOwner(uid)
+            && request.resource.data.pendingGold == 0
+          )
+        );
+      allow delete: if false;
+    }
+
+    // 9. Daily Market Aggregate Stats (monotonic volume increment during buy transactions)
+    match /marketStats/{day} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && request.resource.data.keys().hasOnly([
+          'day', 'totalVolume', 'largestSaleAmount', 'largestSaleSellerNameAr', 'updatedAt'
+        ])
+        && request.resource.data.day is int && request.resource.data.day >= 0
+        && day == string(request.resource.data.day)
+        && isIntInRange(request.resource.data.totalVolume, 0, 10000)
+        && isIntInRange(request.resource.data.largestSaleAmount, 0, 1000000)
+        && request.resource.data.largestSaleSellerNameAr is string
+        && request.resource.data.largestSaleSellerNameAr.size() <= 40
+        && request.resource.data.updatedAt is int;
+      allow update: if isSignedIn()
+        && request.resource.data.keys().hasOnly([
+          'day', 'totalVolume', 'largestSaleAmount', 'largestSaleSellerNameAr', 'updatedAt'
+        ])
+        && request.resource.data.day == resource.data.day
+        && request.resource.data.totalVolume is int
+        && request.resource.data.totalVolume >= resource.data.totalVolume
+        && (request.resource.data.totalVolume - resource.data.totalVolume) <= 10000
+        && request.resource.data.largestSaleAmount is int
+        && request.resource.data.largestSaleAmount >= resource.data.largestSaleAmount
+        && request.resource.data.largestSaleSellerNameAr is string
+        && request.resource.data.largestSaleSellerNameAr.size() <= 40
+        && request.resource.data.updatedAt is int;
+      allow delete: if false;
+    }
+
+    // 10. Embassy Agreements (host or guest only; deterministic pair id)
+    match /embassyAgreements/{agreementId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && request.resource.data.guestUid == request.auth.uid
         && request.resource.data.hostUid != request.resource.data.guestUid
+        && agreementId == (request.resource.data.hostUid + '__' + request.resource.data.guestUid)
         && request.resource.data.status == 'pending'
-        && isIntInRange(request.resource.data.priceAgreed, 0, 100000)
-        && isIntInRange(request.resource.data.feeArrearsMonths, 0, 12)
+        && isIntInRange(request.resource.data.priceAgreed, 100, 100000)
+        && isIntInRange(request.resource.data.feeArrearsMonths, 0, 3)
         && request.resource.data.createdMonth is int && request.resource.data.createdMonth >= 0;
 
       allow update: if isSignedIn()
@@ -353,22 +421,73 @@ service cloud.firestore {
         && request.resource.data.hostUid == resource.data.hostUid
         && request.resource.data.guestUid == resource.data.guestUid
         && request.resource.data.status in ['pending', 'active', 'suspended', 'dissolved']
-        && isIntInRange(request.resource.data.priceAgreed, 0, 100000)
-        && isIntInRange(request.resource.data.feeArrearsMonths, 0, 12);
+        && isIntInRange(request.resource.data.priceAgreed, 100, 100000)
+        && isIntInRange(request.resource.data.feeArrearsMonths, 0, 3);
 
       allow delete: if false;
     }
 
-    // 10. Daily World Newsletter (create-once per world day)
-    match /worldNewsletters/{day} {
+    // 11. Host Embassy Land-Price Payments (guests may only add; ONLY host uid may zero on collect)
+    match /embassyPayments/{uid} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && request.resource.data.keys().hasOnly(['uid', 'pendingGold', 'updatedAt'])
+        && request.resource.data.uid == uid
+        && isIntInRange(request.resource.data.pendingGold, 0, 100000)
+        && request.resource.data.updatedAt is int;
+      allow update: if isSignedIn()
+        && request.resource.data.keys().hasOnly(['uid', 'pendingGold', 'updatedAt'])
+        && request.resource.data.uid == uid
+        && request.resource.data.updatedAt is int
+        && (
+          (
+            request.resource.data.pendingGold is int
+            && request.resource.data.pendingGold >= resource.data.pendingGold
+            && (request.resource.data.pendingGold - resource.data.pendingGold) <= 100000
+          )
+          ||
+          (
+            isOwner(uid)
+            && request.resource.data.pendingGold == 0
+          )
+        );
+      allow delete: if false;
+    }
+
+    // 12. Travel Visas (sender creates granted; ONLY destination toUid transitions granted -> received)
+    match /visaApplications/{visaId} {
+      allow read: if isSignedIn()
+        && (resource.data.fromUid == request.auth.uid || resource.data.toUid == request.auth.uid);
+      allow create: if isSignedIn()
+        && request.resource.data.fromUid == request.auth.uid
+        && request.resource.data.toUid is string
+        && request.resource.data.toUid != request.auth.uid
+        && request.resource.data.status == 'granted'
+        && request.resource.data.month is int && request.resource.data.month >= 0
+        && request.resource.data.citizenSnapshot is map
+        && request.resource.data.citizenSnapshot.wealth is int
+        && request.resource.data.citizenSnapshot.wealth >= 0;
+      allow update: if isSignedIn()
+        && resource.data.toUid == request.auth.uid
+        && resource.data.status == 'granted'
+        && request.resource.data.status == 'received'
+        && request.resource.data.fromUid == resource.data.fromUid
+        && request.resource.data.toUid == resource.data.toUid
+        && request.resource.data.month == resource.data.month
+        && request.resource.data.citizenSnapshot == resource.data.citizenSnapshot;
+      allow delete: if false;
+    }
+
+    // 13. Daily World Newsletter (create-once per world day; immutable)
+    match /worldNewsletter/{day} {
       allow read: if isSignedIn();
       allow create: if isSignedIn()
         && request.resource.data.keys().hasOnly(['day', 'lines'])
-        && request.resource.data.day is int && request.resource.data.day >= 1
+        && request.resource.data.day is int && request.resource.data.day >= 0
         && day == string(request.resource.data.day)
         && request.resource.data.lines is list
         && request.resource.data.lines.size() >= 1
-        && request.resource.data.lines.size() <= 20;
+        && request.resource.data.lines.size() <= 7;
       allow update, delete: if false;
     }
 

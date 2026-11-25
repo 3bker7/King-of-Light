@@ -1,4 +1,4 @@
-import { AlertTriangle, Clock, Coins, Flag, Landmark, ScrollText, TrendingUp, Users, Wallet } from 'lucide-react';
+import { AlertTriangle, Clock, Coins, Flag, Globe, Landmark, ScrollText, TrendingUp, Users, Wallet } from 'lucide-react';
 import { MAX_OFFLINE_SECONDS, TRADED_RESOURCES } from '../game/constants';
 import { formatDurationArabic, STRINGS } from '../game/strings';
 import type { AwayReportData } from '../game/types';
@@ -195,6 +195,21 @@ export function AwayReport({ report, onClose }: AwayReportProps) {
                       شهر {ev.month}
                     </span>
                   </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Prompt 8 Element N5.2: Shared World settlement summary (shown ONLY when online world events occurred) */}
+          {report.worldSummary && report.worldSummary.lines.length > 0 && (
+            <div className="p-2.5 rounded-xl bg-[#E6F2EF] border border-[#8CC3B8] space-y-1.5">
+              <div className="flex items-center gap-1.5 font-extrabold text-[#14524A]">
+                <Globe className="w-4 h-4 shrink-0" />
+                <span>أحداث العالم المشترك أثناء غيابك</span>
+              </div>
+              <ul className="space-y-1 max-h-28 overflow-y-auto pr-0.5 text-[11px] font-bold text-[#1E4B44]">
+                {report.worldSummary.lines.map((line, idx) => (
+                  <li key={`ws-${idx}`}>• {line}</li>
                 ))}
               </ul>
             </div>

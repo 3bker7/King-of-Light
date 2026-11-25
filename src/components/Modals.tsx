@@ -12,6 +12,7 @@ import {
 import { useState } from 'react';
 import { STRINGS } from '../game/strings';
 import type { GameState, TradedResourceKey } from '../game/types';
+import type { WorldNewsletter } from '../net/worldTypes';
 import { BoursePanel } from './BoursePanel';
 
 interface BourseModalProps {
@@ -19,6 +20,8 @@ interface BourseModalProps {
   isWorldBourse?: boolean;
   worldBourseDay?: number | null;
   worldBourseUsedToday?: Partial<Record<TradedResourceKey, number>>;
+  worldNewsletter?: WorldNewsletter | null;
+  worldFromLocalLines?: string[];
   onTrade: (
     resource: TradedResourceKey,
     side: 'buy' | 'sell',
@@ -32,6 +35,8 @@ export function BourseModal({
   isWorldBourse,
   worldBourseDay,
   worldBourseUsedToday,
+  worldNewsletter,
+  worldFromLocalLines,
   onTrade,
   onClose,
 }: BourseModalProps) {
@@ -76,6 +81,8 @@ export function BourseModal({
             isWorldBourse={isWorldBourse}
             worldBourseDay={worldBourseDay}
             worldBourseUsedToday={worldBourseUsedToday}
+            worldNewsletter={worldNewsletter}
+            worldFromLocalLines={worldFromLocalLines}
             onTrade={onTrade}
           />
         </div>

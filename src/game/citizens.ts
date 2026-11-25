@@ -372,6 +372,15 @@ export function generateInitialCitizens(
   return { citizens, nextCitizenId: nextId };
 }
 
+export interface ReconcileVisaArrival {
+  name: string;
+  gender: 'm' | 'f';
+  ageMonths: number;
+  attributes: CitizenAttrs;
+  wealth: number;
+  lastVisaMonth: number;
+}
+
 export interface ReconcileInput {
   citizens: Citizen[];
   nextCitizenId: number;
@@ -380,6 +389,8 @@ export interface ReconcileInput {
   citizenWealth: number;
   policeRecords: PoliceRecord[];
   rng?: () => number;
+  forcedEmigrateIds?: ReadonlySet<number>;
+  visaArrivals?: ReadonlyArray<ReconcileVisaArrival>;
 }
 
 export interface ReconcileResult {
@@ -483,6 +494,80 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
   const policeRecords: PoliceRecord[] = [...input.policeRecords];
   let birthsCount = 0;
   let cvsFiledCount = 0;
+
+  const removeCitizensById = (idsToRemove: Set<number>) => {
+    const leaving = list.filter((c) => idsToRemove.has(c.id));
+    for (const remCitizen of leaving) {
+      nextCitizenWealth = Math.max(0, nextCitizenWealth - remCitizen.wealth);
+      if (remCitizen.spouseId !== null && !idsToRemove.has(remCitizen.spouseId)) {
+        const spouse = list.find((s) => s.id === remCitizen.spouseId);
+        if (spouse) {
+          spouse.spouseId = null;
+          spouse.marriedMonth = null;
+          policeRecords.push(
+            createPoliceRecord(
+              totalMonths,
+              'dissolution',
+              `انفصال أسري بعد مغادرة ${remCitizen.name} — تبقى ${spouse.name} في المملكة`,
+              [remCitizen.id, spouse.id]
+            )
+          );
+        }
+      }
+    }
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (idsToRemove.has(list[i].id)) {
+        list.splice(i, 1);
+      }
+    }
+  };
+
+  // Optional online visa departures (untouched in local mode)
+  if (input.forcedEmigrateIds && input.forcedEmigrateIds.size > 0) {
+    removeCitizensById(new Set(input.forcedEmigrateIds));
+  }
+
+  // Optional online visa arrivals (untouched in local mode)
+  if (input.visaArrivals && input.visaArrivals.length > 0) {
+    const clampVisaAttr = (v: number): number =>
+      Math.max(1, Math.min(100, Number.isFinite(v) ? Math.round(v) : 50));
+    for (const arrival of input.visaArrivals) {
+      if (list.length >= target) break;
+      const id = nextId++;
+      const hhId = nextHouseholdId++;
+      const safeAge = Math.max(
+        14,
+        Math.min(85, Number.isFinite(arrival.ageMonths) ? Math.trunc(arrival.ageMonths) : 24)
+      );
+      list.push({
+        id,
+        name: arrival.name,
+        gender: arrival.gender === 'f' ? 'f' : 'm',
+        birthMonth: totalMonths - safeAge,
+        householdId: hhId,
+        homeCubeId: null,
+        spouseId: null,
+        parentIds: null,
+        jobCubeId: null,
+        jobSlot: null,
+        jobThemeId: null,
+        wealth: Math.max(0, Math.floor(Number.isFinite(arrival.wealth) ? arrival.wealth : 0)),
+        attrs: {
+          physical: clampVisaAttr(arrival.attributes.physical),
+          professional: clampVisaAttr(arrival.attributes.professional),
+          social: clampVisaAttr(arrival.attributes.social),
+          health: clampVisaAttr(arrival.attributes.health),
+          intelligence: clampVisaAttr(arrival.attributes.intelligence),
+        },
+        cvFiled: true,
+        cvFiledMonth: totalMonths,
+        housingRequestMonth: totalMonths,
+        marriedMonth: null,
+        lastVisaMonth: Math.min(totalMonths, Math.trunc(arrival.lastVisaMonth)),
+      });
+      cvsFiledCount += 1;
+    }
+  }
 
   // GROWTH: prefer births when an eligible married housed couple exists; else arrivals
   while (list.length < target) {
@@ -677,33 +762,6 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
   }
 
   // EMIGRATION: unemployed single adults first, then oldest singles; child < 14 never leaves alone
-  const removeCitizensById = (idsToRemove: Set<number>) => {
-    const leaving = list.filter((c) => idsToRemove.has(c.id));
-    for (const remCitizen of leaving) {
-      nextCitizenWealth = Math.max(0, nextCitizenWealth - remCitizen.wealth);
-      if (remCitizen.spouseId !== null && !idsToRemove.has(remCitizen.spouseId)) {
-        const spouse = list.find((s) => s.id === remCitizen.spouseId);
-        if (spouse) {
-          spouse.spouseId = null;
-          spouse.marriedMonth = null;
-          policeRecords.push(
-            createPoliceRecord(
-              totalMonths,
-              'dissolution',
-              `انفصال أسري بعد مغادرة ${remCitizen.name} — تبقى ${spouse.name} في المملكة`,
-              [remCitizen.id, spouse.id]
-            )
-          );
-        }
-      }
-    }
-    for (let i = list.length - 1; i >= 0; i--) {
-      if (idsToRemove.has(list[i].id)) {
-        list.splice(i, 1);
-      }
-    }
-  };
-
   while (list.length > target) {
     const rem = list.length - target;
 
@@ -999,6 +1057,11 @@ export function sanitizeCitizensOnHydrate(
         ? Math.min(safeTotalMonths, Math.trunc(raw.deniedLandMonth))
         : null;
 
+    const lastVisaMonth =
+      typeof raw.lastVisaMonth === 'number' && Number.isFinite(raw.lastVisaMonth)
+        ? Math.min(safeTotalMonths, Math.trunc(raw.lastVisaMonth))
+        : null;
+
     sanitized.push({
       id,
       name:
@@ -1019,6 +1082,7 @@ export function sanitizeCitizensOnHydrate(
       jobThemeId,
       employerId,
       deniedLandMonth,
+      lastVisaMonth,
       wealth,
       attrs,
       cvFiled,
