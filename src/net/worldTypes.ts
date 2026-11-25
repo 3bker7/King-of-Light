@@ -81,6 +81,21 @@ export interface MarketListing {
   createdDay: number;
   expiresDay: number;
   embassyOnly: boolean;
+  sellerReputation?: number;
+}
+
+export interface MarketClaimDoc {
+  uid: string;
+  pendingGold: number;
+  updatedAt: number;
+}
+
+export interface MarketStatsDoc {
+  day: number;
+  totalVolume: number;
+  largestSaleAmount: number;
+  largestSaleSellerNameAr: string;
+  updatedAt: number;
 }
 
 export type EmbassyStatus = 'pending' | 'active' | 'suspended' | 'dissolved';
@@ -93,6 +108,20 @@ export interface EmbassyAgreement {
   priceAgreed: number;
   feeArrearsMonths: number;
   createdMonth: number;
+  lastFeeMonth?: number;
+  priceSettled?: boolean;
+  dissolveEffectiveMonth?: number | null;
+  rejectedMonth?: number | null;
+  guestColor?: string;
+  hostNameAr?: string;
+  guestNameAr?: string;
+  updatedAt?: number;
+}
+
+export interface EmbassyPaymentDoc {
+  uid: string;
+  pendingGold: number;
+  updatedAt: number;
 }
 
 export interface CitizenSnapshot {
@@ -103,14 +132,23 @@ export interface CitizenSnapshot {
   wealth: number;
 }
 
-export type VisaStatus = 'pending' | 'approved' | 'rejected' | 'expired';
+export type VisaStatus =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'expired'
+  | 'granted'
+  | 'received';
 
 export interface VisaApplication {
   id: string;
   fromUid: string;
+  toUid?: string;
   citizenSnapshot: CitizenSnapshot;
   status: VisaStatus;
   month: number;
+  fromKingdomNameAr?: string;
+  updatedAt?: number;
 }
 
 export interface WorldPalace {
@@ -126,6 +164,10 @@ export interface OnlineWorldUser {
   uid: string;
   email: string | null;
   displayName: string | null;
+}
+
+export function makeEmbassyAgreementId(hostUid: string, guestUid: string): string {
+  return `${hostUid}__${guestUid}`;
 }
 
 /**

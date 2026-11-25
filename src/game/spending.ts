@@ -76,6 +76,7 @@ export interface CitizenSpendingResult {
   privateOwnerGains: number;
   foodUnitsSold: number;
   usedImports: boolean;
+  importedFoodUnits?: number;
 }
 
 interface StaffedVenueSlot {
@@ -190,6 +191,7 @@ export function runCitizenSpending(
       privateOwnerGains: 0,
       foodUnitsSold: 0,
       usedImports: false,
+      importedFoodUnits: 0,
     };
   }
 
@@ -279,6 +281,8 @@ export function runCitizenSpending(
   let treasuryLeisureGain = 0;
   let privateOwnerGains = 0;
   let foodUnitsSold = 0;
+  let importedFoodUnits = 0;
+  let importedFoodUnits = 0;
 
   // =========================================================================
   // 2.2 FOOD SPENDING (essentials BEFORE luxuries)
@@ -336,6 +340,7 @@ export function runCitizenSpending(
         const paid = deductSequentially(payers, fullHouseholdCost);
         stats.importSink += paid;
         totalCitizenSpent += paid;
+        importedFoodUnits += householdSize;
       } else {
         const importUnitCost = Math.max(1, Math.round(unitCost * 1.5));
         const boughtUnits = Math.min(
@@ -346,6 +351,7 @@ export function runCitizenSpending(
           const paid = deductSequentially(payers, boughtUnits * importUnitCost);
           stats.importSink += paid;
           totalCitizenSpent += paid;
+          importedFoodUnits += boughtUnits;
         }
         stats.unmetFood += Math.max(0, householdSize - boughtUnits);
       }
@@ -488,5 +494,24 @@ export function runCitizenSpending(
     privateOwnerGains,
     foodUnitsSold,
     usedImports,
+    importedFoodUnits,
+  };
+}
+
+/**
+ * Element M1.4:
+ * Pure settlement helper when online citizens purchase imported food from the Global Market.
+ * Moves `buyerPays` (capped to the local palace's collected import gold) from the local Palace sink
+ * to the remote Global Market sale (seller claim + World Palace); unmet remainder stays in local Palace.
+ * Never called in local mode.
+ */
+export function settleOnlineCitizenImport(
+  palaceOfPeople: PalaceOfPeople,
+  buyerPays: number
+): PalaceOfPeople {
+  const safePaid = Math.max(0, Math.floor(buyerPays));
+  return {
+    ...palaceOfPeople,
+    gold: Math.max(0, Math.floor(palaceOfPeople.gold) - safePaid),
   };
 }
