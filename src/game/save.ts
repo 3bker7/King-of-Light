@@ -28,6 +28,10 @@ import {
   sanitizeOfficeFaxesOnHydrate,
 } from './advisor';
 import {
+  sanitizeArrivalCampOnHydrate,
+  syncArrivalCamp,
+} from './arrivalCamp';
+import {
   BANK_START_GOLD,
   PALACE_START_GOLD,
   TRUST_START,
@@ -46,11 +50,22 @@ import { cleanupEmigratedPrivateOwners, syncPrivateAds } from './privateJobs';
 import { sanitizePrivateLandOnHydrate } from './privateLand';
 import {
   computeStaffing,
+  findPalaceCube,
   getGoldServiceAuraBonus,
   getSeaFishOutput,
   isAdjacentToOwned,
   makeSlotKey,
 } from './production';
+import {
+  computeProvinces,
+  createProvinceEvent,
+  diffProvincesForEvents,
+  findProvinceForCube,
+  formatProvinceTitle,
+  PALACE_PROVINCE_NAME,
+  recordProvinceEvents,
+  sanitizeProvinceEventsOnHydrate,
+} from './provinces';
 import { createZeroLastMonthStats } from './spending';
 import { STRINGS } from './strings';
 import { computeTaxMoodDelta, sanitizeTaxPolicyOnHydrate } from './taxPolicy';
@@ -71,6 +86,7 @@ import type {
   PoliceRecord,
   PriceMoveSummary,
   PrivateAd,
+  ProvinceEvent,
   SlotIndex,
   TaxPolicy,
   ThemeId,
@@ -127,6 +143,9 @@ export function serializeGameState(state: GameState, now: number): PersistedSave
     advisorBriefing: state.advisorBriefing,
     taxPolicy: state.taxPolicy,
     decrees: state.decrees,
+    camp: state.camp,
+    pendingArrivals: state.pendingArrivals,
+    provinceEvents: state.provinceEvents,
   };
 }
 
@@ -415,6 +434,27 @@ export function simulateOfflineProgress(
   let nextDecrees: Decree[] = sanitizeDecreesOnHydrate(saved.decrees);
   let nextAdvisorBriefing: AdvisorBriefing | null = saved.advisorBriefing ?? null;
 
+  // Prompt 7 Element 5: Sanitize provinceEvents & arrival camp before offline loops (provinces always derived fresh)
+  let nextProvinceEvents: ProvinceEvent[] = sanitizeProvinceEventsOnHydrate(
+    saved.provinceEvents,
+    nextCubes.length
+  );
+  let currentProvinces = computeProvinces({
+    cubes: nextCubes,
+    citizens: nextCitizens,
+    population: nextPopulation,
+  });
+  const hydratedCamp = sanitizeArrivalCampOnHydrate(
+    nextCitizens,
+    nextCubes,
+    startTotalMonths,
+    saved.camp
+  );
+  nextCitizens = hydratedCamp.citizens;
+  let nextCamp = hydratedCamp.camp;
+  let nextPendingArrivals = hydratedCamp.pendingArrivals;
+  const offlineProvinceEvents: ProvinceEvent[] = [];
+
   const pricesBeforeAway = { ...nextPrices };
   const resourcesProduced: Partial<Record<TradedResourceKey, number>> = {};
   let goldEarnedByShops = 0;
@@ -635,6 +675,33 @@ export function simulateOfflineProgress(
           if (c.villageName) {
             nextTicker = STRINGS.bourse.tickerVillageJoined(c.villageName);
           }
+
+          // Prompt 7 Element 5.3: Record offline village join & any resulting province formation idempotently
+          const curDay = saved.day + d + 1;
+          const curEventMonth =
+            Math.floor((Math.max(1, curDay) - 1) / MONTH_DAYS) + 1;
+          const prevProvs = currentProvinces;
+          currentProvinces = computeProvinces({
+            cubes: nextCubes,
+            citizens: nextCitizens,
+            population: nextPopulation,
+          });
+          const joinedProv = findProvinceForCube(currentProvinces, c.id);
+          const provTitle = formatProvinceTitle(
+            joinedProv ? joinedProv.nameAr : PALACE_PROVINCE_NAME
+          );
+          const joinLabel = c.villageName
+            ? `انضمت قرية ${c.villageName} إلى ${provTitle}`
+            : `انضمت قرية جديدة إلى ${provTitle}`;
+          const joinAdditions: ProvinceEvent[] = [
+            createProvinceEvent('village_joined', curEventMonth, c.id, joinLabel),
+            ...diffProvincesForEvents(prevProvs, currentProvinces, curEventMonth),
+          ];
+          const recEv = recordProvinceEvents(nextProvinceEvents, joinAdditions);
+          nextProvinceEvents = recEv.events;
+          if (recEv.added.length > 0) {
+            offlineProvinceEvents.push(...recEv.added);
+          }
         }
       } else {
         c.villageLoyaltyDays = 0;
@@ -744,6 +811,9 @@ export function simulateOfflineProgress(
       taxPolicy: nextTaxPolicy,
       decrees: nextDecrees,
       advisorBriefing: nextAdvisorBriefing,
+      provinces: currentProvinces,
+      camp: nextCamp,
+      provinceEvents: nextProvinceEvents,
       hungerFlag: nextHungerFlag,
       skipBriefing: m < monthsToRun - 1,
       isOffline: true,
@@ -775,6 +845,13 @@ export function simulateOfflineProgress(
     nextLastBankNetWorthWarnMonth = mp.lastBankNetWorthWarnMonth;
     nextAdvisorBriefing = mp.advisorBriefing;
     nextDecrees = mp.decrees;
+    currentProvinces = mp.provinces;
+    nextCamp = mp.camp;
+    nextPendingArrivals = mp.pendingArrivals;
+    nextProvinceEvents = mp.provinceEvents;
+    if (mp.addedProvinceEvents.length > 0) {
+      offlineProvinceEvents.push(...mp.addedProvinceEvents);
+    }
     if (mp.offlineBankStats) {
       loanInstallmentsPaid += mp.offlineBankStats.loanInstallmentsPaid;
       loanDeferredAdded += mp.offlineBankStats.loanDeferredAdded;
@@ -794,6 +871,51 @@ export function simulateOfflineProgress(
   }
   const arrearsAdded = Math.max(0, nextArrears - startArrears);
   nextCitizenWealth = sumCitizenWealth(nextCitizens);
+
+  // Prompt 7 Element 5.3: Final camp & province event reconciliation after offline loops (covers sub-month away periods)
+  const finalProvinces = computeProvinces({
+    cubes: nextCubes,
+    citizens: nextCitizens,
+    population: nextPopulation,
+  });
+  const finalCampSync = syncArrivalCamp(
+    nextCitizens,
+    nextCubes,
+    nextTotalMonths,
+    nextCamp.cubeId
+  );
+  nextCitizens = finalCampSync.citizens;
+  nextCamp = finalCampSync.camp;
+  nextPendingArrivals = finalCampSync.pendingArrivals;
+
+  const finalEventMonth = Math.max(
+    1,
+    Math.floor((Math.max(1, nextDay) - 1) / MONTH_DAYS) + 1
+  );
+  const finalDiffEvs: ProvinceEvent[] = diffProvincesForEvents(
+    currentProvinces,
+    finalProvinces,
+    finalEventMonth
+  );
+  if (nextPendingArrivals > 0) {
+    const palaceCube = findPalaceCube(nextCubes);
+    const campRefCubeId = nextCamp.cubeId ?? palaceCube?.id ?? 0;
+    finalDiffEvs.push(
+      createProvinceEvent(
+        'camp_full',
+        finalEventMonth,
+        campRefCubeId,
+        `مخيم الوصول ممتلئ — ${nextPendingArrivals} قادم في الطريق`
+      )
+    );
+  }
+  if (finalDiffEvs.length > 0) {
+    const recFinal = recordProvinceEvents(nextProvinceEvents, finalDiffEvs);
+    nextProvinceEvents = recFinal.events;
+    if (recFinal.added.length > 0) {
+      offlineProvinceEvents.push(...recFinal.added);
+    }
+  }
 
   // Element 6.1 & H5: On return, if deferredDue > 0 after offline months, warn king (merged via offline flood control)
   const activeLoanOnReturn = nextBankLoans.find((l) => l.status === 'active');
@@ -910,8 +1032,13 @@ export function simulateOfflineProgress(
     advisorBriefing: nextAdvisorBriefing,
     taxPolicy: nextTaxPolicy,
     decrees: nextDecrees,
+    camp: nextCamp,
+    pendingArrivals: nextPendingArrivals,
+    provinceEvents: nextProvinceEvents,
     lastSavedAt: now,
   };
+  // H5: Ensure derived `provinces` is NEVER carried through into persisted save data
+  delete (restored as unknown as Record<string, unknown>).provinces;
 
   const awayReport: AwayReportData | null =
     rawElapsedSeconds >= AWAY_MODAL_MIN_SECONDS
@@ -934,6 +1061,7 @@ export function simulateOfflineProgress(
           loanInstallmentsPaid,
           loanDeferredAdded,
           bankTradesCount,
+          provinceEvents: offlineProvinceEvents,
         }
       : null;
 

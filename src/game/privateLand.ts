@@ -59,7 +59,8 @@ export function isEligiblePrivateTargetCube(
   cubes: Cube[],
   cube: Cube,
   pendingCubeIds: ReadonlySet<number>,
-  palaceCubeId: number | null
+  palaceCubeId: number | null,
+  campCubeId: number | null = null
 ): boolean {
   if (cube.owner !== 'player') return false;
   if (cube.privateOwnerId != null) return false;
@@ -67,6 +68,7 @@ export function isEligiblePrivateTargetCube(
   if (cube.themeId !== null || cube.secondThemeId !== null) return false;
   if (cube.isRocky) return false;
   if (palaceCubeId !== null && cube.id === palaceCubeId) return false;
+  if (campCubeId !== null && cube.id === campCubeId) return false;
   if (pendingCubeIds.has(cube.id)) return false;
   return true;
 }
@@ -228,12 +230,14 @@ export function runMonthlyLandRequests(input: {
   citizens: Citizen[];
   landRequests: LandRequest[];
   totalMonths: number;
+  campCubeId?: number | null;
 }): {
   landRequests: LandRequest[];
   generated: LandRequest | null;
   expiredCount: number;
 } {
   const currentMonth = Math.max(0, Math.trunc(input.totalMonths));
+  const campCubeId = input.campCubeId ?? null;
   const palace = findPalaceCube(input.cubes);
   const palaceCubeId = palace ? palace.id : null;
 
@@ -273,6 +277,7 @@ export function runMonthlyLandRequests(input: {
       cube.secondThemeId !== null ||
       cube.isRocky ||
       (palaceCubeId !== null && cube.id === palaceCubeId) ||
+      (campCubeId !== null && cube.id === campCubeId) ||
       pendingCubeIds.has(cube.id) ||
       pendingCitizenIds.has(cit.id)
     ) {
@@ -293,7 +298,13 @@ export function runMonthlyLandRequests(input: {
 
   // Collect all currently eligible target cubes
   const eligibleCubes = input.cubes.filter((cube) =>
-    isEligiblePrivateTargetCube(input.cubes, cube, pendingCubeIds, palaceCubeId)
+    isEligiblePrivateTargetCube(
+      input.cubes,
+      cube,
+      pendingCubeIds,
+      palaceCubeId,
+      campCubeId
+    )
   );
   if (eligibleCubes.length === 0) {
     return { landRequests: kept, generated: null, expiredCount };
@@ -390,6 +401,7 @@ export function resolveLandRequest(input: {
   totalMonths: number;
   requestId: string;
   approve: boolean;
+  campCubeId?: number | null;
 }): {
   cubes: Cube[];
   citizens: Citizen[];
@@ -459,6 +471,7 @@ export function resolveLandRequest(input: {
     cube.secondThemeId === null &&
     !cube.isRocky &&
     (!palace || cube.id !== palace.id) &&
+    (input.campCubeId == null || cube.id !== input.campCubeId) &&
     !capReached;
 
   if (!isValid || !citizen || !cube) {

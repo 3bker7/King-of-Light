@@ -11,12 +11,13 @@ import {
   Level3ComingSoonModal,
   SettingsModal,
 } from './components/Modals';
-import { Objectives } from './components/Objectives';
+import { Objectives, ObjectivesChip } from './components/Objectives';
 import { BankOverlay } from './components/BankOverlay';
 import {
   PalaceOfficesOverlay,
   type PalaceOfficeTab,
 } from './components/PalaceOfficesOverlay';
+import { ProvincePanel, ProvincePanelChip } from './components/ProvincePanel';
 import { Ticker } from './components/Ticker';
 import { Toasts } from './components/Toasts';
 import { TopBar } from './components/TopBar';
@@ -127,6 +128,7 @@ export default function App() {
     useState<ThemeId | null>(null);
   const [pulsingTheme, setPulsingTheme] = useState<ThemeId | null>(null);
   const [objectivesOpen, setObjectivesOpen] = useState(false);
+  const [provincesOpen, setProvincesOpen] = useState(false);
 
   const [inspectorTab, setInspectorTab] = useState<'info' | 'bourse'>('info');
   const [bourseModalOpen, setBourseModalOpen] = useState(false);
@@ -253,6 +255,8 @@ export default function App() {
         setInspectedShortTheme(null);
         setOpenBuildCategory(null);
         setPulsingTheme(null);
+      } else if (provincesOpen) {
+        setProvincesOpen(false);
       } else if (objectivesOpen) {
         setObjectivesOpen(false);
       } else if (showLevel2Modal) {
@@ -279,6 +283,7 @@ export default function App() {
     activeBuildTheme,
     inspectedShortTheme,
     openBuildCategory,
+    provincesOpen,
     objectivesOpen,
     showLevel2Modal,
     showLevel3Modal,
@@ -617,6 +622,7 @@ export default function App() {
     setPulsingTheme(null);
     setOpenBuildCategory(null);
     setObjectivesOpen(false);
+    setProvincesOpen(false);
     setSelectedCubeId(null);
     setSelectedCitizenId(null);
     setFollowCitizenId(null);
@@ -728,6 +734,13 @@ export default function App() {
             followCitizenId={followCitizenId}
             activeBuildTheme={activeBuildTheme}
             staffedSlots={staffing.staffedSlots}
+            provinces={state.provinces}
+            camp={state.camp}
+            citizens={state.citizens}
+            lastJoinedVillageCubeId={state.lastJoinedVillageCubeId}
+            lastJoinedVillageSeq={state.lastJoinedVillageSeq}
+            lastDefectedCubeId={state.lastDefectedCubeId}
+            lastDefectedSeq={state.lastDefectedSeq}
             resetSignal={resetSignal}
             onCubeClick={handleCubeClick}
             onCitizenClick={handleCitizenClick}
@@ -738,13 +751,50 @@ export default function App() {
             }}
             onRecenter={() => setFollowCitizenId(null)}
           >
-            {/* Element 1.4: Compact Collapsible Objectives Chip (top-left of map) */}
-            <Objectives
-              state={state}
-              isOpen={objectivesOpen}
-              onToggle={() => setObjectivesOpen((prev) => !prev)}
-              onSelectObjective={handleSelectObjective}
-            />
+            {/* Top-left Map Chips: Objectives + Provinces (both closed by default, open ONLY on user click) */}
+            <div className="absolute top-3 left-3 z-20 flex flex-col items-start max-w-[calc(100%-24px)]">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <ObjectivesChip
+                  state={state}
+                  isOpen={objectivesOpen}
+                  onToggle={() => {
+                    setProvincesOpen(false);
+                    setObjectivesOpen((prev) => !prev);
+                  }}
+                />
+                <ProvincePanelChip
+                  provinceCount={state.provinces.length}
+                  pendingArrivals={state.pendingArrivals}
+                  isOpen={provincesOpen}
+                  onToggle={() => {
+                    setObjectivesOpen(false);
+                    setProvincesOpen((prev) => !prev);
+                  }}
+                />
+              </div>
+
+              <Objectives
+                state={state}
+                isOpen={objectivesOpen}
+                onToggle={() => setObjectivesOpen((prev) => !prev)}
+                onSelectObjective={handleSelectObjective}
+                embedded
+              />
+
+              <ProvincePanel
+                state={state}
+                isOpen={provincesOpen}
+                onToggle={() => setProvincesOpen((prev) => !prev)}
+                onFlyToProvince={(centerCubeId) => {
+                  setFollowCitizenId(null);
+                  worldRef.current?.highlightProvinceCenter(centerCubeId);
+                }}
+                onFlyToCube={(cubeId) => {
+                  setFollowCitizenId(null);
+                  worldRef.current?.focusOnCube(cubeId);
+                }}
+              />
+            </div>
           </WorldCanvas>
         </div>
       </div>

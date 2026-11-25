@@ -58,12 +58,14 @@ export function getScheduledInstallment(
 export function isEligibleCollateralCube(
   cubes: Cube[],
   cube: Cube,
-  palaceCubeId: number | null
+  palaceCubeId: number | null,
+  campCubeId: number | null = null
 ): boolean {
   if (cube.owner !== 'player') return false;
   if (cube.themeId !== null || cube.secondThemeId !== null) return false;
   if (cube.isRocky) return false;
   if (palaceCubeId !== null && cube.id === palaceCubeId) return false;
+  if (campCubeId !== null && cube.id === campCubeId) return false;
   if (cube.privateOwnerId != null) return false;
   if (cube.collateralLoanId != null) return false;
   return true;
@@ -430,10 +432,14 @@ export function executeTakeLoan(
   const palace = findPalaceCube(state.cubes);
   const palaceCubeId = palace ? palace.id : null;
 
+  const campCubeId = state.camp?.cubeId ?? null;
   let collateralTotalValue = 0;
   for (const cid of action.collateralCubeIds) {
     const cube = state.cubes[cid];
-    if (!cube || !isEligibleCollateralCube(state.cubes, cube, palaceCubeId)) {
+    if (
+      !cube ||
+      !isEligibleCollateralCube(state.cubes, cube, palaceCubeId, campCubeId)
+    ) {
       return { state, success: false, errorAr: 'أحد الأراضي المختارة غير مؤهلة للرهن' };
     }
     collateralTotalValue += getCubePurchasePrice(state.cubes, cube);

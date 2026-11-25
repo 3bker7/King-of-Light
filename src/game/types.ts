@@ -237,6 +237,8 @@ export interface Citizen {
   // Prompt 4 Private Sector fields
   deniedLandMonth?: number | null;
   employerId?: number | null;
+  // Prompt 7 Arrival Camp marker (derived view over housing queue head)
+  inCamp?: boolean;
 }
 
 export type OfficeFaxStatus = 'unread' | 'read' | 'acted' | 'dismissed';
@@ -369,6 +371,42 @@ export interface AwayReportData {
   loanInstallmentsPaid?: number;
   loanDeferredAdded?: number;
   bankTradesCount?: number;
+  // Prompt 7 Province offline events
+  provinceEvents?: ProvinceEvent[];
+}
+
+export interface Province {
+  id: string;
+  centerCubeId: number;
+  nameAr: string;
+  cubeIds: number[];
+  landCubeIds: number[];
+  seaCubeIds: number[];
+  houseCount: number;
+  population: number;
+  staffedWorkplaces: number;
+  privatePlots: number;
+  color: string;
+}
+
+export type ProvinceEventKind =
+  | 'village_joined'
+  | 'village_defected'
+  | 'province_formed'
+  | 'province_dissolved'
+  | 'camp_full';
+
+export interface ProvinceEvent {
+  id: string;
+  month: number;
+  kind: ProvinceEventKind;
+  centerCubeId: number;
+  labelAr: string;
+}
+
+export interface ArrivalCamp {
+  cubeId: number | null;
+  residentIds: number[];
 }
 
 export interface PalaceOfPeople {
@@ -469,6 +507,13 @@ export interface GameState {
   advisorBriefing: AdvisorBriefing | null;
   taxPolicy: TaxPolicy;
   decrees: Decree[];
+  // Prompt 7 Provinces, Arrival Camp & Province Events
+  provinces: Province[];
+  camp: ArrivalCamp;
+  pendingArrivals: number;
+  provinceEvents: ProvinceEvent[];
+  lastDefectedCubeId: number | null;
+  lastDefectedSeq: number;
 }
 
 export interface PersistedSaveData {
@@ -523,6 +568,10 @@ export interface PersistedSaveData {
   advisorBriefing?: AdvisorBriefing | null;
   taxPolicy?: TaxPolicy;
   decrees?: Decree[];
+  // Prompt 7 optional persisted fields (provinces themselves are NEVER persisted; always recomputed on load)
+  camp?: ArrivalCamp;
+  pendingArrivals?: number;
+  provinceEvents?: ProvinceEvent[];
 }
 
 export interface StaffingStatus {

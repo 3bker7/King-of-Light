@@ -7,7 +7,20 @@ import {
   isPurchasableNeutralCube,
   makeSlotKey,
 } from '../game/production';
-import type { Cube, SlotIndex, ThemeId } from '../game/types';
+import type {
+  ArrivalCamp,
+  Citizen,
+  Cube,
+  Province,
+  SlotIndex,
+  ThemeId,
+} from '../game/types';
+import {
+  computeProvinceDressingPlan,
+  computeProvinceRoads,
+  getCenterFlagWorldOffset,
+  type ProvinceRoadSpec,
+} from './provinceVisuals';
 import {
   applyUnstaffedVisual,
   type BuildingLibrary,
@@ -60,6 +73,55 @@ export interface WorldSyncPayload {
   followCitizenId: number | null;
   activeBuildTheme: ThemeId | null;
   staffedSlots: Set<string>;
+  // Prompt 7: Provinces, Arrival Camp & Visual Merge
+  provinces?: Province[];
+  camp?: ArrivalCamp;
+  citizens?: Citizen[];
+  lastJoinedVillageCubeId?: number | null;
+  lastJoinedVillageSeq?: number;
+  lastDefectedCubeId?: number | null;
+  lastDefectedSeq?: number;
+}
+
+interface ProvinceFlagAnim {
+  root: THREE.Group;
+  pennantMesh: THREE.Mesh;
+  pennantMat: THREE.MeshStandardMaterial;
+  targetColor: THREE.Color;
+  startColor: THREE.Color | null;
+  colorLerpAge: number;
+  baseY: number;
+  phase: number;
+  cubeId: number;
+  provinceId: string;
+}
+
+interface HouseBannerAnim {
+  mesh: THREE.Mesh;
+  mat: THREE.MeshStandardMaterial;
+  targetColor: THREE.Color;
+  startColor: THREE.Color | null;
+  colorLerpAge: number;
+  phase: number;
+  cubeId: number;
+}
+
+interface ActiveProvinceRoad {
+  provinceId: string;
+  mesh: THREE.Mesh;
+  mat: THREE.MeshStandardMaterial;
+  totalIndices: number;
+  drawAge: number;
+  drawDuration: number;
+}
+
+interface FadingObject {
+  root: THREE.Object3D;
+  materials: THREE.Material[];
+  age: number;
+  duration: number;
+  lowerY: boolean;
+  startY: number;
 }
 
 interface DustParticle {
@@ -243,8 +305,12 @@ export class WorldEngine {
   private readonly terrainMesh: THREE.Mesh;
 
   private readonly boundaryGroup = new THREE.Group();
+  private readonly provinceRoadsGroup = new THREE.Group();
+  private readonly fadingFxGroup = new THREE.Group();
   private readonly waterGroup = new THREE.Group();
   private readonly buildingsGroup = new THREE.Group();
+  private readonly provinceDressGroup = new THREE.Group();
+  private readonly campGroup = new THREE.Group();
   private readonly purchasableGroup = new THREE.Group();
   private readonly privatePennantGroup = new THREE.Group();
   private readonly bankPennantGroup = new THREE.Group();
@@ -258,6 +324,14 @@ export class WorldEngine {
   private purchasableSprites: PurchasableTagItem[] = [];
   private privatePennants: PurchasableTagItem[] = [];
   private bankPennants: PurchasableTagItem[] = [];
+  private provinceFlags: ProvinceFlagAnim[] = [];
+  private houseBanners: HouseBannerAnim[] = [];
+  private activeProvinceRoads = new Map<string, ActiveProvinceRoad>();
+  private fadingObjects: FadingObject[] = [];
+  private readonly provinceHighlightRingMesh: THREE.Mesh;
+  private readonly provinceHighlightRingMat: THREE.MeshBasicMaterial;
+  private provinceHighlightCubeId: number | null = null;
+  private provinceHighlightTimer = 0;
 
   private readonly hoverDecalMesh: THREE.Mesh;
   private readonly hoverDecalMat: THREE.MeshBasicMaterial;
@@ -275,6 +349,14 @@ export class WorldEngine {
   private lastVillageSignature = '';
   private lastPrivateSignature = '';
   private lastBankSignature = '';
+  private lastProvinceSignature = '';
+  private lastRoadSignature = '';
+  private lastCampSignature = '';
+  private campFlameMesh: THREE.Mesh | null = null;
+  private campGlowLight: THREE.PointLight | null = null;
+  private lastJoinedSeqSeen = 0;
+  private lastDefectedSeqSeen = 0;
+  private prevOwnedCubeIds = new Set<number>();
   private initialSyncDone = false;
 
   // Camera pan/zoom state (damped)
@@ -486,19 +568,44 @@ export class WorldEngine {
       polygonOffsetUnits: -1,
     });
 
+    // Province center highlight ring (3s golden pulse when clicked from Province Panel)
+    const provHlGeo = new THREE.RingGeometry(2.6, 3.35, 36);
+    provHlGeo.rotateX(-Math.PI / 2);
+    this.provinceHighlightRingMat = new THREE.MeshBasicMaterial({
+      color: 0xf6cf65,
+      transparent: true,
+      opacity: 0.9,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -3,
+      polygonOffsetUnits: -3,
+    });
+    this.provinceHighlightRingMesh = new THREE.Mesh(
+      provHlGeo,
+      this.provinceHighlightRingMat
+    );
+    this.provinceHighlightRingMesh.visible = false;
+    this.provinceHighlightRingMesh.renderOrder = 13;
+
     this.wilderness = new WildernessProps();
     this.scene.add(
       this.wilderness.group,
       this.waterGroup,
+      this.provinceRoadsGroup,
+      this.fadingFxGroup,
       this.boundaryGroup,
       this.purchasableGroup,
       this.buildingsGroup,
+      this.provinceDressGroup,
+      this.campGroup,
       this.privatePennantGroup,
       this.bankPennantGroup,
       this.peopleAgents.group,
       this.fxGroup,
       this.hoverDecalMesh,
-      this.selectionRingMesh
+      this.selectionRingMesh,
+      this.provinceHighlightRingMesh
     );
 
     // Frame camera on owned territory right on load
@@ -577,6 +684,27 @@ export class WorldEngine {
       0,
       THREE.MathUtils.clamp(pos.z, -PAN_LIMIT, PAN_LIMIT)
     );
+  }
+
+  public highlightProvinceCenter(cubeId: number): void {
+    this.focusOnCube(cubeId);
+    const cube = this.latestState?.cubes[cubeId];
+    if (!cube) return;
+    this.provinceHighlightCubeId = cubeId;
+    this.provinceHighlightTimer = 3.0;
+    const pos = cellToWorldCenter(cube.row, cube.col);
+    const offset = getCenterFlagWorldOffset(cube);
+    const groundY = getTerrainHeightAt(
+      pos.x + offset.dx,
+      pos.z + offset.dz,
+      this.seaCoords
+    );
+    this.provinceHighlightRingMesh.position.set(
+      pos.x + offset.dx,
+      groundY + 0.2,
+      pos.z + offset.dz
+    );
+    this.provinceHighlightRingMesh.visible = true;
   }
 
   public getCitizenInfo(agentId: number): CitizenInfo | null {
@@ -677,18 +805,616 @@ export class WorldEngine {
     }
 
     this.syncBuildings(payload);
+    this.syncProvinceVisuals(payload);
+    this.syncArrivalCampVisuals(payload);
     this.peopleAgents.sync(
       payload.cubes,
       payload.population,
       payload.satisfaction,
       payload.staffedSlots,
-      this.seaCoords
+      this.seaCoords,
+      payload.camp,
+      payload.citizens
     );
     this.peopleAgents.setSelectedAgent(payload.selectedCitizenId);
     this.followAgentId = payload.followCitizenId;
 
     this.updateSelectionRing();
     this.updateHoverDecal();
+  }
+
+  private syncArrivalCampVisuals(payload: WorldSyncPayload): void {
+    const camp = payload.camp;
+    const active =
+      camp != null &&
+      camp.cubeId !== null &&
+      camp.residentIds.length > 0 &&
+      payload.cubes[camp.cubeId]?.owner === 'player';
+    const sig = active
+      ? `${camp!.cubeId}:${Math.min(3, Math.max(2, Math.ceil(camp!.residentIds.length / 2)))}`
+      : 'empty';
+
+    if (sig === this.lastCampSignature) return;
+    this.lastCampSignature = sig;
+
+    while (this.campGroup.children.length > 0) {
+      const ch = this.campGroup.children[0];
+      this.campGroup.remove(ch);
+      this.disposeObjectTree(ch);
+    }
+    this.campFlameMesh = null;
+    this.campGlowLight = null;
+
+    if (!active || !camp || camp.cubeId === null) return;
+    const cube = payload.cubes[camp.cubeId];
+    if (!cube) return;
+
+    const center = cellToWorldCenter(cube.row, cube.col);
+    const groundY = getTerrainHeightAt(center.x, center.z, this.seaCoords);
+
+    const campRoot = new THREE.Group();
+    campRoot.position.set(center.x, groundY, center.z);
+
+    // 2 to 3 composite procedural desert canvas tents around the central firepit
+    const tentCount = camp.residentIds.length >= 4 ? 3 : 2;
+    const tentSpecs = [
+      { x: -2.1, z: -1.6, rotY: 0.45, color: 0xe6d3ad, stripe: 0x9e4b35 },
+      { x: 2.15, z: -1.35, rotY: -0.55, color: 0xdcc396, stripe: 0x14524a },
+      { x: 0.15, z: -2.65, rotY: 0.05, color: 0xebd9b7, stripe: 0xc9962e },
+    ];
+
+    for (let i = 0; i < tentCount; i++) {
+      const spec = tentSpecs[i];
+      const tent = new THREE.Group();
+      tent.position.set(spec.x, 0, spec.z);
+      tent.rotation.y = spec.rotY;
+
+      // Woven rug base
+      const rugGeo = new THREE.BoxGeometry(2.1, 0.06, 1.85);
+      const rugMat = new THREE.MeshStandardMaterial({
+        color: spec.stripe,
+        roughness: 0.92,
+      });
+      const rug = new THREE.Mesh(rugGeo, rugMat);
+      rug.position.y = 0.03;
+      rug.receiveShadow = true;
+      tent.add(rug);
+
+      // Pitched 3-sided prism canvas roof (CylinderGeometry with 3 radial segments)
+      const roofGeo = new THREE.CylinderGeometry(0.05, 1.35, 1.55, 4);
+      roofGeo.rotateY(Math.PI * 0.25);
+      const roofMat = new THREE.MeshStandardMaterial({
+        color: spec.color,
+        roughness: 0.88,
+      });
+      const roof = new THREE.Mesh(roofGeo, roofMat);
+      roof.position.y = 0.78;
+      roof.scale.set(1.05, 1, 1.25);
+      roof.castShadow = true;
+      roof.receiveShadow = true;
+      tent.add(roof);
+
+      // Decorative stripe band near ridge
+      const bandGeo = new THREE.CylinderGeometry(0.42, 0.62, 0.24, 4);
+      bandGeo.rotateY(Math.PI * 0.25);
+      const bandMat = new THREE.MeshStandardMaterial({
+        color: spec.stripe,
+        roughness: 0.85,
+      });
+      const band = new THREE.Mesh(bandGeo, bandMat);
+      band.position.y = 1.12;
+      band.scale.set(1.06, 1, 1.26);
+      tent.add(band);
+
+      // Wooden ridge post
+      const poleGeo = new THREE.CylinderGeometry(0.04, 0.05, 1.72, 6);
+      const poleMat = new THREE.MeshStandardMaterial({
+        color: 0x6b4726,
+        roughness: 0.84,
+      });
+      const pole = new THREE.Mesh(poleGeo, poleMat);
+      pole.position.y = 0.86;
+      tent.add(pole);
+
+      campRoot.add(tent);
+    }
+
+    // Stone-ringed campfire at (0, 0, 1.1)
+    const fireGroup = new THREE.Group();
+    fireGroup.position.set(0, 0, 1.15);
+
+    const stoneMat = new THREE.MeshStandardMaterial({
+      color: 0x8b7e6d,
+      roughness: 0.92,
+    });
+    for (let s = 0; s < 8; s++) {
+      const ang = (s / 8) * Math.PI * 2;
+      const stoneGeo = new THREE.DodecahedronGeometry(0.16, 0);
+      const stone = new THREE.Mesh(stoneGeo, stoneMat);
+      stone.position.set(Math.cos(ang) * 0.52, 0.1, Math.sin(ang) * 0.52);
+      stone.castShadow = true;
+      fireGroup.add(stone);
+    }
+
+    // Crossed logs
+    const logGeo = new THREE.CylinderGeometry(0.06, 0.06, 0.78, 6);
+    logGeo.rotateZ(Math.PI / 2);
+    const logMat = new THREE.MeshStandardMaterial({
+      color: 0x4f321b,
+      roughness: 0.95,
+    });
+    const log1 = new THREE.Mesh(logGeo, logMat);
+    log1.position.y = 0.09;
+    log1.rotation.y = 0.5;
+    fireGroup.add(log1);
+    const log2 = new THREE.Mesh(logGeo, logMat);
+    log2.position.y = 0.12;
+    log2.rotation.y = -0.65;
+    fireGroup.add(log2);
+
+    // Warm glowing flame cone
+    const flameGeo = new THREE.ConeGeometry(0.24, 0.72, 6);
+    const flameMat = new THREE.MeshStandardMaterial({
+      color: 0xffa630,
+      emissive: 0xff6a14,
+      emissiveIntensity: 1.5,
+      roughness: 0.4,
+    });
+    const flame = new THREE.Mesh(flameGeo, flameMat);
+    flame.position.y = 0.42;
+    fireGroup.add(flame);
+    this.campFlameMesh = flame;
+
+    if (!this.isSoftwareGl) {
+      const glow = new THREE.PointLight(0xff9b3d, 2.2, 10, 1.8);
+      glow.position.set(0, 1.1, 0);
+      fireGroup.add(glow);
+      this.campGlowLight = glow;
+    }
+
+    campRoot.add(fireGroup);
+    this.campGroup.add(campRoot);
+  }
+
+  private disposeObjectTree(obj: THREE.Object3D): void {
+    obj.traverse((child) => {
+      if ((child as THREE.Mesh).isMesh) {
+        const mesh = child as THREE.Mesh;
+        mesh.geometry.dispose();
+        if (Array.isArray(mesh.material)) {
+          mesh.material.forEach((m) => m.dispose());
+        } else {
+          mesh.material.dispose();
+        }
+      }
+    });
+  }
+
+  private spawnVillageJoinGoldBurst(x: number, y: number, z: number): void {
+    // Element 2.2: Capped single celebration burst at joined village center (never per-cube)
+    const count = 14;
+    for (let i = 0; i < count; i++) {
+      const angle = (i / count) * Math.PI * 2 + (i % 3) * 0.14;
+      const speed = 1.6 + (i % 4) * 0.65;
+      const mat = new THREE.SpriteMaterial({
+        map: this.dustTexture,
+        color: i % 2 === 0 ? 0xf6cf65 : 0xffebb0,
+        transparent: true,
+        opacity: 0.9,
+        depthWrite: false,
+      });
+      const sprite = new THREE.Sprite(mat);
+      sprite.position.set(x, y + 0.6, z);
+      const baseScale = 1.15 + (i % 3) * 0.35;
+      sprite.scale.set(baseScale, baseScale, 1);
+      sprite.renderOrder = 18;
+      this.fxGroup.add(sprite);
+
+      this.dustParticles.push({
+        sprite,
+        vx: Math.cos(angle) * speed,
+        vy: 2.3 + (i % 3) * 0.55,
+        vz: Math.sin(angle) * speed,
+        age: 0,
+        life: 2.0,
+        baseScale,
+      });
+    }
+  }
+
+  private buildDirtRoadMesh(
+    road: ProvinceRoadSpec
+  ): { mesh: THREE.Mesh; mat: THREE.MeshStandardMaterial; totalIndices: number } | null {
+    if (road.waypoints.length < 2) return null;
+
+    const pts3D = road.waypoints.map((pt) => {
+      const y = getTerrainHeightAt(pt.x, pt.z, this.seaCoords) + 0.085;
+      return new THREE.Vector3(pt.x, y, pt.z);
+    });
+
+    // Subdivide gently along segments for terrain conformance while staying strictly inside walkable cells
+    const sampled: THREE.Vector3[] = [];
+    for (let i = 0; i < pts3D.length - 1; i++) {
+      const a = pts3D[i];
+      const b = pts3D[i + 1];
+      const segSteps = 4;
+      for (let s = 0; s < segSteps; s++) {
+        const t = s / segSteps;
+        const x = THREE.MathUtils.lerp(a.x, b.x, t);
+        const z = THREE.MathUtils.lerp(a.z, b.z, t);
+        const y = getTerrainHeightAt(x, z, this.seaCoords) + 0.085;
+        sampled.push(new THREE.Vector3(x, y, z));
+      }
+    }
+    sampled.push(pts3D[pts3D.length - 1]);
+
+    if (sampled.length < 2) return null;
+
+    const halfWidth = 0.68;
+    const positions: number[] = [];
+    const normals: number[] = [];
+    const uvs: number[] = [];
+    const indices: number[] = [];
+
+    for (let i = 0; i < sampled.length; i++) {
+      const p = sampled[i];
+      const prev = sampled[Math.max(0, i - 1)];
+      const next = sampled[Math.min(sampled.length - 1, i + 1)];
+      const dirX = next.x - prev.x;
+      const dirZ = next.z - prev.z;
+      const len = Math.hypot(dirX, dirZ) || 1;
+      const perpX = -dirZ / len;
+      const perpZ = dirX / len;
+
+      const lx = p.x + perpX * halfWidth;
+      const lz = p.z + perpZ * halfWidth;
+      const ly = getTerrainHeightAt(lx, lz, this.seaCoords) + 0.085;
+
+      const rx = p.x - perpX * halfWidth;
+      const rz = p.z - perpZ * halfWidth;
+      const ry = getTerrainHeightAt(rx, rz, this.seaCoords) + 0.085;
+
+      positions.push(lx, ly, lz, rx, ry, rz);
+      normals.push(0, 1, 0, 0, 1, 0);
+      const v = i / (sampled.length - 1);
+      uvs.push(0, v, 1, v);
+
+      if (i < sampled.length - 1) {
+        const base = i * 2;
+        indices.push(base, base + 1, base + 2);
+        indices.push(base + 1, base + 3, base + 2);
+      }
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geo.setIndex(indices);
+
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xc29e68,
+      roughness: 0.96,
+      metalness: 0.0,
+      transparent: true,
+      opacity: 0.88,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    });
+
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.receiveShadow = true;
+    mesh.castShadow = false;
+    mesh.renderOrder = 3;
+    return { mesh, mat, totalIndices: indices.length };
+  }
+
+  private createProvinceFlagpoleMesh(
+    colorHex: string,
+    isPalace: boolean
+  ): {
+    root: THREE.Group;
+    pennantMesh: THREE.Mesh;
+    pennantMat: THREE.MeshStandardMaterial;
+  } {
+    const root = new THREE.Group();
+
+    // Stone plinth base
+    const baseGeo = new THREE.CylinderGeometry(0.32, 0.44, 0.34, 8);
+    const baseMat = new THREE.MeshStandardMaterial({
+      color: 0xd9c7a3,
+      roughness: 0.88,
+    });
+    const baseMesh = new THREE.Mesh(baseGeo, baseMat);
+    baseMesh.position.y = 0.17;
+    baseMesh.castShadow = true;
+    baseMesh.receiveShadow = true;
+    root.add(baseMesh);
+
+    // Tall turned wooden mast
+    const poleHeight = isPalace ? 6.2 : 5.4;
+    const poleGeo = new THREE.CylinderGeometry(0.065, 0.095, poleHeight, 8);
+    const poleMat = new THREE.MeshStandardMaterial({
+      color: 0x6b4726,
+      roughness: 0.78,
+    });
+    const poleMesh = new THREE.Mesh(poleGeo, poleMat);
+    poleMesh.position.y = 0.34 + poleHeight / 2;
+    poleMesh.castShadow = true;
+    root.add(poleMesh);
+
+    // Golden finial sphere
+    const finialGeo = new THREE.SphereGeometry(0.16, 10, 8);
+    const finialMat = new THREE.MeshStandardMaterial({
+      color: 0xe6b84b,
+      roughness: 0.32,
+      metalness: 0.55,
+    });
+    const finialMesh = new THREE.Mesh(finialGeo, finialMat);
+    finialMesh.position.y = 0.34 + poleHeight + 0.12;
+    root.add(finialMesh);
+
+    // Swallowtail cloth pennant in province color
+    const shape = new THREE.Shape();
+    shape.moveTo(0, 0.45);
+    shape.lineTo(1.75, 0.22);
+    shape.lineTo(1.38, 0);
+    shape.lineTo(1.75, -0.22);
+    shape.lineTo(0, -0.45);
+    shape.closePath();
+
+    const pennantGeo = new THREE.ShapeGeometry(shape, 4);
+    const pennantMat = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(colorHex),
+      roughness: 0.65,
+      metalness: 0.05,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 1,
+    });
+    const pennantMesh = new THREE.Mesh(pennantGeo, pennantMat);
+    pennantMesh.position.set(0.06, 0.34 + poleHeight - 0.52, 0);
+    pennantMesh.castShadow = true;
+    root.add(pennantMesh);
+
+    return { root, pennantMesh, pennantMat };
+  }
+
+  private syncProvinceVisuals(payload: WorldSyncPayload): void {
+    const provinces = payload.provinces ?? [];
+    const currentOwnedIds = new Set<number>();
+    for (let i = 0; i < payload.cubes.length; i++) {
+      if (payload.cubes[i].owner === 'player') {
+        currentOwnedIds.add(payload.cubes[i].id);
+      }
+    }
+
+    // Detect newly joined cubes vs defected cubes
+    const newlyJoinedCubes = new Set<number>();
+    let joinTriggered = false;
+    if (
+      this.initialSyncDone &&
+      typeof payload.lastJoinedVillageSeq === 'number' &&
+      payload.lastJoinedVillageSeq > this.lastJoinedSeqSeen
+    ) {
+      this.lastJoinedSeqSeen = payload.lastJoinedVillageSeq;
+      joinTriggered = true;
+      for (const id of currentOwnedIds) {
+        if (!this.prevOwnedCubeIds.has(id)) {
+          newlyJoinedCubes.add(id);
+        }
+      }
+      if (typeof payload.lastJoinedVillageCubeId === 'number') {
+        newlyJoinedCubes.add(payload.lastJoinedVillageCubeId);
+        const vCube = payload.cubes[payload.lastJoinedVillageCubeId];
+        if (vCube) {
+          const vp = cellToWorldCenter(vCube.row, vCube.col);
+          const vy = getTerrainHeightAt(vp.x, vp.z, this.seaCoords);
+          this.spawnVillageJoinGoldBurst(vp.x, vy, vp.z);
+        }
+      }
+    } else if (!this.initialSyncDone && typeof payload.lastJoinedVillageSeq === 'number') {
+      this.lastJoinedSeqSeen = payload.lastJoinedVillageSeq;
+    }
+
+    let defectionTriggered = false;
+    if (
+      this.initialSyncDone &&
+      typeof payload.lastDefectedSeq === 'number' &&
+      payload.lastDefectedSeq > this.lastDefectedSeqSeen
+    ) {
+      this.lastDefectedSeqSeen = payload.lastDefectedSeq;
+      defectionTriggered = true;
+    } else if (!this.initialSyncDone && typeof payload.lastDefectedSeq === 'number') {
+      this.lastDefectedSeqSeen = payload.lastDefectedSeq;
+    }
+
+    this.prevOwnedCubeIds = currentOwnedIds;
+
+    // Build deterministic signatures for dressing & roads
+    const dressingPlan = computeProvinceDressingPlan(payload.cubes, provinces);
+    const provSig =
+      provinces
+        .map((p) => `${p.id}:${p.centerCubeId}:${p.color}:${p.cubeIds.length}:${p.houseCount}`)
+        .join('|') +
+      `#hb:${dressingPlan.houseBanners.map((b) => `${b.cubeId}:${b.slot}:${b.color}`).join(',')}`;
+
+    if (provSig !== this.lastProvinceSignature || joinTriggered || defectionTriggered) {
+      // Queue removed center flags for 2s lower+fade on dissolve/defection
+      const nextCenterIds = new Set(
+        dressingPlan.centerFlags.map((f) => f.centerCubeId)
+      );
+      if (this.initialSyncDone) {
+        for (let i = 0; i < this.provinceFlags.length; i++) {
+          const prevFlag = this.provinceFlags[i];
+          if (!nextCenterIds.has(prevFlag.cubeId)) {
+            this.provinceDressGroup.remove(prevFlag.root);
+            const mats: THREE.Material[] = [];
+            prevFlag.root.traverse((ch) => {
+              if ((ch as THREE.Mesh).isMesh) {
+                const m = (ch as THREE.Mesh).material as THREE.Material;
+                m.transparent = true;
+                mats.push(m);
+              }
+            });
+            this.fadingFxGroup.add(prevFlag.root);
+            this.fadingObjects.push({
+              root: prevFlag.root,
+              materials: mats,
+              age: 0,
+              duration: 2.0,
+              lowerY: true,
+              startY: prevFlag.root.position.y,
+            });
+          }
+        }
+      }
+
+      // Clear active dressing group (surviving/previous items rebuilt cleanly from provinces)
+      while (this.provinceDressGroup.children.length > 0) {
+        const ch = this.provinceDressGroup.children[0];
+        this.provinceDressGroup.remove(ch);
+        this.disposeObjectTree(ch);
+      }
+      this.provinceFlags = [];
+      this.houseBanners = [];
+
+      const neutralStartColor = new THREE.Color('#D7C9AA');
+
+      // Build center flagpoles
+      for (let i = 0; i < dressingPlan.centerFlags.length; i++) {
+        const spec = dressingPlan.centerFlags[i];
+        const cube = payload.cubes[spec.centerCubeId];
+        if (!cube) continue;
+        const center = cellToWorldCenter(cube.row, cube.col);
+        const off = getCenterFlagWorldOffset(cube);
+        const wx = center.x + off.dx;
+        const wz = center.z + off.dz;
+        const groundY = getTerrainHeightAt(wx, wz, this.seaCoords);
+
+        const animateColor = joinTriggered && newlyJoinedCubes.has(cube.id);
+        const { root, pennantMesh, pennantMat } = this.createProvinceFlagpoleMesh(
+          animateColor ? '#D7C9AA' : spec.color,
+          spec.isPalace
+        );
+        root.position.set(wx, groundY, wz);
+        this.provinceDressGroup.add(root);
+
+        this.provinceFlags.push({
+          root,
+          pennantMesh,
+          pennantMat,
+          targetColor: new THREE.Color(spec.color),
+          startColor: animateColor ? neutralStartColor.clone() : null,
+          colorLerpAge: animateColor ? 0 : 2.0,
+          baseY: groundY,
+          phase: cube.id * 0.7,
+          cubeId: cube.id,
+          provinceId: spec.provinceId,
+        });
+      }
+
+      // Build small cloth banners on king-owned houses matching province color
+      for (let i = 0; i < dressingPlan.houseBanners.length; i++) {
+        const spec = dressingPlan.houseBanners[i];
+        const pos = cellSlotToWorld(spec.row, spec.col, 'half', spec.slot);
+        const groundY = getTerrainHeightAt(pos.x, pos.z, this.seaCoords);
+        const animateColor = joinTriggered && newlyJoinedCubes.has(spec.cubeId);
+
+        const bannerGeo = new THREE.PlaneGeometry(0.42, 0.88);
+        const bannerMat = new THREE.MeshStandardMaterial({
+          color: new THREE.Color(animateColor ? '#D7C9AA' : spec.color),
+          roughness: 0.72,
+          side: THREE.DoubleSide,
+        });
+        const bannerMesh = new THREE.Mesh(bannerGeo, bannerMat);
+        bannerMesh.position.set(pos.x + 1.18, groundY + 2.15, pos.z + 1.15);
+        bannerMesh.rotation.y = Math.PI * 0.25;
+        this.provinceDressGroup.add(bannerMesh);
+
+        this.houseBanners.push({
+          mesh: bannerMesh,
+          mat: bannerMat,
+          targetColor: new THREE.Color(spec.color),
+          startColor: animateColor ? neutralStartColor.clone() : null,
+          colorLerpAge: animateColor ? 0 : 2.0,
+          phase: spec.cubeId * 1.1 + spec.slot * 1.7,
+          cubeId: spec.cubeId,
+        });
+      }
+
+      this.lastProvinceSignature = provSig;
+    }
+
+    // Recompute dirt roads from palace to non-palace province centers via Prompt 1 street A*
+    const roadSig =
+      provinces.map((p) => `${p.id}:${p.centerCubeId}`).join('|') +
+      `#own:${this.lastOwnedSignature}#sea:${this.lastSeaSignature}#bld:${payload.cubes
+        .map((c) => (c.owner === 'player' ? `${c.id}:${c.themeId ?? ''}` : ''))
+        .filter(Boolean)
+        .join(',')}`;
+
+    if (roadSig !== this.lastRoadSignature) {
+      const roadSpecs = computeProvinceRoads(
+        payload.cubes,
+        provinces,
+        this.seaCoords
+      );
+      const nextRoadIds = new Set(roadSpecs.map((r) => r.provinceId));
+
+      // Fade out removed/dissolved province roads over 2.0s
+      for (const [provId, active] of this.activeProvinceRoads.entries()) {
+        if (!nextRoadIds.has(provId)) {
+          this.provinceRoadsGroup.remove(active.mesh);
+          if (this.initialSyncDone) {
+            this.fadingFxGroup.add(active.mesh);
+            this.fadingObjects.push({
+              root: active.mesh,
+              materials: [active.mat],
+              age: 0,
+              duration: 2.0,
+              lowerY: false,
+              startY: active.mesh.position.y,
+            });
+          } else {
+            active.mesh.geometry.dispose();
+            active.mat.dispose();
+          }
+          this.activeProvinceRoads.delete(provId);
+        }
+      }
+
+      // Add or update active roads
+      for (let i = 0; i < roadSpecs.length; i++) {
+        const spec = roadSpecs[i];
+        const prev = this.activeProvinceRoads.get(spec.provinceId);
+        const built = this.buildDirtRoadMesh(spec);
+        if (!built) continue;
+
+        const isBrandNew = !prev && this.initialSyncDone;
+        if (prev) {
+          this.provinceRoadsGroup.remove(prev.mesh);
+          prev.mesh.geometry.dispose();
+          prev.mat.dispose();
+        }
+
+        if (isBrandNew) {
+          built.mesh.geometry.setDrawRange(0, 0);
+        }
+        this.provinceRoadsGroup.add(built.mesh);
+        this.activeProvinceRoads.set(spec.provinceId, {
+          provinceId: spec.provinceId,
+          mesh: built.mesh,
+          mat: built.mat,
+          totalIndices: built.totalIndices,
+          drawAge: isBrandNew ? 0 : 2.0,
+          drawDuration: 2.0,
+        });
+      }
+
+      this.lastRoadSignature = roadSig;
+    }
   }
 
   private getOrCreatePriceTagTexture(price: number): THREE.CanvasTexture {
@@ -1693,6 +2419,79 @@ export class WorldEngine {
       }
     }
 
+    // Prompt 7 Element 2: Province center flagpole breeze wave & 2s join color transition
+    for (let i = 0; i < this.provinceFlags.length; i++) {
+      const f = this.provinceFlags[i];
+      f.pennantMesh.rotation.y = Math.sin(this.elapsedTime * 2.8 + f.phase) * 0.22;
+      if (f.startColor && f.colorLerpAge < 2.0) {
+        f.colorLerpAge = Math.min(2.0, f.colorLerpAge + dt);
+        const t = f.colorLerpAge / 2.0;
+        f.pennantMat.color.copy(f.startColor).lerp(f.targetColor, t);
+      }
+    }
+
+    // Prompt 7 Element 2: House banner gentle sway & 2s join color transition
+    for (let i = 0; i < this.houseBanners.length; i++) {
+      const b = this.houseBanners[i];
+      b.mesh.rotation.z = Math.sin(this.elapsedTime * 2.2 + b.phase) * 0.08;
+      if (b.startColor && b.colorLerpAge < 2.0) {
+        b.colorLerpAge = Math.min(2.0, b.colorLerpAge + dt);
+        const t = b.colorLerpAge / 2.0;
+        b.mat.color.copy(b.startColor).lerp(b.targetColor, t);
+      }
+    }
+
+    // Prompt 7 Element 2: Newly formed province roads draw smoothly from palace to center over 2.0s
+    for (const road of this.activeProvinceRoads.values()) {
+      if (road.drawAge < road.drawDuration) {
+        road.drawAge = Math.min(road.drawDuration, road.drawAge + dt);
+        const t = road.drawAge / road.drawDuration;
+        const count = Math.floor((road.totalIndices / 6) * t) * 6;
+        road.mesh.geometry.setDrawRange(0, Math.min(road.totalIndices, count));
+      }
+    }
+
+    // Prompt 7 Element 2: Dissolved/defected roads & lowered flags fade out over 2.0s
+    for (let i = this.fadingObjects.length - 1; i >= 0; i--) {
+      const item = this.fadingObjects[i];
+      item.age += dt;
+      if (item.age >= item.duration) {
+        this.fadingFxGroup.remove(item.root);
+        this.disposeObjectTree(item.root);
+        this.fadingObjects.splice(i, 1);
+        continue;
+      }
+      const alpha = Math.max(0, 1 - item.age / item.duration);
+      for (let m = 0; m < item.materials.length; m++) {
+        item.materials[m].opacity = alpha * 0.88;
+      }
+      if (item.lowerY) {
+        item.root.position.y = item.startY - (item.age / item.duration) * 1.6;
+      }
+    }
+
+    // Prompt 7 Element 4: 3s province center highlight pulse
+    if (this.provinceHighlightTimer > 0) {
+      this.provinceHighlightTimer = Math.max(0, this.provinceHighlightTimer - dt);
+      const pulse = 1 + Math.sin(this.elapsedTime * 5.2) * 0.14;
+      this.provinceHighlightRingMesh.scale.set(pulse, 1, pulse);
+      this.provinceHighlightRingMat.opacity =
+        Math.min(1, this.provinceHighlightTimer / 0.6) * 0.9;
+      if (this.provinceHighlightTimer <= 0) {
+        this.provinceHighlightRingMesh.visible = false;
+        this.provinceHighlightCubeId = null;
+      }
+    }
+
+    // Prompt 7 Element 3: Subtle campfire flicker at Arrival Camp
+    if (this.campFlameMesh) {
+      const flick = 0.88 + Math.sin(this.elapsedTime * 11.5) * 0.14 + Math.cos(this.elapsedTime * 17.3) * 0.08;
+      this.campFlameMesh.scale.set(0.92 + (flick - 0.88) * 0.5, flick, 0.92 + (flick - 0.88) * 0.5);
+      if (this.campGlowLight) {
+        this.campGlowLight.intensity = 1.9 + flick * 0.55;
+      }
+    }
+
     // Gentle pulse on organic hover decal and selection ground ring
     if (this.hoverDecalMesh.visible) {
       this.hoverDecalMat.opacity = 0.28 + Math.sin(this.elapsedTime * 4.2) * 0.08;
@@ -1800,6 +2599,33 @@ export class WorldEngine {
     this.hoverDecalMat.dispose();
     this.selectionRingMesh.geometry.dispose();
     this.selectionRingMat.dispose();
+    this.provinceHighlightRingMesh.geometry.dispose();
+    this.provinceHighlightRingMat.dispose();
+
+    while (this.provinceDressGroup.children.length > 0) {
+      const ch = this.provinceDressGroup.children[0];
+      this.provinceDressGroup.remove(ch);
+      this.disposeObjectTree(ch);
+    }
+    while (this.provinceRoadsGroup.children.length > 0) {
+      const ch = this.provinceRoadsGroup.children[0];
+      this.provinceRoadsGroup.remove(ch);
+      this.disposeObjectTree(ch);
+    }
+    while (this.fadingFxGroup.children.length > 0) {
+      const ch = this.fadingFxGroup.children[0];
+      this.fadingFxGroup.remove(ch);
+      this.disposeObjectTree(ch);
+    }
+    while (this.campGroup.children.length > 0) {
+      const ch = this.campGroup.children[0];
+      this.campGroup.remove(ch);
+      this.disposeObjectTree(ch);
+    }
+    this.provinceFlags = [];
+    this.houseBanners = [];
+    this.activeProvinceRoads.clear();
+    this.fadingObjects = [];
 
     this.sandTexture.dispose();
     this.sandBumpTexture.dispose();

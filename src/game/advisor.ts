@@ -2,6 +2,12 @@ import { BASE_BUY_PRICES, MONTH_DAYS, TRADED_RESOURCES } from './constants';
 import { computePeoplesBankNetWorth, getBankCubeAskPrice } from './bank';
 import { getHousingQueue } from './housingOffice';
 import { getActiveCVs } from './laborOffice';
+import {
+  chebyshevDistance,
+  findProvinceForCube,
+  formatProvinceTitle,
+  PALACE_PROVINCE_NAME,
+} from './provinces';
 import { STRINGS } from './strings';
 import type {
   AdvisorAction,
@@ -19,6 +25,8 @@ import type {
   OfficeFaxStatus,
   PeoplesBank,
   PriceMap,
+  Province,
+  ProvinceEvent,
   ThemeId,
   TradedResourceKey,
 } from './types';
@@ -304,10 +312,18 @@ export function adviseFax(fax: OfficeFax, state: GameState): FaxAdvice {
 
   let recommendedTheme: ThemeId = 'farm';
   let bucketLabel = 'المزارع';
-  if (professionalCount > physicalCount && professionalCount >= socialCount) {
+  if (
+    state.level >= 2 &&
+    professionalCount > physicalCount &&
+    professionalCount >= socialCount
+  ) {
     recommendedTheme = 'workshop';
     bucketLabel = 'الورش الحرفية';
-  } else if (socialCount > physicalCount && socialCount > professionalCount) {
+  } else if (
+    state.level >= 2 &&
+    socialCount > physicalCount &&
+    socialCount > professionalCount
+  ) {
     recommendedTheme = 'shop';
     bucketLabel = 'المحلات والخدمات';
   }
@@ -336,6 +352,9 @@ export interface AdvisorBriefingInput {
   citizenWealth: number;
   population: number;
   satisfaction: number;
+  provinces?: Province[];
+  provinceEvents?: ProvinceEvent[];
+  pendingArrivals?: number;
 }
 
 // Element 1.3 & H1: Pure, deterministic monthly briefing computed once per month boundary.
@@ -436,6 +455,78 @@ export function computeAdvisorBriefing(
     });
   }
 
+  // Prompt 7 Element 5.2: Province & Arrival Camp briefing lines
+  const provinces = input.provinces ?? [];
+  const provinceEvents = input.provinceEvents ?? [];
+  const pendingArrivals = Math.max(0, Math.floor(input.pendingArrivals ?? 0));
+  const resolveProvinceTitle = (centerCubeId: number): string => {
+    const direct = findProvinceForCube(provinces, centerCubeId);
+    if (direct) return formatProvinceTitle(direct.nameAr);
+    const refCube = input.cubes[centerCubeId];
+    if (refCube && provinces.length > 0) {
+      let nearest = provinces[0];
+      let bestDist = Infinity;
+      for (let i = 0; i < provinces.length; i++) {
+        const pCube = input.cubes[provinces[i].centerCubeId];
+        if (!pCube) continue;
+        const d = chebyshevDistance(refCube, pCube);
+        if (
+          d < bestDist ||
+          (d === bestDist && provinces[i].centerCubeId < nearest.centerCubeId)
+        ) {
+          bestDist = d;
+          nearest = provinces[i];
+        }
+      }
+      if (bestDist < Infinity) {
+        return formatProvinceTitle(nearest.nameAr);
+      }
+    }
+    return formatProvinceTitle(PALACE_PROVINCE_NAME);
+  };
+
+  const monthEvents = provinceEvents.filter((ev) => ev.month === input.month);
+  const emittedProvinceTexts = new Set<string>();
+  const pushUniqueLine = (line: BriefLine) => {
+    if (emittedProvinceTexts.has(line.textAr)) return;
+    emittedProvinceTexts.add(line.textAr);
+    lines.push(line);
+  };
+
+  for (let i = 0; i < monthEvents.length; i++) {
+    const ev = monthEvents[i];
+    if (ev.kind === 'village_joined') {
+      const title = resolveProvinceTitle(ev.centerCubeId);
+      pushUniqueLine({
+        severity: 'positive',
+        textAr: `انضمت قرية جديدة — ${title} كبرت`,
+        action: { type: 'none' },
+      });
+    } else if (ev.kind === 'village_defected') {
+      const title = resolveProvinceTitle(ev.centerCubeId);
+      pushUniqueLine({
+        severity: 'critical',
+        textAr: `قرية انفصلت عنك — راجع رضا ${title}`,
+        action: { type: 'none' },
+      });
+    } else if (ev.kind === 'province_formed') {
+      const title = resolveProvinceTitle(ev.centerCubeId);
+      pushUniqueLine({
+        severity: 'info',
+        textAr: `تشكلت ولاية جديدة: ${title}`,
+        action: { type: 'none' },
+      });
+    }
+  }
+
+  if (pendingArrivals > 0) {
+    lines.push({
+      severity: 'medium',
+      textAr: `مخيم الوصول ممتلئ — ${pendingArrivals} قادم ينتظر`,
+      action: { type: 'arm_theme', themeId: 'house' },
+    });
+  }
+
   // Stable sort by severity
   lines.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
 
@@ -447,6 +538,29 @@ export function computeAdvisorBriefing(
     lines,
     topAction,
   };
+}
+
+// Element 1.3 & H1: Pure, deterministic monthly briefing computed directly from GameState.
+export function advisorBriefing(state: GameState): AdvisorBriefing {
+  return computeAdvisorBriefing({
+    month: state.totalMonths,
+    arrears: state.arrears,
+    bankLoans: state.bankLoans,
+    inflationIndex: state.inflationIndex,
+    lastMonthStats: state.lastMonthStats,
+    citizens: state.citizens,
+    totalMonths: state.totalMonths,
+    peoplesBank: state.peoplesBank,
+    cubes: state.cubes,
+    prices: state.prices,
+    gold: state.gold,
+    citizenWealth: state.citizenWealth,
+    population: state.population,
+    satisfaction: state.satisfaction,
+    provinces: state.provinces,
+    provinceEvents: state.provinceEvents,
+    pendingArrivals: state.pendingArrivals,
+  });
 }
 
 // H4 Shared selector: single source of truth for month window treasury summary used by BOTH

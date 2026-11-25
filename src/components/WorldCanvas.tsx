@@ -9,12 +9,19 @@ import {
   useState,
 } from 'react';
 import { STRINGS } from '../game/strings';
-import type { Cube, ThemeId } from '../game/types';
+import type {
+  ArrivalCamp,
+  Citizen,
+  Cube,
+  Province,
+  ThemeId,
+} from '../game/types';
 import type { CitizenInfo } from './CitizenCard';
 import { WorldEngine } from '../world3d/WorldEngine';
 
 export interface WorldCanvasHandle {
   focusOnCube: (cubeId: number) => void;
+  highlightProvinceCenter: (cubeId: number) => void;
   getCitizenInfo: (agentId: number) => CitizenInfo | null;
 }
 
@@ -28,6 +35,13 @@ interface WorldCanvasProps {
   followCitizenId: number | null;
   activeBuildTheme: ThemeId | null;
   staffedSlots: Set<string>;
+  provinces: Province[];
+  camp: ArrivalCamp;
+  citizens: Citizen[];
+  lastJoinedVillageCubeId: number | null;
+  lastJoinedVillageSeq: number;
+  lastDefectedCubeId: number | null;
+  lastDefectedSeq: number;
   resetSignal: number;
   onCubeClick: (cubeId: number) => void;
   onCitizenClick: (agentId: number) => void;
@@ -48,6 +62,13 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
       followCitizenId,
       activeBuildTheme,
       staffedSlots,
+      provinces,
+      camp,
+      citizens,
+      lastJoinedVillageCubeId,
+      lastJoinedVillageSeq,
+      lastDefectedCubeId,
+      lastDefectedSeq,
       resetSignal,
       onCubeClick,
       onCitizenClick,
@@ -77,6 +98,13 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
       followCitizenId,
       activeBuildTheme,
       staffedSlots,
+      provinces,
+      camp,
+      citizens,
+      lastJoinedVillageCubeId,
+      lastJoinedVillageSeq,
+      lastDefectedCubeId,
+      lastDefectedSeq,
     });
 
     const [webglError, setWebglError] = useState(false);
@@ -86,6 +114,9 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
       () => ({
         focusOnCube: (cubeId: number) => {
           engineRef.current?.focusOnCube(cubeId);
+        },
+        highlightProvinceCenter: (cubeId: number) => {
+          engineRef.current?.highlightProvinceCenter(cubeId);
         },
         getCitizenInfo: (agentId: number) =>
           engineRef.current?.getCitizenInfo(agentId) ?? null,
@@ -130,6 +161,13 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
         followCitizenId,
         activeBuildTheme,
         staffedSlots,
+        provinces,
+        camp,
+        citizens,
+        lastJoinedVillageCubeId,
+        lastJoinedVillageSeq,
+        lastDefectedCubeId,
+        lastDefectedSeq,
       });
     }, [
       cubes,
@@ -141,6 +179,13 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
       followCitizenId,
       activeBuildTheme,
       staffedSlots,
+      provinces,
+      camp,
+      citizens,
+      lastJoinedVillageCubeId,
+      lastJoinedVillageSeq,
+      lastDefectedCubeId,
+      lastDefectedSeq,
     ]);
 
     // Element 4.1: Smoothly refit camera ONLY when owned-cell count changes (purchases & village joins)

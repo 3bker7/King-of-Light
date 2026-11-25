@@ -1,9 +1,14 @@
 import * as THREE from 'three';
 import type { CitizenInfo, CitizenRoleId } from '../components/CitizenCard';
+import {
+  CAMP_CAPACITY,
+  CAMP_CITIZEN_CARD_TEXT_AR,
+  computeCampToHouseWalk,
+} from '../game/arrivalCamp';
 import { THEMES } from '../game/constants';
 import { FEMALE_NAMES, MALE_NAMES } from '../game/names';
 import { findPalaceCube, makeSlotKey } from '../game/production';
-import type { Cube, SlotIndex, ThemeId } from '../game/types';
+import type { ArrivalCamp, Citizen, Cube, SlotIndex, ThemeId } from '../game/types';
 import {
   type AnchorPoint,
   type BuildingAnchors,
@@ -109,6 +114,30 @@ interface LivingAgent {
   playKind: 'house' | 'school' | 'garden';
   patrolStep: number;
   patrolAtPalace: boolean;
+}
+
+const CAMP_AGENT_ID_OFFSET = 100000;
+
+interface CampAgent {
+  agentId: number;
+  citizenId: number;
+  name: string;
+  role: CitizenRoleId;
+  group: THREE.Group;
+  bodyPivot: THREE.Group;
+  x: number;
+  z: number;
+  mode: 'CAMPING' | 'WALKING_TO_HOUSE' | 'ENTERING_NEW_HOUSE';
+  campCubeId: number;
+  houseCubeId: number | null;
+  waypoints: AnchorPoint[];
+  waypointIdx: number;
+  faceTarget: AnchorPoint;
+  walkPhase: number;
+  enterDoorTimer: number;
+  enterStartX: number;
+  enterStartZ: number;
+  speed: number;
 }
 
 const ROLE_LABELS_AR: Record<CitizenRoleId, string> = {
@@ -357,6 +386,10 @@ export class PeopleAgentsManager {
   private lastCubes: Cube[] = [];
   private lastSatisfaction = 60;
   private lastRoleSignature = '';
+  private campAgents = new Map<number, CampAgent>();
+  private prevCampResidentIds = new Set<number>();
+  private prevCampCubeId: number | null = null;
+  private initialCampSyncDone = false;
 
   constructor(blobShadowTexture: THREE.CanvasTexture | null) {
     // Element 5.1: Widen robe/dress geometries by x1.25 for chunkier Stronghold silhouettes
@@ -965,7 +998,9 @@ export class PeopleAgentsManager {
     population: number,
     satisfaction: number,
     staffedSlots: Set<string>,
-    seaCoords: AnchorPoint[]
+    seaCoords: AnchorPoint[],
+    camp?: ArrivalCamp,
+    citizens?: Citizen[]
   ): void {
     this.lastCubes = cubes;
     this.lastSatisfaction = satisfaction;
@@ -1300,6 +1335,153 @@ export class PeopleAgentsManager {
         }
       }
     }
+
+    this.syncCampAgents(cubes, seaCoords, camp, citizens);
+  }
+
+  private syncCampAgents(
+    cubes: Cube[],
+    seaCoords: AnchorPoint[],
+    camp: ArrivalCamp | undefined,
+    citizens: Citizen[] | undefined
+  ): void {
+    const campCubeId = camp?.cubeId ?? null;
+    const residentIds = (camp?.residentIds ?? []).slice(0, CAMP_CAPACITY);
+    const residentSet = new Set<number>(residentIds);
+    const citizenById = new Map<number, Citizen>();
+    if (citizens) {
+      for (let i = 0; i < citizens.length; i++) {
+        citizenById.set(citizens[i].id, citizens[i]);
+      }
+    }
+
+    // 1. Check previously camping citizens who left the camp: if granted a house live, walk them via street A*
+    for (const [citId, agent] of this.campAgents.entries()) {
+      if (residentSet.has(citId)) continue;
+      if (agent.mode === 'WALKING_TO_HOUSE' || agent.mode === 'ENTERING_NEW_HOUSE') {
+        continue;
+      }
+
+      const cit = citizenById.get(citId);
+      if (
+        this.initialCampSyncDone &&
+        cit &&
+        cit.homeCubeId !== null &&
+        cubes[cit.homeCubeId]?.owner === 'player'
+      ) {
+        const walk = computeCampToHouseWalk(
+          cubes,
+          seaCoords,
+          agent.campCubeId,
+          cit.homeCubeId
+        );
+        const houseCube = cubes[cit.homeCubeId];
+        const houseCenter = cellToWorldCenter(houseCube.row, houseCube.col);
+        if (walk.reachable && walk.waypoints.length > 0) {
+          agent.mode = 'WALKING_TO_HOUSE';
+          agent.houseCubeId = cit.homeCubeId;
+          agent.waypoints = walk.waypoints;
+          agent.waypointIdx = 0;
+          agent.faceTarget = houseCenter;
+          continue;
+        }
+      }
+
+      // Otherwise remove cleanly
+      this.group.remove(agent.group);
+      if (this.selectedAgentId === agent.agentId) {
+        this.selectedAgentId = null;
+        this.selectedRingMesh.visible = false;
+      }
+      this.campAgents.delete(citId);
+    }
+
+    // 2. Spawn or reposition current camp residents around tents & campfire on camp.cubeId
+    if (campCubeId !== null && residentIds.length > 0) {
+      const campCube = cubes[campCubeId];
+      if (campCube && campCube.owner === 'player') {
+        const center = cellToWorldCenter(campCube.row, campCube.col);
+        const firePos: AnchorPoint = { x: center.x, z: center.z + 1.15 };
+        // Six clean spots around campfire & tent entrances, strictly inside the land cube
+        const spotOffsets: ReadonlyArray<{ dx: number; dz: number }> = [
+          { dx: -1.45, dz: 0.45 },
+          { dx: 1.45, dz: 0.55 },
+          { dx: -1.1, dz: 2.25 },
+          { dx: 1.15, dz: 2.25 },
+          { dx: -2.4, dz: -0.2 },
+          { dx: 2.4, dz: -0.1 },
+        ];
+
+        for (let idx = 0; idx < residentIds.length; idx++) {
+          const citId = residentIds[idx];
+          const cit = citizenById.get(citId);
+          const spot = spotOffsets[idx % spotOffsets.length];
+          const wx = center.x + spot.dx;
+          const wz = center.z + spot.dz;
+          const wy = this.getLandHeight(wx, wz);
+
+          const existing = this.campAgents.get(citId);
+          if (existing) {
+            if (existing.mode === 'CAMPING') {
+              existing.campCubeId = campCubeId;
+              existing.x = wx;
+              existing.z = wz;
+              existing.faceTarget = firePos;
+              existing.group.position.set(wx, wy, wz);
+              existing.group.rotation.y = Math.atan2(
+                firePos.x - wx,
+                firePos.z - wz
+              );
+            }
+          } else {
+            const agentId = CAMP_AGENT_ID_OFFSET + citId;
+            const role: CitizenRoleId = cit
+              ? cit.sex === 'F'
+                ? 'woman'
+                : 'man'
+              : idx % 2 === 0
+                ? 'man'
+                : 'woman';
+            const name =
+              cit?.name ??
+              (role === 'woman'
+                ? FEMALE_NAMES[citId % FEMALE_NAMES.length]
+                : MALE_NAMES[citId % MALE_NAMES.length]);
+
+            const built = this.createAgentMesh(agentId, role, citId);
+            built.root.position.set(wx, wy, wz);
+            built.root.rotation.y = Math.atan2(firePos.x - wx, firePos.z - wz);
+            this.group.add(built.root);
+
+            this.campAgents.set(citId, {
+              agentId,
+              citizenId: citId,
+              name,
+              role,
+              group: built.root,
+              bodyPivot: built.bodyPivot,
+              x: wx,
+              z: wz,
+              mode: 'CAMPING',
+              campCubeId,
+              houseCubeId: null,
+              waypoints: [],
+              waypointIdx: 0,
+              faceTarget: firePos,
+              walkPhase: citId * 0.9,
+              enterDoorTimer: 0,
+              enterStartX: wx,
+              enterStartZ: wz,
+              speed: 2.25,
+            });
+          }
+        }
+      }
+    }
+
+    this.prevCampResidentIds = residentSet;
+    this.prevCampCubeId = campCubeId;
+    this.initialCampSyncDone = true;
   }
 
   public setSelectedAgent(agentId: number | null): void {
@@ -1314,6 +1496,12 @@ export class PeopleAgentsManager {
       const a = this.agents[i];
       if (a.id === agentId) {
         out.set(a.x, a.group.position.y, a.z);
+        return true;
+      }
+    }
+    for (const c of this.campAgents.values()) {
+      if (c.agentId === agentId) {
+        out.set(c.x, c.group.position.y, c.z);
         return true;
       }
     }
@@ -1438,6 +1626,27 @@ export class PeopleAgentsManager {
         workThemeId: a.workSpot?.themeId ?? null,
         x: a.x,
         z: a.z,
+      };
+    }
+
+    // Element 3.2: Truthful Arabic card text for Arrival Camp residents
+    for (const c of this.campAgents.values()) {
+      if (c.agentId !== agentId) continue;
+      const mood = getMoodFromSatisfaction(this.lastSatisfaction);
+      return {
+        id: c.agentId,
+        name: c.name,
+        role: c.role,
+        roleLabelAr: ROLE_LABELS_AR[c.role],
+        destinationAr:
+          c.mode === 'CAMPING'
+            ? CAMP_CITIZEN_CARD_TEXT_AR
+            : THEME_GOING_TEXT.house,
+        moodAr: mood.moodAr,
+        moodTone: mood.moodTone,
+        workThemeId: null,
+        x: c.x,
+        z: c.z,
       };
     }
     return null;
@@ -1637,6 +1846,85 @@ export class PeopleAgentsManager {
       }
     }
 
+    // Element 3.2: Update Arrival Camp residents (campfire idle + walk via street A* to granted house)
+    const finishedCampIds: number[] = [];
+    for (const [citId, c] of this.campAgents.entries()) {
+      if (c.mode === 'CAMPING') {
+        c.walkPhase += dt * 1.8;
+        c.bodyPivot.rotation.z = Math.sin(c.walkPhase) * 0.035;
+      } else if (c.mode === 'WALKING_TO_HOUSE') {
+        const wp = c.waypoints[c.waypointIdx];
+        if (!wp) {
+          c.mode = 'ENTERING_NEW_HOUSE';
+          c.enterDoorTimer = ENTER_DOOR_DURATION;
+          c.enterStartX = c.x;
+          c.enterStartZ = c.z;
+        } else {
+          const dx = wp.x - c.x;
+          const dz = wp.z - c.z;
+          const dist = Math.hypot(dx, dz);
+          if (dist < 0.35) {
+            c.x = wp.x;
+            c.z = wp.z;
+            const gy = this.getLandHeight(c.x, c.z);
+            c.group.position.set(c.x, gy, c.z);
+            c.waypointIdx += 1;
+            if (c.waypointIdx >= c.waypoints.length) {
+              c.mode = 'ENTERING_NEW_HOUSE';
+              c.enterDoorTimer = ENTER_DOOR_DURATION;
+              c.enterStartX = c.x;
+              c.enterStartZ = c.z;
+            }
+          } else {
+            const step = Math.min(dist, c.speed * dt);
+            c.x += (dx / dist) * step;
+            c.z += (dz / dist) * step;
+            c.walkPhase += dt * 7.4;
+            const gy = this.getLandHeight(c.x, c.z);
+            const bob = Math.abs(Math.sin(c.walkPhase)) * 0.16;
+            c.group.position.set(c.x, gy + bob, c.z);
+            c.group.rotation.y = Math.atan2(dx, dz);
+          }
+        }
+      } else if (c.mode === 'ENTERING_NEW_HOUSE') {
+        c.enterDoorTimer -= dt;
+        const progress = THREE.MathUtils.clamp(
+          1 - c.enterDoorTimer / ENTER_DOOR_DURATION,
+          0,
+          1
+        );
+        const fx = c.faceTarget.x - c.enterStartX;
+        const fz = c.faceTarget.z - c.enterStartZ;
+        const flen = Math.hypot(fx, fz) || 1;
+        const stepIn = 0.55 * progress;
+        const curX = c.enterStartX + (fx / flen) * stepIn;
+        const curZ = c.enterStartZ + (fz / flen) * stepIn;
+        const gy = this.getLandHeight(c.enterStartX, c.enterStartZ);
+        c.group.position.set(curX, gy, curZ);
+        c.group.rotation.y = Math.atan2(fx, fz);
+        c.group.scale.setScalar(Math.max(0.05, 1 - progress * 0.95));
+        if (c.enterDoorTimer <= 0) {
+          finishedCampIds.push(citId);
+        }
+      }
+
+      if (this.selectedAgentId !== null && c.agentId === this.selectedAgentId) {
+        selectedFound = true;
+        const gy = this.getLandHeight(c.x, c.z);
+        this.selectedRingMesh.position.set(c.x, gy + 0.12, c.z);
+        this.selectedRingMesh.visible = c.group.visible;
+      }
+    }
+
+    for (let i = 0; i < finishedCampIds.length; i++) {
+      const citId = finishedCampIds[i];
+      const c = this.campAgents.get(citId);
+      if (c) {
+        this.group.remove(c.group);
+        this.campAgents.delete(citId);
+      }
+    }
+
     if (this.selectedAgentId !== null && !selectedFound) {
       this.selectedAgentId = null;
       this.selectedRingMesh.visible = false;
@@ -1648,6 +1936,10 @@ export class PeopleAgentsManager {
       this.group.remove(a.group);
     }
     this.agents.length = 0;
+    for (const c of this.campAgents.values()) {
+      this.group.remove(c.group);
+    }
+    this.campAgents.clear();
     this.group.remove(this.selectedRingMesh);
     this.sharedGeos.forEach((g) => g.dispose());
     this.sharedMats.forEach((m) => m.dispose());

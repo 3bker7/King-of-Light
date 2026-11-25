@@ -1,4 +1,4 @@
-import { AlertTriangle, Clock, Coins, Landmark, ScrollText, TrendingUp, Users, Wallet } from 'lucide-react';
+import { AlertTriangle, Clock, Coins, Flag, Landmark, ScrollText, TrendingUp, Users, Wallet } from 'lucide-react';
 import { MAX_OFFLINE_SECONDS, TRADED_RESOURCES } from '../game/constants';
 import { formatDurationArabic, STRINGS } from '../game/strings';
 import type { AwayReportData } from '../game/types';
@@ -174,6 +174,29 @@ export function AwayReport({ report, onClose }: AwayReportProps) {
               <span className="tabular-nums-latin">
                 صفقات بنك الشعب أثناء غيابك: {report.bankTradesCount} صفقة
               </span>
+            </div>
+          )}
+
+          {/* Prompt 7 Element 5.3: Province events during away period (one concise line per event, no animation replay) */}
+          {report.provinceEvents && report.provinceEvents.length > 0 && (
+            <div className="p-2.5 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] space-y-1.5">
+              <div className="flex items-center gap-1.5 font-extrabold text-[#2B2118]">
+                <Flag className="w-4 h-4 text-[#14524A] shrink-0" />
+                <span>أحداث الولايات أثناء غيابك</span>
+              </div>
+              <ul className="space-y-1 max-h-28 overflow-y-auto pr-0.5">
+                {report.provinceEvents.map((ev) => (
+                  <li
+                    key={ev.id}
+                    className="flex items-center justify-between gap-2 text-[11px] font-bold text-[#4F3F2B]"
+                  >
+                    <span className="truncate">{ev.labelAr}</span>
+                    <span className="shrink-0 text-[10px] text-[#7A674D] tabular-nums-latin">
+                      شهر {ev.month}
+                    </span>
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
 
