@@ -32,6 +32,10 @@ import {
 } from './constants';
 import { sanitizeOfficeFaxesOnHydrate } from './advisor';
 import {
+  sanitizeArrivalCampOnHydrate,
+  syncArrivalCamp,
+} from './arrivalCamp';
+import {
   BANK_START_GOLD,
   PALACE_START_GOLD,
   TRUST_START,
@@ -77,6 +81,16 @@ import {
   isAdjacentToOwned,
   isPurchasableNeutralCube,
 } from './production';
+import {
+  computeProvinces,
+  createProvinceEvent,
+  diffProvincesForEvents,
+  findProvinceForCube,
+  formatProvinceTitle,
+  PALACE_PROVINCE_NAME,
+  recordProvinceEvents,
+  sanitizeProvinceEventsOnHydrate,
+} from './provinces';
 import { clearSavedGame } from './save';
 import { createZeroLastMonthStats } from './spending';
 import { STRINGS } from './strings';
@@ -98,6 +112,8 @@ import type {
   OfficeFaxStatus,
   PersistedSaveData,
   PrivateAd,
+  Province,
+  ProvinceEvent,
   SlotIndex,
   TaxPolicyMode,
   ThemeId,
@@ -149,6 +165,38 @@ function applyArrearsCap(satisfaction: number, arrears: number): number {
   return arrears > 0
     ? Math.min(ARREARS_SATISFACTION_CAP, satisfaction)
     : satisfaction;
+}
+
+function numArraysEqual(a: number[], b: number[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function provincesEqual(a: Province[], b: Province[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const pa = a[i];
+    const pb = b[i];
+    if (
+      pa.id !== pb.id ||
+      pa.centerCubeId !== pb.centerCubeId ||
+      pa.nameAr !== pb.nameAr ||
+      pa.color !== pb.color ||
+      pa.houseCount !== pb.houseCount ||
+      pa.population !== pb.population ||
+      pa.staffedWorkplaces !== pb.staffedWorkplaces ||
+      pa.privatePlots !== pb.privatePlots ||
+      !numArraysEqual(pa.cubeIds, pb.cubeIds) ||
+      !numArraysEqual(pa.landCubeIds, pb.landCubeIds) ||
+      !numArraysEqual(pa.seaCubeIds, pb.seaCubeIds)
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function createInitialObjectives(): ObjectiveState[] {
@@ -309,6 +357,12 @@ export function createFreshGameState(now = Date.now()): GameState {
     advisorBriefing: null,
     taxPolicy: { ...DEFAULT_TAX_POLICY },
     decrees: [],
+    provinces: [],
+    camp: { cubeId: null, residentIds: [] },
+    pendingArrivals: 0,
+    provinceEvents: [],
+    lastDefectedCubeId: null,
+    lastDefectedSeq: 0,
   };
 }
 
@@ -455,6 +509,22 @@ export function hydrateGameState(saved: PersistedSaveData): GameState {
       : 1
   );
 
+  const hydratedCamp = sanitizeArrivalCampOnHydrate(
+    syncedAds.citizens,
+    cleanPrivate.cubes,
+    totalMonths,
+    saved.camp
+  );
+  const hydratedProvinces = computeProvinces({
+    cubes: cleanPrivate.cubes,
+    citizens: hydratedCamp.citizens,
+    population: safePop,
+  });
+  const hydratedProvinceEvents = sanitizeProvinceEventsOnHydrate(
+    saved.provinceEvents,
+    cleanPrivate.cubes.length
+  );
+
   return {
     cubes: cleanPrivate.cubes,
     warehouse: saved.warehouse,
@@ -495,7 +565,7 @@ export function hydrateGameState(saved: PersistedSaveData): GameState {
       typeof saved.lastInflationWarnMonth === 'number'
         ? saved.lastInflationWarnMonth
         : 0,
-    citizens: syncedAds.citizens,
+    citizens: hydratedCamp.citizens,
     nextCitizenId,
     totalMonths,
     officeFaxes: savedOfficeFaxes,
@@ -533,6 +603,12 @@ export function hydrateGameState(saved: PersistedSaveData): GameState {
     advisorBriefing,
     taxPolicy,
     decrees,
+    provinces: hydratedProvinces,
+    camp: hydratedCamp.camp,
+    pendingArrivals: hydratedCamp.pendingArrivals,
+    provinceEvents: hydratedProvinceEvents,
+    lastDefectedCubeId: null,
+    lastDefectedSeq: 0,
   };
 }
 
@@ -761,6 +837,11 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
       let nextLastBankNetWorthWarnMonth = state.lastBankNetWorthWarnMonth;
       let nextAdvisorBriefing = state.advisorBriefing;
       let nextDecrees = state.decrees;
+      let nextProvinces = state.provinces;
+      let nextCamp = state.camp;
+      let nextPendingArrivals = state.pendingArrivals;
+      let nextProvinceEvents = state.provinceEvents;
+      const joinedVillagesThisTick: Array<{ id: number; name: string }> = [];
       const newToasts: ToastItem[] = [];
       let pendingAudioCue = state.pendingAudioCue;
 
@@ -905,6 +986,9 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
             taxPolicy: state.taxPolicy,
             decrees: nextDecrees,
             advisorBriefing: nextAdvisorBriefing,
+            provinces: nextProvinces,
+            camp: nextCamp,
+            provinceEvents: nextProvinceEvents,
             hungerFlag: nextHungerFlag,
             isOffline: false,
             day: nextDay,
@@ -934,6 +1018,10 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
           nextLastBankNetWorthWarnMonth = mp.lastBankNetWorthWarnMonth;
           nextAdvisorBriefing = mp.advisorBriefing;
           nextDecrees = mp.decrees;
+          nextProvinces = mp.provinces;
+          nextCamp = mp.camp;
+          nextPendingArrivals = mp.pendingArrivals;
+          nextProvinceEvents = mp.provinceEvents;
 
           for (const item of mp.ledgerItems) {
             nextLedger = appendLedger(
@@ -984,6 +1072,7 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
               lastJoinedVillageCubeId = cube.id;
               lastJoinedVillageSeq += 1;
               const vName = cube.villageName ?? 'الواحة';
+              joinedVillagesThisTick.push({ id: cube.id, name: vName });
               nextTicker = STRINGS.bourse.tickerVillageJoined(vName);
               newToasts.push(
                 createToast(STRINGS.toasts.villageJoined(vName), 'success', cube.id)
@@ -1010,6 +1099,60 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         });
 
         pendingAudioCue = makeCue(villageJoinedThisDay ? 'levelUp' : 'day');
+      }
+
+      // Recompute provinces at end of TICK; keep existing references if unchanged
+      const recomputedProvinces = computeProvinces({
+        cubes: nextCubes,
+        citizens: nextCitizens,
+        population: nextPopulation,
+      });
+      if (
+        !provincesEqual(nextProvinces, recomputedProvinces) ||
+        joinedVillagesThisTick.length > 0
+      ) {
+        const eventMonth =
+          Math.floor((Math.max(1, nextDay) - 1) / MONTH_DAYS) + 1;
+        const additions: ProvinceEvent[] = [];
+        for (let i = 0; i < joinedVillagesThisTick.length; i++) {
+          const jv = joinedVillagesThisTick[i];
+          const joinedProv = findProvinceForCube(recomputedProvinces, jv.id);
+          const provTitle = formatProvinceTitle(
+            joinedProv ? joinedProv.nameAr : PALACE_PROVINCE_NAME
+          );
+          additions.push(
+            createProvinceEvent(
+              'village_joined',
+              eventMonth,
+              jv.id,
+              `انضمت قرية ${jv.name} إلى ${provTitle}`
+            )
+          );
+        }
+        additions.push(
+          ...diffProvincesForEvents(nextProvinces, recomputedProvinces, eventMonth)
+        );
+        if (additions.length > 0) {
+          nextProvinceEvents = recordProvinceEvents(
+            nextProvinceEvents,
+            additions
+          ).events;
+        }
+        nextProvinces = recomputedProvinces;
+        const campSync = syncArrivalCamp(
+          nextCitizens,
+          nextCubes,
+          nextTotalMonths,
+          nextCamp.cubeId
+        );
+        nextCitizens = campSync.citizens;
+        if (
+          campSync.camp.cubeId !== nextCamp.cubeId ||
+          !numArraysEqual(campSync.camp.residentIds, nextCamp.residentIds)
+        ) {
+          nextCamp = campSync.camp;
+        }
+        nextPendingArrivals = campSync.pendingArrivals;
       }
 
       const tickTaxMoodDelta = computeTaxMoodDelta(
@@ -1069,6 +1212,10 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         lastBankNetWorthWarnMonth: nextLastBankNetWorthWarnMonth,
         advisorBriefing: nextAdvisorBriefing,
         decrees: nextDecrees,
+        provinces: nextProvinces,
+        camp: nextCamp,
+        pendingArrivals: nextPendingArrivals,
+        provinceEvents: nextProvinceEvents,
         toasts: appendToasts(state.toasts, newToasts),
         pendingAudioCue,
       };

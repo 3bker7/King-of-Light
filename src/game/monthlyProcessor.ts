@@ -3,6 +3,7 @@ import {
   appendOrMergeFaxes,
   computeAdvisorBriefing,
 } from './advisor';
+import { syncArrivalCamp } from './arrivalCamp';
 import { processBankMonth } from './bank';
 import { reconcileCitizens, sumCitizenWealth } from './citizens';
 import { ARREARS_SATISFACTION_CAP } from './constants';
@@ -27,11 +28,18 @@ import {
   processPrivateConstruction,
   runMonthlyLandRequests,
 } from './privateLand';
-import { computeStaffing } from './production';
+import { computeStaffing, findPalaceCube } from './production';
+import {
+  computeProvinces,
+  createProvinceEvent,
+  diffProvincesForEvents,
+  recordProvinceEvents,
+} from './provinces';
 import { runCitizenSpending } from './spending';
 import { computeTaxMoodDelta, DEFAULT_TAX_POLICY } from './taxPolicy';
 import type {
   AdvisorBriefing,
+  ArrivalCamp,
   BankLoan,
   Citizen,
   Cube,
@@ -46,6 +54,8 @@ import type {
   PoliceRecord,
   PriceMap,
   PrivateAd,
+  Province,
+  ProvinceEvent,
   TaxPolicy,
   Warehouse,
 } from './types';
@@ -80,6 +90,9 @@ export interface MonthlyProcessorInput {
   taxPolicy?: TaxPolicy;
   decrees?: Decree[];
   advisorBriefing?: AdvisorBriefing | null;
+  provinces?: Province[];
+  camp?: ArrivalCamp;
+  provinceEvents?: ProvinceEvent[];
   hungerFlag?: boolean;
   skipBriefing?: boolean;
   isOffline?: boolean;
@@ -114,6 +127,11 @@ export interface MonthlyProcessorResult {
   lastBankNetWorthWarnMonth: number;
   advisorBriefing: AdvisorBriefing | null;
   decrees: Decree[];
+  provinces: Province[];
+  camp: ArrivalCamp;
+  pendingArrivals: number;
+  provinceEvents: ProvinceEvent[];
+  addedProvinceEvents: ProvinceEvent[];
   ledgerItems: LedgerEntry[];
   paid: number;
   unheldSlots: number;
@@ -380,6 +398,7 @@ export function runMonthlyProcessor(
     citizens,
     landRequests: input.landRequests,
     totalMonths: nextTotalMonths,
+    campCubeId: input.camp?.cubeId ?? null,
   });
   const nextLandRequests = landReqRes.landRequests;
 
@@ -467,6 +486,50 @@ export function runMonthlyProcessor(
       ? Math.min(ARREARS_SATISFACTION_CAP, boundaryNeeds.satisfaction)
       : boundaryNeeds.satisfaction;
 
+  // (l2) Recompute provinces, sync arrival camp & record province events BEFORE Advisor briefing
+  const prevProvinces: Province[] = input.provinces ?? [];
+  const prevCamp: ArrivalCamp = input.camp ?? { cubeId: null, residentIds: [] };
+  const prevProvinceEvents: ProvinceEvent[] = input.provinceEvents ?? [];
+
+  const nextProvinces = computeProvinces({
+    cubes,
+    citizens,
+    population: input.population,
+  });
+  const campResult = syncArrivalCamp(
+    citizens,
+    cubes,
+    nextTotalMonths,
+    prevCamp.cubeId
+  );
+  citizens = campResult.citizens;
+  const nextCamp = campResult.camp;
+  const nextPendingArrivals = campResult.pendingArrivals;
+
+  const provinceAdditions: ProvinceEvent[] = diffProvincesForEvents(
+    prevProvinces,
+    nextProvinces,
+    nextTotalMonths
+  );
+  if (nextPendingArrivals > 0) {
+    const palaceCube = findPalaceCube(cubes);
+    const campRefCubeId = nextCamp.cubeId ?? palaceCube?.id ?? 0;
+    provinceAdditions.push(
+      createProvinceEvent(
+        'camp_full',
+        nextTotalMonths,
+        campRefCubeId,
+        `مخيم الوصول ممتلئ — ${nextPendingArrivals} قادم في الطريق`
+      )
+    );
+  }
+  const recProvEvents = recordProvinceEvents(
+    prevProvinceEvents,
+    provinceAdditions
+  );
+  const nextProvinceEvents = recProvEvents.events;
+  const addedProvinceEvents = recProvEvents.added;
+
   // (m) Advisor briefing (pure observer at end; runs once per month boundary; skipped on non-final offline months)
   const shouldComputeBriefing =
     !input.skipBriefing && input.advisorBriefing?.month !== nextTotalMonths;
@@ -486,6 +549,9 @@ export function runMonthlyProcessor(
         citizenWealth,
         population: input.population,
         satisfaction: observedSatisfaction,
+        provinces: nextProvinces,
+        provinceEvents: nextProvinceEvents,
+        pendingArrivals: nextPendingArrivals,
       })
     : (input.advisorBriefing ?? null);
 
@@ -532,6 +598,11 @@ export function runMonthlyProcessor(
     lastBankNetWorthWarnMonth: nextBankNetWorthWarnMonth,
     advisorBriefing,
     decrees,
+    provinces: nextProvinces,
+    camp: nextCamp,
+    pendingArrivals: nextPendingArrivals,
+    provinceEvents: nextProvinceEvents,
+    addedProvinceEvents,
     ledgerItems,
     paid,
     unheldSlots: distRes.unheldSlots,

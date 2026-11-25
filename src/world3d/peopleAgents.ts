@@ -1436,7 +1436,7 @@ export class PeopleAgentsManager {
           } else {
             const agentId = CAMP_AGENT_ID_OFFSET + citId;
             const role: CitizenRoleId = cit
-              ? cit.sex === 'F'
+              ? cit.gender === 'f'
                 ? 'woman'
                 : 'man'
               : idx % 2 === 0
