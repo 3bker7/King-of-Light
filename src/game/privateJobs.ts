@@ -1,11 +1,13 @@
 import { THEMES, WAGE_BY_THEME } from './constants';
 import { ageYears, createPoliceRecord, sumCitizenWealth } from './citizens';
 import { scoreCitizenForTheme } from './laborOffice';
+import { applyWageTaxTransform, DEFAULT_TAX_POLICY } from './taxPolicy';
 import type {
   Citizen,
   Cube,
   PoliceRecord,
   PrivateAd,
+  TaxPolicy,
   ThemeId,
 } from './types';
 
@@ -235,20 +237,30 @@ export function runPrivateLaborMatching(input: {
   };
 }
 
-// Element 4.5: Private payroll — owners pay their filled ads from their own wealth.
-// If insolvent: pay nothing, release worker back to active CV pool, reopen ad. Never touches treasury or arrears.
+// Element 4.5 & Prompt 6 Element 2.2: Private payroll — owners pay exact gross wage w from personal wealth;
+// tax/grant transform redistributes worker credit & treasury delta without owner ever paying extra or going negative.
 export function runPrivatePayroll(input: {
   citizens: Citizen[];
   privateAds: PrivateAd[];
   totalMonths: number;
+  taxPolicy?: TaxPolicy;
+  availableGrantGold?: number;
 }): {
   citizens: Citizen[];
   privateAds: PrivateAd[];
   citizenWealth: number;
   privateWagesPaid: number;
   releasedWorkers: number;
+  taxWithheld: number;
+  grantsPaid: number;
 } {
   const currentMonth = Math.max(0, Math.trunc(input.totalMonths));
+  const policy = input.taxPolicy ?? DEFAULT_TAX_POLICY;
+  let remainingGrantGold =
+    typeof input.availableGrantGold === 'number'
+      ? Math.max(0, Math.floor(input.availableGrantGold))
+      : Infinity;
+
   const nextCitizens: Citizen[] = input.citizens.map((c) => ({
     ...c,
     wealth: Math.max(0, Math.floor(c.wealth)),
@@ -264,6 +276,8 @@ export function runPrivatePayroll(input: {
 
   let privateWagesPaid = 0;
   let releasedWorkers = 0;
+  let taxWithheld = 0;
+  let grantsPaid = 0;
 
   for (const ad of nextAds) {
     if (ad.filledBy === null) continue;
@@ -293,7 +307,13 @@ export function runPrivatePayroll(input: {
     const wage = Math.max(0, Math.floor(ad.wage));
     if (owner.wealth >= wage) {
       owner.wealth -= wage;
-      worker.wealth += wage;
+      const tr = applyWageTaxTransform(wage, policy, remainingGrantGold);
+      worker.wealth += tr.credit;
+      taxWithheld += tr.withheld;
+      grantsPaid += tr.bonus;
+      if (Number.isFinite(remainingGrantGold)) {
+        remainingGrantGold = Math.max(0, remainingGrantGold - tr.bonus);
+      }
       privateWagesPaid += wage;
     } else {
       // Insolvent owner: pay nothing, release worker, reopen ad
@@ -316,6 +336,8 @@ export function runPrivatePayroll(input: {
     citizenWealth: sumCitizenWealth(nextCitizens),
     privateWagesPaid,
     releasedWorkers,
+    taxWithheld,
+    grantsPaid,
   };
 }
 

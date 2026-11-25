@@ -37,6 +37,51 @@ export function createPoliceRecord(
   };
 }
 
+export function sanitizePoliceRecordsOnHydrate(
+  raw: PoliceRecord[] | undefined
+): PoliceRecord[] {
+  if (!Array.isArray(raw) || raw.length === 0) return [];
+
+  // Advance sequence counter past any existing pol-<month>-<seq> suffix so future IDs never collide
+  for (const rec of raw) {
+    if (rec && typeof rec.id === 'string') {
+      const match = /^pol-\d+-(\d+)/.exec(rec.id);
+      if (match) {
+        const seq = Number(match[1]);
+        if (Number.isFinite(seq) && seq > policeRecordSeq) {
+          policeRecordSeq = seq;
+        }
+      }
+    }
+  }
+
+  const seenIds = new Set<string>();
+  const clean: PoliceRecord[] = [];
+  for (const rec of raw) {
+    if (!rec || typeof rec !== 'object') continue;
+    const month =
+      typeof rec.month === 'number' && Number.isFinite(rec.month)
+        ? Math.max(0, Math.trunc(rec.month))
+        : 0;
+    let id =
+      typeof rec.id === 'string' && rec.id.length > 0
+        ? rec.id
+        : `pol-${month}-${++policeRecordSeq}`;
+    if (seenIds.has(id)) {
+      policeRecordSeq += 1;
+      id = `pol-${month}-${policeRecordSeq}`;
+    }
+    seenIds.add(id);
+    clean.push({
+      ...rec,
+      id,
+      month,
+      citizenIds: Array.isArray(rec.citizenIds) ? [...rec.citizenIds] : [],
+    });
+  }
+  return clean;
+}
+
 export function ageYears(
   citizen: Pick<Citizen, 'birthMonth'>,
   stateOrMonth: { totalMonths: number } | number
@@ -792,6 +837,7 @@ export function sanitizeCitizensOnHydrate(
   const safeTotalMonths = Math.max(0, Math.trunc(totalMonths));
   const safeTargetPop = Math.max(0, Math.floor(targetPopulation));
   const safeSavedWealth = Math.max(0, Math.floor(savedCitizenWealth));
+  const cleanPoliceRecords = sanitizePoliceRecordsOnHydrate(policeRecords);
 
   if (!Array.isArray(rawCitizens) || rawCitizens.length === 0) {
     const gen = generateInitialCitizens(
@@ -804,7 +850,7 @@ export function sanitizeCitizensOnHydrate(
       citizens: gen.citizens,
       nextCitizenId: gen.nextCitizenId,
       citizenWealth: sumCitizenWealth(gen.citizens),
-      policeRecords,
+      policeRecords: cleanPoliceRecords,
     };
   }
 
@@ -1007,7 +1053,7 @@ export function sanitizeCitizensOnHydrate(
     population: safeTargetPop,
     totalMonths: safeTotalMonths,
     citizenWealth: sumCitizenWealth(sanitized),
-    policeRecords,
+    policeRecords: cleanPoliceRecords,
   });
 
   // If old wealth existed on save while individual wealths were all 0, distribute it

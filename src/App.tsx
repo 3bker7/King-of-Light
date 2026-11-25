@@ -1,5 +1,6 @@
 import { Award } from 'lucide-react';
 import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { AdvisorOverlay, type AdvisorTab } from './components/AdvisorOverlay';
 import { AwayReport } from './components/AwayReport';
 import { BuildDock } from './components/BuildDock';
 import type { CitizenInfo } from './components/CitizenCard';
@@ -46,6 +47,7 @@ import {
 } from './game/save';
 import { STRINGS } from './game/strings';
 import type {
+  AdvisorAction,
   AwayReportData,
   Cube,
   GameState,
@@ -135,6 +137,10 @@ export default function App() {
     null
   );
   const [bankOverlayOpen, setBankOverlayOpen] = useState(false);
+  const [advisorOverlayOpen, setAdvisorOverlayOpen] = useState(false);
+  const [advisorInitialTab, setAdvisorInitialTab] = useState<
+    AdvisorTab | undefined
+  >(undefined);
   const [resetSignal, setResetSignal] = useState(0);
 
   const latestStateRef = useRef(state);
@@ -221,11 +227,13 @@ export default function App() {
   }, [selectedCitizenId]);
 
   // Element 6.1 & 9: Escape closes in strict stack order
-  // (palace offices overlay -> citizen card -> cube/kingdom card -> build panel/placement -> objectives -> modals)
+  // (advisor -> bank -> palace offices overlay -> citizen card -> cube/kingdom card -> build panel/placement -> objectives -> modals)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
-      if (bankOverlayOpen) {
+      if (advisorOverlayOpen) {
+        setAdvisorOverlayOpen(false);
+      } else if (bankOverlayOpen) {
         setBankOverlayOpen(false);
       } else if (openOfficeTab !== null) {
         setOpenOfficeTab(null);
@@ -262,6 +270,8 @@ export default function App() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [
+    advisorOverlayOpen,
+    bankOverlayOpen,
     openOfficeTab,
     selectedCitizenId,
     selectedCubeId,
@@ -555,6 +565,52 @@ export default function App() {
     }
   };
 
+  const handleOpenAdvisor = (tab?: AdvisorTab) => {
+    setAdvisorInitialTab(tab);
+    setAdvisorOverlayOpen(true);
+  };
+
+  const handleExecuteAdvisorAction = (
+    action: AdvisorAction,
+    meta: { labelAr: string; projectedAr: string; faxId?: string }
+  ) => {
+    setAdvisorOverlayOpen(false);
+    dispatch({
+      type: 'LOG_ADVISOR_ACTION',
+      labelAr: meta.labelAr,
+      projectedAr: meta.projectedAr,
+      faxId: meta.faxId,
+    });
+
+    if (action.type === 'arm_theme') {
+      if (action.themeId === 'house') {
+        handleBuildHouseFromFax();
+      } else {
+        handleFixHint(action.themeId);
+      }
+    } else if (action.type === 'open_bourse') {
+      if (state.level >= 2) {
+        setBourseModalOpen(true);
+      } else {
+        setSelectedCubeId(null);
+        setKingdomCardOpen(true);
+      }
+    } else if (action.type === 'open_bank') {
+      setBankOverlayOpen(true);
+    } else if (action.type === 'focus_cube') {
+      setActiveBuildTheme(null);
+      setInspectedShortTheme(null);
+      setPulsingTheme(null);
+      setOpenBuildCategory(null);
+      setSelectedCitizenId(null);
+      setFollowCitizenId(null);
+      setCitizenInfo(null);
+      setKingdomCardOpen(false);
+      setSelectedCubeId(action.cubeId);
+      worldRef.current?.focusOnCube(action.cubeId);
+    }
+  };
+
   const handleNewGame = () => {
     setActiveBuildTheme(null);
     setInspectedShortTheme(null);
@@ -571,6 +627,8 @@ export default function App() {
     setShowLevel2Modal(false);
     setShowLevel3Modal(false);
     setOpenOfficeTab(null);
+    setBankOverlayOpen(false);
+    setAdvisorOverlayOpen(false);
     setAwayReport(null);
     dispatch({ type: 'NEW_GAME' });
     setResetSignal((n) => n + 1);
@@ -594,6 +652,7 @@ export default function App() {
       {/* Slim Top Bar (48px) */}
       <TopBar
         state={state}
+        onOpenAdvisor={() => handleOpenAdvisor()}
         onOpenBourse={() => setBourseModalOpen(true)}
         onOpenSettings={() => setSettingsModalOpen(true)}
       />
@@ -713,6 +772,10 @@ export default function App() {
         onBuildProducer={handleBuildProducer}
         onOpenOffice={(tab) => setOpenOfficeTab(tab)}
         onOpenBank={() => setBankOverlayOpen(true)}
+        onOpenAdvisor={handleOpenAdvisor}
+        onSetTaxPolicy={(mode, percent) =>
+          dispatch({ type: 'SET_TAX_POLICY', mode, percent })
+        }
         onBuybackCube={(cubeId) => dispatch({ type: 'BUYBACK_CUBE', cubeId })}
         onResolveLandRequest={(requestId, approve) =>
           dispatch({ type: 'RESOLVE_LAND_REQUEST', requestId, approve })
@@ -742,6 +805,20 @@ export default function App() {
             dispatch({ type: 'TAKE_LOAN', principal, termMonths, collateralCubeIds })
           }
           onRepayLoanFull={() => dispatch({ type: 'REPAY_LOAN_FULL' })}
+        />
+      )}
+
+      {/* Prompt 6 Element 4: Royal Advisor Overlay (opens ONLY on explicit click, never auto-opens) */}
+      {advisorOverlayOpen && (
+        <AdvisorOverlay
+          state={state}
+          initialTab={advisorInitialTab}
+          onExecuteAction={handleExecuteAdvisorAction}
+          onSetFaxStatus={(faxId, status) =>
+            dispatch({ type: 'SET_FAX_STATUS', faxId, status })
+          }
+          onMarkAllFaxesRead={() => dispatch({ type: 'MARK_ALL_FAXES_READ' })}
+          onClose={() => setAdvisorOverlayOpen(false)}
         />
       )}
 

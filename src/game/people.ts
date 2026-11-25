@@ -127,7 +127,8 @@ export function computeNeedsAndSatisfaction(
   cubes: Cube[],
   warehouse: Warehouse,
   population: number,
-  hungerFlag: boolean
+  hungerFlag: boolean,
+  taxMoodDelta = 0
 ): { needs: NeedsBreakdown; satisfaction: number } {
   const denom = Math.max(1, population);
   const totalFood = getTotalFood(warehouse);
@@ -144,9 +145,10 @@ export function computeNeedsAndSatisfaction(
     WEIGHT_HOUSING * housingScore +
     WEIGHT_ENTERTAINMENT * entertainmentScore;
 
-  const clamped = Math.max(0, Math.min(100, weighted));
+  const baseFormula = Math.round(Math.max(0, Math.min(100, weighted)));
+  const withMood = Math.max(0, Math.min(100, baseFormula + taxMoodDelta));
   // Active hunger cap: on a hunger-flag day, Satisfaction is strictly capped at 30.
-  const capped = hungerFlag ? Math.min(HUNGER_SATISFACTION_CAP, clamped) : clamped;
+  const capped = hungerFlag ? Math.min(HUNGER_SATISFACTION_CAP, withMood) : withMood;
 
   return {
     needs: {
@@ -155,7 +157,7 @@ export function computeNeedsAndSatisfaction(
       housing: Math.round(housingScore),
       entertainment: Math.round(entertainmentScore),
     },
-    satisfaction: Math.round(capped),
+    satisfaction: capped,
   };
 }
 
@@ -175,7 +177,8 @@ export function processDayRolloverPeople(
   warehouse: Warehouse,
   population: number,
   reputation: number,
-  level: 1 | 2
+  level: 1 | 2,
+  taxMoodDelta = 0
 ): DayRolloverPeopleResult {
   const nextWarehouse: Warehouse = { ...warehouse };
   const foodAvailableBefore = getTotalFood(nextWarehouse);
@@ -210,7 +213,8 @@ export function processDayRolloverPeople(
     cubes,
     nextWarehouse,
     population,
-    hungerFlag
+    hungerFlag,
+    taxMoodDelta
   );
 
   const capacity = getHouseCapacity(cubes);
@@ -257,7 +261,8 @@ export function processDayRolloverPeople(
     cubes,
     nextWarehouse,
     nextPopulation,
-    hungerFlag
+    hungerFlag,
+    taxMoodDelta
   );
 
   return {

@@ -239,12 +239,43 @@ export interface Citizen {
   employerId?: number | null;
 }
 
+export type OfficeFaxStatus = 'unread' | 'read' | 'acted' | 'dismissed';
+
 export interface OfficeFax {
   id: string;
   month: number;
   office: 'housing' | 'labor' | 'bank';
   textAr: string;
   actionThemeId?: ThemeId;
+  status: OfficeFaxStatus;
+}
+
+export type AdvisorAction =
+  | { type: 'arm_theme'; themeId: ThemeId }
+  | { type: 'open_bourse' }
+  | { type: 'open_bank' }
+  | { type: 'focus_cube'; cubeId: number }
+  | { type: 'none' };
+
+export interface FaxAdvice {
+  dataAr: string;
+  recommendationAr: string;
+  action: AdvisorAction;
+  resolved: boolean;
+}
+
+export type BriefSeverity = 'critical' | 'high' | 'medium' | 'positive' | 'info';
+
+export interface BriefLine {
+  severity: BriefSeverity;
+  textAr: string;
+  action: AdvisorAction;
+}
+
+export interface AdvisorBriefing {
+  month: number;
+  lines: BriefLine[];
+  topAction: AdvisorAction;
 }
 
 export type PoliceRecordKind =
@@ -269,6 +300,35 @@ export interface LastMonthStats {
   importSink: number;
   leisureSink: number;
   unmetFood: number;
+  taxWithheld: number;
+  grantsPaid: number;
+}
+
+export type TaxPolicyMode = 'none' | 'grant' | 'take';
+
+export interface TaxPolicy {
+  mode: TaxPolicyMode;
+  percent: number;
+}
+
+export type DecreeKind =
+  | 'tax_policy'
+  | 'land_sale'
+  | 'land_reject'
+  | 'loan_taken'
+  | 'loan_repaid'
+  | 'advisor_action';
+
+export interface Decree {
+  id: string;
+  month: number;
+  kind: DecreeKind;
+  labelAr: string;
+  projectedAr: string;
+  projectedValue: number | null;
+  actualValue: number | null;
+  actualAr: string | null;
+  taxMode?: TaxPolicyMode;
 }
 
 export interface LandRequest {
@@ -405,6 +465,10 @@ export interface GameState {
   bankLoans: BankLoan[];
   peoplesBank: PeoplesBank;
   lastBankNetWorthWarnMonth?: number;
+  // Prompt 6 Advisor, Tax Policy & Decree Log fields
+  advisorBriefing: AdvisorBriefing | null;
+  taxPolicy: TaxPolicy;
+  decrees: Decree[];
 }
 
 export interface PersistedSaveData {
@@ -455,6 +519,10 @@ export interface PersistedSaveData {
   bankLoans?: BankLoan[];
   peoplesBank?: PeoplesBank;
   lastBankNetWorthWarnMonth?: number;
+  // Prompt 6 optional persisted fields
+  advisorBriefing?: AdvisorBriefing | null;
+  taxPolicy?: TaxPolicy;
+  decrees?: Decree[];
 }
 
 export interface StaffingStatus {

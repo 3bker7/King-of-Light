@@ -30,6 +30,7 @@ import {
   VILLAGE_JOIN_REQUIRED_DAYS,
   VILLAGE_NAMES,
 } from './constants';
+import { sanitizeOfficeFaxesOnHydrate } from './advisor';
 import {
   BANK_START_GOLD,
   PALACE_START_GOLD,
@@ -44,6 +45,11 @@ import {
   sanitizeCitizensOnHydrate,
   sumCitizenWealth,
 } from './citizens';
+import {
+  getGrossPayrollBase,
+  logDecree,
+  sanitizeDecreesOnHydrate,
+} from './decrees';
 import {
   executeTrade,
   getEffectiveBuyPrice,
@@ -74,6 +80,13 @@ import {
 import { clearSavedGame } from './save';
 import { createZeroLastMonthStats } from './spending';
 import { STRINGS } from './strings';
+import {
+  computeTaxMoodDelta,
+  DEFAULT_TAX_POLICY,
+  normalizeTaxPolicy,
+  projectTaxPolicyMonthlyImpact,
+  sanitizeTaxPolicyOnHydrate,
+} from './taxPolicy';
 import type {
   AudioCue,
   Cube,
@@ -82,9 +95,11 @@ import type {
   LedgerEntry,
   LedgerKind,
   ObjectiveState,
+  OfficeFaxStatus,
   PersistedSaveData,
   PrivateAd,
   SlotIndex,
+  TaxPolicyMode,
   ThemeId,
   ToastItem,
   ToastTone,
@@ -291,6 +306,9 @@ export function createFreshGameState(now = Date.now()): GameState {
     bankLoans: [],
     peoplesBank: { gold: BANK_START_GOLD, portfolio: {}, totalTrades: 0, lastTradeMonth: null, lastTradeAr: null },
     lastBankNetWorthWarnMonth: 0,
+    advisorBriefing: null,
+    taxPolicy: { ...DEFAULT_TAX_POLICY },
+    decrees: [],
   };
 }
 
@@ -313,9 +331,10 @@ export function hydrateGameState(saved: PersistedSaveData): GameState {
   const savedPoliceRecords = Array.isArray(saved.policeRecords)
     ? saved.policeRecords
     : [];
-  const savedOfficeFaxes = Array.isArray(saved.officeFaxes)
-    ? saved.officeFaxes
-    : [];
+  const savedOfficeFaxes = sanitizeOfficeFaxesOnHydrate(saved.officeFaxes);
+  const taxPolicy = sanitizeTaxPolicyOnHydrate(saved.taxPolicy);
+  const decrees = sanitizeDecreesOnHydrate(saved.decrees);
+  const advisorBriefing = saved.advisorBriefing ?? null;
 
   const sanitized = sanitizeCitizensOnHydrate(
     saved.citizens,
@@ -370,14 +389,29 @@ export function hydrateGameState(saved: PersistedSaveData): GameState {
             typeof rawStats.unmetFood === 'number' && Number.isFinite(rawStats.unmetFood)
               ? Math.max(0, Math.floor(rawStats.unmetFood))
               : 0,
+          taxWithheld:
+            typeof rawStats.taxWithheld === 'number' && Number.isFinite(rawStats.taxWithheld)
+              ? Math.max(0, Math.floor(rawStats.taxWithheld))
+              : 0,
+          grantsPaid:
+            typeof rawStats.grantsPaid === 'number' && Number.isFinite(rawStats.grantsPaid)
+              ? Math.max(0, Math.floor(rawStats.grantsPaid))
+              : 0,
         }
       : createZeroLastMonthStats();
 
+  const hydratedCitizenWealth = sumCitizenWealth(syncedAds.citizens);
+  const taxMoodDelta = computeTaxMoodDelta(
+    taxPolicy,
+    hydratedCitizenWealth,
+    safePop
+  );
   const evalNeeds = computeNeedsAndSatisfaction(
     cleanPrivate.cubes,
     saved.warehouse,
     safePop,
-    saved.hungerFlag
+    saved.hungerFlag,
+    taxMoodDelta
   );
 
   const defaultObjectives = createInitialObjectives();
@@ -386,9 +420,33 @@ export function hydrateGameState(saved: PersistedSaveData): GameState {
     return found ? { ...def, completed: Boolean(found.completed) } : def;
   });
 
-  const savedLedger = Array.isArray(saved.ledger)
+  const rawSavedLedger = Array.isArray(saved.ledger)
     ? saved.ledger.slice(-MAX_LEDGER_ENTRIES)
     : [];
+  for (const entry of rawSavedLedger) {
+    if (entry && typeof entry.id === 'string') {
+      const match = /^led-\d+-(\d+)/.exec(entry.id);
+      if (match) {
+        const seq = Number(match[1]);
+        if (Number.isFinite(seq) && seq > ledgerCounter) {
+          ledgerCounter = seq;
+        }
+      }
+    }
+  }
+  const seenLedgerIds = new Set<string>();
+  const savedLedger = rawSavedLedger.map((entry) => {
+    let id =
+      typeof entry.id === 'string' && entry.id.length > 0
+        ? entry.id
+        : `led-${entry.day}-${++ledgerCounter}`;
+    if (seenLedgerIds.has(id)) {
+      ledgerCounter += 1;
+      id = `led-${entry.day}-${ledgerCounter}`;
+    }
+    seenLedgerIds.add(id);
+    return id === entry.id ? entry : { ...entry, id };
+  });
 
   const nextCitizenId = Math.max(
     sanitized.nextCitizenId,
@@ -425,7 +483,7 @@ export function hydrateGameState(saved: PersistedSaveData): GameState {
     lastSavedAt: saved.lastSavedAt,
     toasts: [],
     pendingAudioCue: null,
-    citizenWealth: sumCitizenWealth(syncedAds.citizens),
+    citizenWealth: hydratedCitizenWealth,
     arrears,
     lastPayroll: saved.lastPayroll ?? null,
     dailyShopGold:
@@ -472,6 +530,9 @@ export function hydrateGameState(saved: PersistedSaveData): GameState {
       typeof saved.lastBankNetWorthWarnMonth === 'number'
         ? saved.lastBankNetWorthWarnMonth
         : 0,
+    advisorBriefing,
+    taxPolicy,
+    decrees,
   };
 }
 
@@ -629,6 +690,15 @@ export type GameAction =
     }
   | { type: 'REPAY_LOAN_FULL' }
   | { type: 'BUYBACK_CUBE'; cubeId: number }
+  | { type: 'SET_TAX_POLICY'; mode: TaxPolicyMode; percent: number }
+  | { type: 'SET_FAX_STATUS'; faxId: string; status: OfficeFaxStatus }
+  | { type: 'MARK_ALL_FAXES_READ' }
+  | {
+      type: 'LOG_ADVISOR_ACTION';
+      labelAr: string;
+      projectedAr: string;
+      faxId?: string;
+    }
   | { type: 'DISMISS_TOAST'; id: string }
   | { type: 'CLEAR_LEVEL2_NOTICE' }
   | { type: 'CLEAR_LEVEL2_COMPLETED_NOTICE' }
@@ -689,6 +759,8 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
       let nextBankLoans = state.bankLoans;
       let nextPeoplesBank = state.peoplesBank;
       let nextLastBankNetWorthWarnMonth = state.lastBankNetWorthWarnMonth;
+      let nextAdvisorBriefing = state.advisorBriefing;
+      let nextDecrees = state.decrees;
       const newToasts: ToastItem[] = [];
       let pendingAudioCue = state.pendingAudioCue;
 
@@ -718,12 +790,18 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         nextTickInDay = 0;
         nextDay += 1;
 
+        const dayTaxMoodDelta = computeTaxMoodDelta(
+          state.taxPolicy,
+          nextCitizenWealth,
+          nextPopulation
+        );
         const peopleRes = processDayRolloverPeople(
           nextCubes,
           nextWarehouse,
           nextPopulation,
           nextReputation,
-          state.level
+          state.level,
+          dayTaxMoodDelta
         );
         nextWarehouse = peopleRes.warehouse;
         nextPopulation = peopleRes.population;
@@ -824,6 +902,10 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
             dailyBought: nextDailyBought,
             dailySold: nextDailySold,
             lastBankNetWorthWarnMonth: nextLastBankNetWorthWarnMonth,
+            taxPolicy: state.taxPolicy,
+            decrees: nextDecrees,
+            advisorBriefing: nextAdvisorBriefing,
+            hungerFlag: nextHungerFlag,
             isOffline: false,
             day: nextDay,
           });
@@ -850,6 +932,8 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
           nextDailyBought = mp.dailyBought as any;
           nextDailySold = mp.dailySold as any;
           nextLastBankNetWorthWarnMonth = mp.lastBankNetWorthWarnMonth;
+          nextAdvisorBriefing = mp.advisorBriefing;
+          nextDecrees = mp.decrees;
 
           for (const item of mp.ledgerItems) {
             nextLedger = appendLedger(
@@ -928,11 +1012,17 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         pendingAudioCue = makeCue(villageJoinedThisDay ? 'levelUp' : 'day');
       }
 
+      const tickTaxMoodDelta = computeTaxMoodDelta(
+        state.taxPolicy,
+        nextCitizenWealth,
+        nextPopulation
+      );
       const evalNeeds = computeNeedsAndSatisfaction(
         nextCubes,
         nextWarehouse,
         nextPopulation,
-        nextHungerFlag
+        nextHungerFlag,
+        tickTaxMoodDelta
       );
 
       const updated: GameState = {
@@ -977,6 +1067,8 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         bankLoans: nextBankLoans,
         peoplesBank: nextPeoplesBank,
         lastBankNetWorthWarnMonth: nextLastBankNetWorthWarnMonth,
+        advisorBriefing: nextAdvisorBriefing,
+        decrees: nextDecrees,
         toasts: appendToasts(state.toasts, newToasts),
         pendingAudioCue,
       };
@@ -1074,7 +1166,8 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         nextCubes,
         nextWarehouse,
         state.population,
-        state.hungerFlag
+        state.hungerFlag,
+        computeTaxMoodDelta(state.taxPolicy, state.citizenWealth, state.population)
       );
 
       const nextLedger =
@@ -1148,7 +1241,8 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         nextCubes,
         state.warehouse,
         state.population,
-        state.hungerFlag
+        state.hungerFlag,
+        computeTaxMoodDelta(state.taxPolicy, state.citizenWealth, state.population)
       );
 
       return {
@@ -1230,7 +1324,8 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         state.cubes,
         result.warehouse,
         state.population,
-        state.hungerFlag
+        state.hungerFlag,
+        computeTaxMoodDelta(state.taxPolicy, state.citizenWealth, state.population)
       );
 
       const updated: GameState = {
@@ -1292,7 +1387,8 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         state.cubes,
         nextWarehouse,
         state.population,
-        state.hungerFlag
+        state.hungerFlag,
+        computeTaxMoodDelta(state.taxPolicy, state.citizenWealth, state.population)
       );
 
       const updated: GameState = {
@@ -1310,6 +1406,9 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
     }
 
     case 'RESOLVE_LAND_REQUEST': {
+      const targetRequest = state.landRequests.find(
+        (r) => r.id === action.requestId
+      );
       const res = resolveLandRequest({
         cubes: state.cubes,
         citizens: state.citizens,
@@ -1346,6 +1445,23 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         );
       }
 
+      const saleAmount = targetRequest?.price ?? res.ledgerItem?.amount ?? 0;
+      const nextDecrees = res.approved
+        ? logDecree(state.decrees, {
+            month: state.totalMonths,
+            kind: 'land_sale',
+            labelAr: 'الموافقة على بيع أرض لمواطن',
+            projectedAr: `إيراد فوري +${saleAmount} ذهب وضريبة أعمال 10% مستقبلاً`,
+            projectedValue: saleAmount,
+          })
+        : logDecree(state.decrees, {
+            month: state.totalMonths,
+            kind: 'land_reject',
+            labelAr: 'رفض طلب شراء أرض',
+            projectedAr: 'الاحتفاظ بالأرض لخزينة التاج',
+            projectedValue: null,
+          });
+
       const toastMsg = res.approved
         ? `تم بيع الأرض بنجاح (+${res.ledgerItem?.amount ?? 0} ذهب)`
         : 'تم رفض طلب شراء الأرض';
@@ -1359,6 +1475,7 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         landRequests: res.landRequests,
         policeRecords: res.policeRecords,
         ledger: nextLedger,
+        decrees: nextDecrees,
         toasts: appendToasts(state.toasts, [
           createToast(toastMsg, res.approved ? 'success' : 'info'),
         ]),
@@ -1379,8 +1496,19 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
           pendingAudioCue: makeCue('error'),
         };
       }
+      const newLoan = res.state.bankLoans[res.state.bankLoans.length - 1];
+      const nextDecrees = newLoan
+        ? logDecree(res.state.decrees, {
+            month: state.totalMonths,
+            kind: 'loan_taken',
+            labelAr: `تمويل من البنك الشرعي (${newLoan.principal} ذهب)`,
+            projectedAr: `سيولة +${newLoan.principal} ذهب، إجمالي السداد ${newLoan.repayable} ذهب على ${newLoan.termMonths} أشهر`,
+            projectedValue: newLoan.principal,
+          })
+        : res.state.decrees;
       const updated = {
         ...res.state,
+        decrees: nextDecrees,
         toasts: appendToasts(res.state.toasts, [
           createToast('تم استلام تمويل البنك الشرعي بنجاح', 'success'),
         ]),
@@ -1400,8 +1528,16 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
           pendingAudioCue: makeCue('error'),
         };
       }
+      const nextDecrees = logDecree(res.state.decrees, {
+        month: state.totalMonths,
+        kind: 'loan_repaid',
+        labelAr: 'سداد مبكر كامل لتمويل البنك الشرعي',
+        projectedAr: 'ثقة البنك +10 وتحرير الأراضي المرهونة',
+        projectedValue: 10,
+      });
       const updated = {
         ...res.state,
+        decrees: nextDecrees,
         toasts: appendToasts(res.state.toasts, [
           createToast('تم السداد الكامل للتمويل وارتفعت ثقة البنك الشرعي', 'success'),
         ]),
@@ -1429,6 +1565,127 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         pendingAudioCue: makeCue('trade'),
       };
       return evaluateObjectivesAndProgression(updated);
+    }
+
+    case 'SET_TAX_POLICY': {
+      const nextPolicy = normalizeTaxPolicy(action.mode, action.percent);
+      if (
+        nextPolicy.mode === state.taxPolicy.mode &&
+        nextPolicy.percent === state.taxPolicy.percent
+      ) {
+        return state;
+      }
+
+      const grossBase = getGrossPayrollBase({
+        lastPayroll: state.lastPayroll,
+        cubes: state.cubes,
+        population: state.population,
+        privateAds: state.privateAds,
+      });
+      const projectedImpact = projectTaxPolicyMonthlyImpact(
+        nextPolicy,
+        grossBase
+      );
+      const moodDelta = computeTaxMoodDelta(
+        nextPolicy,
+        state.citizenWealth,
+        state.population
+      );
+
+      const labelAr =
+        nextPolicy.mode === 'take'
+          ? `ضريبة مرتبات ${nextPolicy.percent}%`
+          : nextPolicy.mode === 'grant'
+            ? `منحة ملكية على المرتبات ${nextPolicy.percent}%`
+            : 'إلغاء ضريبة ومنحة المرتبات';
+
+      const projectedAr =
+        nextPolicy.mode === 'take'
+          ? `وارد متوقع +${projectedImpact} ذهب/شهر، وأثر المزاج ${moodDelta}`
+          : nextPolicy.mode === 'grant'
+            ? `كلفة متوقعة ${projectedImpact} ذهب/شهر، وأثر المزاج +${moodDelta}`
+            : 'أثر الخزنة 0 ذهب/شهر، وأثر المزاج 0';
+
+      const nextDecrees = logDecree(state.decrees, {
+        month: state.totalMonths,
+        kind: 'tax_policy',
+        labelAr,
+        projectedAr,
+        projectedValue: projectedImpact,
+        taxMode: nextPolicy.mode,
+      });
+
+      const evalNeeds = computeNeedsAndSatisfaction(
+        state.cubes,
+        state.warehouse,
+        state.population,
+        state.hungerFlag,
+        moodDelta
+      );
+
+      const updated: GameState = {
+        ...state,
+        taxPolicy: nextPolicy,
+        decrees: nextDecrees,
+        satisfaction: applyArrearsCap(evalNeeds.satisfaction, state.arrears),
+        needs: evalNeeds.needs,
+        toasts: appendToasts(state.toasts, [
+          createToast(`تم اعتماد السياسة المالية: ${labelAr}`, 'info'),
+        ]),
+        pendingAudioCue: makeCue('day'),
+      };
+
+      return evaluateObjectivesAndProgression(updated);
+    }
+
+    case 'SET_FAX_STATUS': {
+      const validStatuses: ReadonlySet<OfficeFaxStatus> = new Set([
+        'unread',
+        'read',
+        'acted',
+        'dismissed',
+      ]);
+      if (!validStatuses.has(action.status)) return state;
+      let changed = false;
+      const nextFaxes = state.officeFaxes.map((f) => {
+        if (f.id !== action.faxId) return f;
+        // Acted faxes never regress to unread
+        if (f.status === 'acted' && action.status === 'unread') return f;
+        if (f.status === action.status) return f;
+        changed = true;
+        return { ...f, status: action.status };
+      });
+      return changed ? { ...state, officeFaxes: nextFaxes } : state;
+    }
+
+    case 'MARK_ALL_FAXES_READ': {
+      let changed = false;
+      const nextFaxes = state.officeFaxes.map((f) => {
+        if (f.status !== 'unread') return f;
+        changed = true;
+        return { ...f, status: 'read' as const };
+      });
+      return changed ? { ...state, officeFaxes: nextFaxes } : state;
+    }
+
+    case 'LOG_ADVISOR_ACTION': {
+      const nextFaxes = action.faxId
+        ? state.officeFaxes.map((f) =>
+            f.id === action.faxId ? { ...f, status: 'acted' as const } : f
+          )
+        : state.officeFaxes;
+      const nextDecrees = logDecree(state.decrees, {
+        month: state.totalMonths,
+        kind: 'advisor_action',
+        labelAr: action.labelAr,
+        projectedAr: action.projectedAr,
+        projectedValue: null,
+      });
+      return {
+        ...state,
+        officeFaxes: nextFaxes,
+        decrees: nextDecrees,
+      };
     }
 
     case 'DISMISS_TOAST': {

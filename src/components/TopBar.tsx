@@ -3,11 +3,13 @@ import {
   Meh,
   Settings,
   Smile,
+  Sparkles,
   Star,
   Store,
   Sun,
   Users,
 } from 'lucide-react';
+import { countUnreadFaxes } from '../game/advisor';
 import { TICKS_PER_DAY, TRADED_RESOURCES } from '../game/constants';
 import { STRINGS } from '../game/strings';
 import type { GameState } from '../game/types';
@@ -15,11 +17,21 @@ import { ResourceIcon } from './ResourceIcon';
 
 interface TopBarProps {
   state: GameState;
+  onOpenAdvisor: () => void;
   onOpenBourse: () => void;
   onOpenSettings: () => void;
 }
 
-export function TopBar({ state, onOpenBourse, onOpenSettings }: TopBarProps) {
+export function TopBar({
+  state,
+  onOpenAdvisor,
+  onOpenBourse,
+  onOpenSettings,
+}: TopBarProps) {
+  const unreadFaxes = countUnreadFaxes(state.officeFaxes);
+  const hasCriticalBrief = Boolean(
+    state.advisorBriefing?.lines.some((l) => l.severity === 'critical')
+  );
   const dayProgressPct = Math.min(
     100,
     Math.round((state.tickInDay / TICKS_PER_DAY) * 100)
@@ -137,6 +149,25 @@ export function TopBar({ state, onOpenBourse, onOpenSettings }: TopBarProps) {
             {roundedRep}
           </span>
         </div>
+
+        {/* Royal Advisor Trigger */}
+        <button
+          type="button"
+          onClick={onOpenAdvisor}
+          title="المستشار الملكي"
+          className="relative flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#0E3A34]/85 hover:bg-[#0B2E29] border border-[#C9962E]/60 text-[#FBF3DF] text-xs font-extrabold transition-colors whitespace-nowrap shrink-0"
+        >
+          <Sparkles className="w-3.5 h-3.5 text-[#F2CA6B]" />
+          <span className="hidden sm:inline">المستشار</span>
+          {unreadFaxes > 0 && (
+            <span className="px-1.5 py-0.2 rounded-md bg-[#C9962E] text-[#2B2118] text-[10px] font-black tabular-nums-latin leading-tight">
+              {unreadFaxes}
+            </span>
+          )}
+          {hasCriticalBrief && unreadFaxes === 0 && (
+            <span className="w-2 h-2 rounded-full bg-[#F27A6E] shrink-0" />
+          )}
+        </button>
 
         {/* Level 2 Bourse Modal Trigger */}
         {state.level >= 2 && (

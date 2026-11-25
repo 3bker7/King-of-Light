@@ -275,6 +275,7 @@ export function runHousingOffice(
         office: 'housing',
         textAr: `مكتب الإسكان: ${n} أسرة تنتظر سكناً منذ ${m} شهر — يُنصح ببناء بيوت جديدة`,
         actionThemeId: 'house',
+        status: 'unread',
       });
       faxesSent = 1;
     }

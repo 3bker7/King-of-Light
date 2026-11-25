@@ -12,7 +12,9 @@ import {
   Landmark,
   MapPin,
   Mountain,
+  Scale,
   Shield,
+  Sparkles,
   Star,
   Store,
   Trash2,
@@ -20,10 +22,13 @@ import {
   UserX,
   X,
 } from 'lucide-react';
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import {
+  computeMonthLedgerSummary,
+  countUnreadFaxes,
+} from '../game/advisor';
 import {
   MATERIAL_PRODUCER_THEME,
-  MONTH_DAYS,
   THEMES,
   TICKS_PER_DAY,
   VILLAGE_JOIN_MIN_REPUTATION,
@@ -31,6 +36,7 @@ import {
 } from '../game/constants';
 import { ageYears } from '../game/citizens';
 import { getBankCubeAskPrice } from '../game/bank';
+import { getGrossPayrollBase } from '../game/decrees';
 import { getHousingQueue } from '../game/housingOffice';
 import { getActiveCVs } from '../game/laborOffice';
 import {
@@ -47,15 +53,24 @@ import {
   makeSlotKey,
 } from '../game/production';
 import { STRINGS } from '../game/strings';
+import {
+  computeTaxMoodDelta,
+  projectTaxPolicyMonthlyImpact,
+  TAX_POLICY_MAX_PERCENT,
+  TAX_POLICY_MIN_PERCENT,
+  TAX_POLICY_STEP,
+} from '../game/taxPolicy';
 import type {
   Cube,
   GameState,
   ShortageReason,
   SlotIndex,
   StaffingStatus,
+  TaxPolicyMode,
   ThemeId,
   TradedResourceKey,
 } from '../game/types';
+import type { AdvisorTab } from './AdvisorOverlay';
 import { BoursePanel } from './BoursePanel';
 import { CitizenCard, type CitizenInfo } from './CitizenCard';
 import { MaterialRequirementsCard } from './MaterialRequirementsCard';
@@ -82,6 +97,8 @@ interface InspectorProps {
   onBuildProducer?: (resource: TradedResourceKey) => void;
   onOpenOffice?: (tab: PalaceOfficeTab) => void;
   onOpenBank?: () => void;
+  onOpenAdvisor?: (tab?: AdvisorTab) => void;
+  onSetTaxPolicy?: (mode: TaxPolicyMode, percent: number) => void;
   onBuybackCube?: (cubeId: number) => void;
   onResolveLandRequest?: (requestId: string, approve: boolean) => void;
   onTrade: (
@@ -341,10 +358,24 @@ export function Inspector({
   onBuildProducer,
   onOpenOffice,
   onOpenBank,
+  onOpenAdvisor,
+  onSetTaxPolicy,
   onBuybackCube,
   onResolveLandRequest,
   onTrade,
 }: InspectorProps) {
+  const [draftTaxMode, setDraftTaxMode] = useState<TaxPolicyMode>(
+    state.taxPolicy.mode
+  );
+  const [draftTaxPercent, setDraftTaxPercent] = useState<number>(
+    state.taxPolicy.percent
+  );
+
+  useEffect(() => {
+    setDraftTaxMode(state.taxPolicy.mode);
+    setDraftTaxPercent(state.taxPolicy.percent);
+  }, [state.taxPolicy.mode, state.taxPolicy.percent]);
+
   // Memoized office chip counts (H7: skipped when palace is not open, never recomputed on unrelated ticks)
   const isPalaceSelected = selectedCube?.themeId === 'palace';
   const officeCounts = useMemo(() => {
@@ -539,21 +570,35 @@ export function Inspector({
   };
 
   const renderPalacePanel = () => {
-    const monthStart =
-      Math.floor((state.day - 1) / MONTH_DAYS) * MONTH_DAYS + 1;
-    const monthEntries = state.ledger.filter((e) => e.day >= monthStart);
-    const monthIn = monthEntries.reduce(
-      (sum, e) => (e.amount > 0 ? sum + e.amount : sum),
-      0
-    );
-    const monthOut = monthEntries.reduce(
-      (sum, e) => (e.amount < 0 ? sum + Math.abs(e.amount) : sum),
-      0
-    );
-    const monthNet = monthIn - monthOut;
+    // H4 Shared selector: exact same month window summary as AdvisorOverlay (موجز المملكة)
+    const { monthStart, monthIn, monthOut, monthNet } =
+      computeMonthLedgerSummary(state.ledger, state.day);
+    const unreadFaxes = countUnreadFaxes(state.officeFaxes);
     const avgCitizenWealth = Math.floor(
       state.citizenWealth / Math.max(1, state.population)
     );
+    const draftPolicy = {
+      mode: draftTaxMode,
+      percent: draftTaxMode === 'none' ? 0 : draftTaxPercent,
+    };
+    const grossPayrollBase = getGrossPayrollBase({
+      lastPayroll: state.lastPayroll,
+      cubes: state.cubes,
+      population: state.population,
+      privateAds: state.privateAds,
+    });
+    const previewTaxImpact = projectTaxPolicyMonthlyImpact(
+      draftPolicy,
+      grossPayrollBase
+    );
+    const previewMoodDelta = computeTaxMoodDelta(
+      draftPolicy,
+      state.citizenWealth,
+      state.population
+    );
+    const taxDirty =
+      draftPolicy.mode !== state.taxPolicy.mode ||
+      draftPolicy.percent !== state.taxPolicy.percent;
     const recentLedger = state.ledger.slice(-8).reverse();
     const inflationTone =
       state.inflationIndex < 110
@@ -692,10 +737,146 @@ export function Inspector({
                     </span>
                   </button>
                 )}
+                {onOpenAdvisor && (
+                  <button
+                    type="button"
+                    onClick={() => onOpenAdvisor()}
+                    className="col-span-2 flex items-center justify-between gap-1 px-2 py-1.5 rounded-lg bg-[#14524A] hover:bg-[#1B685E] text-white text-[11px] font-extrabold transition-colors"
+                  >
+                    <span className="flex items-center gap-1.5 min-w-0 truncate">
+                      <Sparkles className="w-3.5 h-3.5 text-[#F2CA6B] shrink-0" />
+                      <span>المستشار الملكي وسجل القرارات</span>
+                    </span>
+                    <span className="px-1.5 py-0.2 rounded bg-[#C9962E] text-[#2B2118] text-[10px] font-black tabular-nums-latin">
+                      {unreadFaxes > 0 ? `${unreadFaxes} جديد` : `${state.decrees.length} قرار`}
+                    </span>
+                  </button>
+                )}
               </div>
             </div>
           )}
         </div>
+
+        {/* Prompt 6 Element 2.5: Salary Tax & Grant Policy (السياسة المالية للمرتبات) */}
+        {onSetTaxPolicy && (
+          <div className="p-3 rounded-xl bg-[#FDF8EC] border border-[#C9962E] space-y-2.5">
+            <div className="flex items-center justify-between gap-2 border-b border-[#EFE3C5] pb-1.5">
+              <div className="flex items-center gap-1.5 text-[#2B2118]">
+                <Scale className="w-4 h-4 text-[#14524A] shrink-0" />
+                <h4 className="text-xs font-extrabold">السياسة المالية للمرتبات</h4>
+              </div>
+              <span className="text-[10px] font-extrabold text-[#8A5F12] tabular-nums-latin">
+                {state.taxPolicy.mode === 'take'
+                  ? `ضريبة ${state.taxPolicy.percent}%`
+                  : state.taxPolicy.mode === 'grant'
+                    ? `منحة ${state.taxPolicy.percent}%`
+                    : 'محايد 0%'}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-3 gap-1">
+              {(
+                [
+                  { id: 'none' as const, label: 'بلا ضريبة' },
+                  { id: 'grant' as const, label: 'منحة ملكية' },
+                  { id: 'take' as const, label: 'ضريبة' },
+                ] as const
+              ).map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => {
+                    setDraftTaxMode(opt.id);
+                    if (opt.id === 'none') {
+                      setDraftTaxPercent(0);
+                    } else if (draftTaxPercent === 0) {
+                      setDraftTaxPercent(10);
+                    }
+                  }}
+                  className={`py-1.5 px-1.5 rounded-lg text-[11px] font-extrabold transition-colors ${
+                    draftTaxMode === opt.id
+                      ? 'bg-[#14524A] text-white'
+                      : 'bg-[#F5ECD4] hover:bg-[#ECDDB8] border border-[#DFC996] text-[#2B2118]'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
+            {draftTaxMode !== 'none' && (
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-[11px] font-bold text-[#4F3F2B]">
+                  <span>النسبة المئوية</span>
+                  <span className="font-extrabold text-[#14524A] tabular-nums-latin">
+                    {draftTaxPercent}%
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={TAX_POLICY_MIN_PERCENT}
+                  max={TAX_POLICY_MAX_PERCENT}
+                  step={TAX_POLICY_STEP}
+                  value={draftTaxPercent}
+                  onChange={(e) => setDraftTaxPercent(Number(e.target.value))}
+                  className="w-full accent-[#14524A]"
+                />
+                <div className="flex items-center justify-between text-[10px] font-bold text-[#7C684C] tabular-nums-latin">
+                  <span>0%</span>
+                  <span>25%</span>
+                  <span>50%</span>
+                </div>
+              </div>
+            )}
+
+            <div className="p-2 rounded-lg bg-[#F7EED8] border border-[#E7D8B4] space-y-1 text-[11px]">
+              <div className="flex items-center justify-between">
+                <span className="text-[#6F5C43] font-bold">الأثر المتوقع على الخزنة</span>
+                <span
+                  className={`font-extrabold tabular-nums-latin ${
+                    previewTaxImpact > 0
+                      ? 'text-[#2D6E3B]'
+                      : previewTaxImpact < 0
+                        ? 'text-[#A83629]'
+                        : 'text-[#4F3F2B]'
+                  }`}
+                >
+                  {previewTaxImpact > 0
+                    ? `+${previewTaxImpact}`
+                    : previewTaxImpact}{' '}
+                  ذهب/شهر
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-[#6F5C43] font-bold">أثر رضا الشعب</span>
+                <span
+                  className={`font-extrabold tabular-nums-latin ${
+                    previewMoodDelta > 0
+                      ? 'text-[#2D6E3B]'
+                      : previewMoodDelta < 0
+                        ? 'text-[#A83629]'
+                        : 'text-[#4F3F2B]'
+                  }`}
+                >
+                  {previewMoodDelta > 0
+                    ? `+${previewMoodDelta}`
+                    : previewMoodDelta}
+                </span>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              disabled={!taxDirty}
+              onClick={() =>
+                onSetTaxPolicy(draftPolicy.mode, draftPolicy.percent)
+              }
+              className="w-full py-1.5 px-3 rounded-lg bg-[#C9962E] hover:bg-[#D8A73F] disabled:opacity-45 text-[#2B2118] text-xs font-extrabold transition-colors"
+            >
+              اعتماد السياسة المالية
+            </button>
+          </div>
+        )}
 
         {/* Element 5.2: Private Land Purchase Requests (طلبات شراء أراضٍ) */}
         <div className="p-3 rounded-xl bg-[#FDF8EC] border border-[#C9962E] space-y-2">
@@ -875,6 +1056,29 @@ export function Inspector({
                 {state.lastMonthStats.businessTax} ذهب
               </span>
             </div>
+
+            {(state.lastMonthStats.taxWithheld > 0 ||
+              state.lastMonthStats.grantsPaid > 0) && (
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[#6F5C43] font-bold">
+                  {state.lastMonthStats.taxWithheld > 0
+                    ? 'ضرائب المرتبات (الشهر الماضي)'
+                    : 'منح المرتبات (الشهر الماضي)'}
+                </span>
+                <span
+                  className={`font-extrabold tabular-nums-latin ${
+                    state.lastMonthStats.taxWithheld > 0
+                      ? 'text-[#2D6E3B]'
+                      : 'text-[#A83629]'
+                  }`}
+                >
+                  {state.lastMonthStats.taxWithheld > 0
+                    ? `+${state.lastMonthStats.taxWithheld}`
+                    : `-${state.lastMonthStats.grantsPaid}`}{' '}
+                  ذهب
+                </span>
+              </div>
+            )}
 
             <div className="flex items-center justify-between gap-2">
               <span className="text-[#6F5C43] font-bold">مؤشر الغلاء</span>

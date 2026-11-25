@@ -24,6 +24,10 @@ import {
   VILLAGE_NAMES,
 } from './constants';
 import {
+  appendOrMergeFaxes,
+  sanitizeOfficeFaxesOnHydrate,
+} from './advisor';
+import {
   BANK_START_GOLD,
   PALACE_START_GOLD,
   TRUST_START,
@@ -34,6 +38,7 @@ import {
   sanitizeCitizensOnHydrate,
   sumCitizenWealth,
 } from './citizens';
+import { sanitizeDecreesOnHydrate } from './decrees';
 import { computeInflationIndex, rolloverBoursePrices } from './economy';
 import { runMonthlyProcessor } from './monthlyProcessor';
 import { computeNeedsAndSatisfaction, getTotalFood, processDayRolloverPeople } from './people';
@@ -48,10 +53,13 @@ import {
 } from './production';
 import { createZeroLastMonthStats } from './spending';
 import { STRINGS } from './strings';
+import { computeTaxMoodDelta, sanitizeTaxPolicyOnHydrate } from './taxPolicy';
 import type {
+  AdvisorBriefing,
   AwayReportData,
   BankLoan,
   Cube,
+  Decree,
   GameState,
   LastMonthStats,
   LedgerEntry,
@@ -64,6 +72,7 @@ import type {
   PriceMoveSummary,
   PrivateAd,
   SlotIndex,
+  TaxPolicy,
   ThemeId,
   TradedResourceKey,
 } from './types';
@@ -115,6 +124,9 @@ export function serializeGameState(state: GameState, now: number): PersistedSave
     bankLoans: state.bankLoans,
     peoplesBank: state.peoplesBank,
     lastBankNetWorthWarnMonth: state.lastBankNetWorthWarnMonth,
+    advisorBriefing: state.advisorBriefing,
+    taxPolicy: state.taxPolicy,
+    decrees: state.decrees,
   };
 }
 
@@ -265,6 +277,8 @@ function sanitizeLastMonthStats(raw: Partial<LastMonthStats> | undefined): LastM
     importSink: typeof raw.importSink === 'number' && Number.isFinite(raw.importSink) ? Math.max(0, Math.floor(raw.importSink)) : 0,
     leisureSink: typeof raw.leisureSink === 'number' && Number.isFinite(raw.leisureSink) ? Math.max(0, Math.floor(raw.leisureSink)) : 0,
     unmetFood: typeof raw.unmetFood === 'number' && Number.isFinite(raw.unmetFood) ? Math.max(0, Math.floor(raw.unmetFood)) : 0,
+    taxWithheld: typeof raw.taxWithheld === 'number' && Number.isFinite(raw.taxWithheld) ? Math.max(0, Math.floor(raw.taxWithheld)) : 0,
+    grantsPaid: typeof raw.grantsPaid === 'number' && Number.isFinite(raw.grantsPaid) ? Math.max(0, Math.floor(raw.grantsPaid)) : 0,
   };
 }
 
@@ -320,9 +334,9 @@ export function simulateOfflineProgress(
   const savedPoliceRecords: PoliceRecord[] = Array.isArray(saved.policeRecords)
     ? saved.policeRecords
     : [];
-  const savedOfficeFaxes: OfficeFax[] = Array.isArray(saved.officeFaxes)
-    ? saved.officeFaxes
-    : [];
+  const savedOfficeFaxes: OfficeFax[] = sanitizeOfficeFaxesOnHydrate(
+    saved.officeFaxes
+  );
 
   const hydratedCitizens = sanitizeCitizensOnHydrate(
     saved.citizens,
@@ -397,6 +411,9 @@ export function simulateOfflineProgress(
     typeof saved.lastBankNetWorthWarnMonth === 'number'
       ? saved.lastBankNetWorthWarnMonth
       : 0;
+  const nextTaxPolicy: TaxPolicy = sanitizeTaxPolicyOnHydrate(saved.taxPolicy);
+  let nextDecrees: Decree[] = sanitizeDecreesOnHydrate(saved.decrees);
+  let nextAdvisorBriefing: AdvisorBriefing | null = saved.advisorBriefing ?? null;
 
   const pricesBeforeAway = { ...nextPrices };
   const resourcesProduced: Partial<Record<TradedResourceKey, number>> = {};
@@ -583,12 +600,18 @@ export function simulateOfflineProgress(
   const nextDay = saved.day + daysElapsed;
 
   for (let d = 0; d < daysElapsed; d++) {
+    const dayTaxMoodDelta = computeTaxMoodDelta(
+      nextTaxPolicy,
+      nextCitizenWealth,
+      nextPopulation
+    );
     const peopleRes = processDayRolloverPeople(
       nextCubes,
       nextWarehouse,
       nextPopulation,
       nextReputation,
-      saved.level
+      saved.level,
+      dayTaxMoodDelta
     );
     nextWarehouse = peopleRes.warehouse;
     nextPopulation = peopleRes.population;
@@ -718,6 +741,11 @@ export function simulateOfflineProgress(
       dailyBought: nextDailyBought,
       dailySold: nextDailySold,
       lastBankNetWorthWarnMonth: nextLastBankNetWorthWarnMonth,
+      taxPolicy: nextTaxPolicy,
+      decrees: nextDecrees,
+      advisorBriefing: nextAdvisorBriefing,
+      hungerFlag: nextHungerFlag,
+      skipBriefing: m < monthsToRun - 1,
       isOffline: true,
       day: monthBoundaryDay,
       now,
@@ -745,6 +773,8 @@ export function simulateOfflineProgress(
     nextDailyBought = mp.dailyBought as any;
     nextDailySold = mp.dailySold as any;
     nextLastBankNetWorthWarnMonth = mp.lastBankNetWorthWarnMonth;
+    nextAdvisorBriefing = mp.advisorBriefing;
+    nextDecrees = mp.decrees;
     if (mp.offlineBankStats) {
       loanInstallmentsPaid += mp.offlineBankStats.loanInstallmentsPaid;
       loanDeferredAdded += mp.offlineBankStats.loanDeferredAdded;
@@ -765,15 +795,25 @@ export function simulateOfflineProgress(
   const arrearsAdded = Math.max(0, nextArrears - startArrears);
   nextCitizenWealth = sumCitizenWealth(nextCitizens);
 
-  // Element 6.1: On return, if deferredDue > 0 after offline months, warn king
+  // Element 6.1 & H5: On return, if deferredDue > 0 after offline months, warn king (merged via offline flood control)
   const activeLoanOnReturn = nextBankLoans.find((l) => l.status === 'active');
   if (activeLoanOnReturn && activeLoanOnReturn.deferredDue > 0 && monthsToRun > 0) {
-    nextOfficeFaxes.push({
-      id: `fax-bank-offline-${nextTotalMonths}`,
-      month: nextTotalMonths,
-      office: 'bank',
-      textAr: `تراكمت أقساط بقيمة ${activeLoanOnReturn.deferredDue} أثناء غيابك — تُدفع مع قسط الشهر القادم`,
-    });
+    nextOfficeFaxes = appendOrMergeFaxes(
+      nextOfficeFaxes,
+      [
+        {
+          id: `fax-bank-offline-${nextTotalMonths}`,
+          month: nextTotalMonths,
+          office: 'bank',
+          textAr: `تراكمت أقساط بقيمة ${activeLoanOnReturn.deferredDue} أثناء غيابك — تُدفع مع قسط الشهر القادم`,
+          status: 'unread',
+        },
+      ],
+      true
+    );
+    if (nextOfficeFaxes.length > 30) {
+      nextOfficeFaxes = nextOfficeFaxes.slice(nextOfficeFaxes.length - 30);
+    }
   }
 
   if (goldEarnedByShops > 0) {
@@ -791,11 +831,17 @@ export function simulateOfflineProgress(
       ? nextLedger.slice(nextLedger.length - MAX_LEDGER_ENTRIES)
       : nextLedger;
 
+  const finalTaxMoodDelta = computeTaxMoodDelta(
+    nextTaxPolicy,
+    nextCitizenWealth,
+    nextPopulation
+  );
   const finalEval = computeNeedsAndSatisfaction(
     nextCubes,
     nextWarehouse,
     nextPopulation,
-    nextHungerFlag
+    nextHungerFlag,
+    finalTaxMoodDelta
   );
   const finalSatisfaction =
     nextArrears > 0
@@ -861,6 +907,9 @@ export function simulateOfflineProgress(
     bankLoans: nextBankLoans,
     peoplesBank: nextPeoplesBank,
     lastBankNetWorthWarnMonth: nextLastBankNetWorthWarnMonth,
+    advisorBriefing: nextAdvisorBriefing,
+    taxPolicy: nextTaxPolicy,
+    decrees: nextDecrees,
     lastSavedAt: now,
   };
 

@@ -1,10 +1,22 @@
 import { runAgingAndMilestones } from './aging';
+import {
+  appendOrMergeFaxes,
+  computeAdvisorBriefing,
+} from './advisor';
+import { processBankMonth } from './bank';
 import { reconcileCitizens, sumCitizenWealth } from './citizens';
+import { ARREARS_SATISFACTION_CAP } from './constants';
+import {
+  logDecree,
+  measureDecreeActuals,
+  trimDecrees,
+} from './decrees';
 import { runHousingOffice } from './housingOffice';
 import { applyMonthlyInstitutions } from './institutions';
 import { distributePayrollToCitizens, runLaborMatching } from './laborOffice';
 import { runMarriageOffice } from './marriageOffice';
 import { computeMonthlyPayroll } from './payroll';
+import { computeNeedsAndSatisfaction } from './people';
 import {
   cleanupEmigratedPrivateOwners,
   runPrivateLaborMatching,
@@ -16,12 +28,14 @@ import {
   runMonthlyLandRequests,
 } from './privateLand';
 import { computeStaffing } from './production';
-import { processBankMonth } from './bank';
 import { runCitizenSpending } from './spending';
+import { computeTaxMoodDelta, DEFAULT_TAX_POLICY } from './taxPolicy';
 import type {
+  AdvisorBriefing,
   BankLoan,
   Citizen,
   Cube,
+  Decree,
   LastMonthStats,
   LandRequest,
   LedgerEntry,
@@ -32,8 +46,11 @@ import type {
   PoliceRecord,
   PriceMap,
   PrivateAd,
+  TaxPolicy,
   Warehouse,
 } from './types';
+
+const MAX_STORED_FAXES = 30;
 
 export interface MonthlyProcessorInput {
   cubes: Cube[];
@@ -60,6 +77,11 @@ export interface MonthlyProcessorInput {
   dailyBought?: Record<string, number>;
   dailySold?: Record<string, number>;
   lastBankNetWorthWarnMonth?: number;
+  taxPolicy?: TaxPolicy;
+  decrees?: Decree[];
+  advisorBriefing?: AdvisorBriefing | null;
+  hungerFlag?: boolean;
+  skipBriefing?: boolean;
   isOffline?: boolean;
   day: number;
   now?: number;
@@ -90,6 +112,8 @@ export interface MonthlyProcessorResult {
   dailyBought: Record<string, number>;
   dailySold: Record<string, number>;
   lastBankNetWorthWarnMonth: number;
+  advisorBriefing: AdvisorBriefing | null;
+  decrees: Decree[];
   ledgerItems: LedgerEntry[];
   paid: number;
   unheldSlots: number;
@@ -114,7 +138,7 @@ export interface MonthlyProcessorResult {
 }
 
 // Unified monthly heartbeat used by BOTH live TICK and offline simulation.
-// Exact Prompt 3 + Prompt 4 order:
+// Exact Prompt 6 Element 6.2 final order:
 //   totalMonths++
 //   -> (a) aging/milestones
 //   -> (b) Crown Labor matching (never poaches private workers)
@@ -122,15 +146,20 @@ export interface MonthlyProcessorResult {
 //   -> (d) Marriages
 //   -> (e) School/Clinic/Elder modifiers
 //   -> (f) reconcileCitizens + cleanupEmigratedPrivateOwners
-//   -> (g) Crown Payroll + Private Payroll
+//   -> (g) Crown Payroll + Private Payroll (both through tax/grant transform)
 //   -> (h) Flush monthlyBusinessTax to ledger
 //   -> (i) Citizen Spending (food -> leisure, idempotent on lastSpentMonth)
 //   -> (j) Private Construction + Land Requests (expiry & up to 1 new request)
-//   -> (k) Private Job Ads sync & Private Labor Matching (from remaining unemployed CVs)
+//   -> (k) Private Job Ads sync & Private Labor Matching
+//   -> (l) Bank installments & Bank trades (processBankMonth)
+//   -> (m) Advisor briefing (observer at end; skipped for non-final offline months)
+//   -> (n) Decree actuals -> trim
 export function runMonthlyProcessor(
   input: MonthlyProcessorInput
 ): MonthlyProcessorResult {
   const nextTotalMonths = Math.max(0, Math.trunc(input.totalMonths)) + 1;
+  const isOffline = Boolean(input.isOffline);
+  const taxPolicy: TaxPolicy = input.taxPolicy ?? DEFAULT_TAX_POLICY;
   const ledgerItems: LedgerEntry[] = [];
   let ledgerSeq = 0;
   const pushLedger = (
@@ -156,6 +185,7 @@ export function runMonthlyProcessor(
   let nextCitizenId = input.nextCitizenId;
   let citizenWealth = Math.max(0, Math.floor(input.citizenWealth));
   let privateAds = input.privateAds;
+  let decrees: Decree[] = Array.isArray(input.decrees) ? [...input.decrees] : [];
 
   // (a) Aging & milestones scan
   const agingRes = runAgingAndMilestones(
@@ -174,7 +204,8 @@ export function runMonthlyProcessor(
   );
   citizens = laborRes.citizens;
 
-  // (c) Housing grants & fax
+  // (c) Housing grants & fax (with offline flood-control merge for unread faxes)
+  const prevFaxIds = new Set(officeFaxes.map((f) => f.id));
   const housingRes = runHousingOffice(
     citizens,
     cubes,
@@ -184,7 +215,10 @@ export function runMonthlyProcessor(
   );
   citizens = housingRes.citizens;
   policeRecords = housingRes.policeRecords;
-  officeFaxes = housingRes.officeFaxes;
+  const addedHousingFaxes = housingRes.officeFaxes.filter(
+    (f) => !prevFaxIds.has(f.id)
+  );
+  officeFaxes = appendOrMergeFaxes(officeFaxes, addedHousingFaxes, isOffline);
 
   // (d) Marriages
   const marriageRes = runMarriageOffice(
@@ -198,7 +232,7 @@ export function runMonthlyProcessor(
   // (e) School / Clinic / Elder modifiers
   citizens = applyMonthlyInstitutions(citizens, cubes, nextTotalMonths);
 
-  // (f) Reconcile citizens + Element 7.2 emigrated private owner cleanup
+  // (f) Reconcile citizens + emigrated private owner cleanup
   const prevCitizensBeforeReconcile = citizens;
   const recRes = reconcileCitizens({
     citizens,
@@ -237,7 +271,7 @@ export function runMonthlyProcessor(
   privateAds = prePaySync.privateAds;
   citizens = prePaySync.citizens;
 
-  // (g1) Crown Payroll (CROWN slots only)
+  // (g1) Crown Payroll (CROWN slots only) with Prompt 6 tax/grant transform
   const payroll = computeMonthlyPayroll(cubes, input.population);
   const owed = Math.max(0, input.arrears) + payroll.due;
   const paid = Math.min(gold, owed);
@@ -248,22 +282,37 @@ export function runMonthlyProcessor(
     citizens,
     cubes,
     input.population,
-    paid
+    paid,
+    taxPolicy,
+    gold
   );
   citizens = distRes.citizens;
+  gold = Math.max(0, gold + distRes.taxWithheld - distRes.grantsPaid);
   citizenWealth = sumCitizenWealth(citizens);
 
   pushLedger('payroll', -paid, 'رواتب الشهر');
 
-  // (g2) Private Payroll (owners pay their own workers from personal wealth; never touches treasury/arrears)
+  // (g2) Private Payroll (owners pay exact gross w; tax/grant transform redistributes worker/treasury)
   const privPayRes = runPrivatePayroll({
     citizens,
     privateAds,
     totalMonths: nextTotalMonths,
+    taxPolicy,
+    availableGrantGold: gold,
   });
   citizens = privPayRes.citizens;
   privateAds = privPayRes.privateAds;
-  citizenWealth = privPayRes.citizenWealth;
+  gold = Math.max(0, gold + privPayRes.taxWithheld - privPayRes.grantsPaid);
+  citizenWealth = sumCitizenWealth(citizens);
+
+  const totalTaxWithheld = distRes.taxWithheld + privPayRes.taxWithheld;
+  const totalGrantsPaid = distRes.grantsPaid + privPayRes.grantsPaid;
+  if (totalTaxWithheld > 0) {
+    pushLedger('payroll', totalTaxWithheld, 'ضرائب مرتبات محتجزة');
+  }
+  if (totalGrantsPaid > 0) {
+    pushLedger('payroll', -totalGrantsPaid, 'منح ملكية على المرتبات');
+  }
 
   // (h) Flush accumulated monthly business tax (already in gold; emit single monthly ledger row)
   const businessTaxCollected = Math.max(
@@ -299,38 +348,6 @@ export function runMonthlyProcessor(
     pushLedger(item.kind, item.amount, item.labelAr);
   }
 
-  // Hook processBankMonth (installments, bank trading, scoreboard)
-  const bankRes = processBankMonth({
-    cubes,
-    gold,
-    palaceOfPeople,
-    bankTrust: input.bankTrust ?? 70,
-    bankLoans: input.bankLoans ?? [],
-    peoplesBank: input.peoplesBank ?? { gold: 5000, portfolio: {}, totalTrades: 0, lastTradeMonth: null, lastTradeAr: null },
-    prices: input.prices,
-    dailyBought: input.dailyBought ?? {},
-    dailySold: input.dailySold ?? {},
-    totalMonths: nextTotalMonths,
-    day: input.day,
-    lastBankNetWorthWarnMonth: input.lastBankNetWorthWarnMonth ?? 0,
-    isOffline: input.isOffline,
-  });
-  cubes = bankRes.cubes;
-  gold = bankRes.gold;
-  palaceOfPeople = bankRes.palaceOfPeople;
-  const bankTrust = bankRes.bankTrust;
-  const bankLoans = bankRes.bankLoans;
-  const peoplesBank = bankRes.peoplesBank;
-  const nextDailyBought = bankRes.dailyBought;
-  const nextDailySold = bankRes.dailySold;
-  const nextBankNetWorthWarnMonth = bankRes.lastBankNetWorthWarnMonth;
-  for (const item of bankRes.ledgerItems) {
-    pushLedger(item.kind, item.amount, item.labelAr);
-  }
-  for (const fax of bankRes.officeFaxes) {
-    officeFaxes = [...officeFaxes, fax];
-  }
-
   // (j1) Private Construction on approved empty plots
   const constructRes = processPrivateConstruction({
     cubes,
@@ -353,6 +370,8 @@ export function runMonthlyProcessor(
     ...spendRes.lastMonthStats,
     businessTax: businessTaxCollected,
     importSink: spendRes.lastMonthStats.importSink + constructRes.importSink,
+    taxWithheld: totalTaxWithheld,
+    grantsPaid: totalGrantsPaid,
   };
 
   // (j2) Land Requests: expire old unanswered (>2 months) & generate up to 1 new request
@@ -374,6 +393,111 @@ export function runMonthlyProcessor(
   privateAds = privMatchRes.privateAds;
   citizens = privMatchRes.citizens;
   citizenWealth = sumCitizenWealth(citizens);
+
+  // (l) Bank installments & People's Bank trades (processBankMonth)
+  const activeLoanIdBefore =
+    (input.bankLoans ?? []).find((l) => l.status === 'active')?.id ?? null;
+  const bankRes = processBankMonth({
+    cubes,
+    gold,
+    palaceOfPeople,
+    bankTrust: input.bankTrust ?? 70,
+    bankLoans: input.bankLoans ?? [],
+    peoplesBank: input.peoplesBank ?? {
+      gold: 5000,
+      portfolio: {},
+      totalTrades: 0,
+      lastTradeMonth: null,
+      lastTradeAr: null,
+    },
+    prices: input.prices,
+    dailyBought: input.dailyBought ?? {},
+    dailySold: input.dailySold ?? {},
+    totalMonths: nextTotalMonths,
+    day: input.day,
+    lastBankNetWorthWarnMonth: input.lastBankNetWorthWarnMonth ?? 0,
+    isOffline,
+  });
+  cubes = bankRes.cubes;
+  gold = bankRes.gold;
+  palaceOfPeople = bankRes.palaceOfPeople;
+  const bankTrust = bankRes.bankTrust;
+  const bankLoans = bankRes.bankLoans;
+  const peoplesBank = bankRes.peoplesBank;
+  const nextDailyBought = bankRes.dailyBought;
+  const nextDailySold = bankRes.dailySold;
+  const nextBankNetWorthWarnMonth = bankRes.lastBankNetWorthWarnMonth;
+  for (const item of bankRes.ledgerItems) {
+    pushLedger(item.kind, item.amount, item.labelAr);
+  }
+  officeFaxes = appendOrMergeFaxes(officeFaxes, bankRes.officeFaxes, isOffline);
+  if (officeFaxes.length > MAX_STORED_FAXES) {
+    officeFaxes = officeFaxes.slice(officeFaxes.length - MAX_STORED_FAXES);
+  }
+
+  // Log decree when active-play scheduled installment completes the loan (never offline)
+  if (!isOffline && activeLoanIdBefore !== null) {
+    const finishedLoan = bankLoans.find((l) => l.id === activeLoanIdBefore);
+    if (finishedLoan && finishedLoan.status === 'repaid') {
+      decrees = logDecree(decrees, {
+        month: nextTotalMonths,
+        kind: 'loan_repaid',
+        labelAr: 'اكتمال سداد تمويل البنك الشرعي',
+        projectedAr: 'ثقة البنك +10 وتحرير الأراضي المرهونة',
+        projectedValue: 10,
+      });
+    }
+  }
+
+  // Compute observed stored satisfaction at this boundary (same formula + mood + caps as reducer)
+  const taxMoodDelta = computeTaxMoodDelta(
+    taxPolicy,
+    citizenWealth,
+    input.population
+  );
+  const boundaryNeeds = computeNeedsAndSatisfaction(
+    cubes,
+    warehouse,
+    input.population,
+    Boolean(input.hungerFlag),
+    taxMoodDelta
+  );
+  const observedSatisfaction =
+    nextArrears > 0
+      ? Math.min(ARREARS_SATISFACTION_CAP, boundaryNeeds.satisfaction)
+      : boundaryNeeds.satisfaction;
+
+  // (m) Advisor briefing (pure observer at end; runs once per month boundary; skipped on non-final offline months)
+  const shouldComputeBriefing =
+    !input.skipBriefing && input.advisorBriefing?.month !== nextTotalMonths;
+  const advisorBriefing: AdvisorBriefing | null = shouldComputeBriefing
+    ? computeAdvisorBriefing({
+        month: nextTotalMonths,
+        arrears: nextArrears,
+        bankLoans,
+        inflationIndex: input.inflationIndex,
+        lastMonthStats,
+        citizens,
+        totalMonths: nextTotalMonths,
+        peoplesBank,
+        cubes,
+        prices: input.prices,
+        gold,
+        citizenWealth,
+        population: input.population,
+        satisfaction: observedSatisfaction,
+      })
+    : (input.advisorBriefing ?? null);
+
+  // (n) Decree actuals -> trim (measure FIRST, trim AFTER so unmeasured decrees are never dropped)
+  const monthJustEnded = nextTotalMonths - 1;
+  decrees = measureDecreeActuals(
+    decrees,
+    monthJustEnded,
+    lastMonthStats,
+    observedSatisfaction
+  );
+  decrees = trimDecrees(decrees);
 
   const lastPayroll: PayrollRecord = {
     day: input.day,
@@ -406,6 +530,8 @@ export function runMonthlyProcessor(
     dailyBought: nextDailyBought,
     dailySold: nextDailySold,
     lastBankNetWorthWarnMonth: nextBankNetWorthWarnMonth,
+    advisorBriefing,
+    decrees,
     ledgerItems,
     paid,
     unheldSlots: distRes.unheldSlots,

@@ -1,11 +1,13 @@
 import { THEMES, WAGE_BY_THEME } from './constants';
 import { ageYears, getTopAttribute } from './citizens';
 import { computeStaffing, makeSlotKey } from './production';
+import { applyWageTaxTransform, DEFAULT_TAX_POLICY } from './taxPolicy';
 import type {
   Citizen,
   CitizenAttrKey,
   Cube,
   SlotIndex,
+  TaxPolicy,
   ThemeId,
 } from './types';
 
@@ -298,14 +300,19 @@ export interface PayrollDistributionResult {
   citizens: Citizen[];
   distributed: number;
   unheldSlots: number;
+  taxWithheld: number;
+  grantsPaid: number;
 }
 
-// Element 3.4: Credit slot wages directly to named holders so sum(citizen.wealth) === citizenWealth.
+// Element 3.4 & Prompt 6 Element 2.2: Credit slot wages directly to named holders through the
+// per-holder tax/grant transform so sum(citizen.wealth) === citizenWealth and conservation is exact.
 export function distributePayrollToCitizens(
   citizens: Citizen[],
   cubes: Cube[],
   population: number,
-  paidGold: number
+  paidGold: number,
+  taxPolicy: TaxPolicy = DEFAULT_TAX_POLICY,
+  availableGrantGold: number = Infinity
 ): PayrollDistributionResult {
   const next: Citizen[] = citizens.map((c) => ({
     ...c,
@@ -341,41 +348,71 @@ export function distributePayrollToCitizens(
 
   const toDistribute = Math.max(0, Math.floor(paidGold));
   if (toDistribute <= 0 || heldEntries.length === 0 || totalHeldWage <= 0) {
-    return { citizens: next, distributed: 0, unheldSlots };
+    return {
+      citizens: next,
+      distributed: 0,
+      unheldSlots,
+      taxWithheld: 0,
+      grantsPaid: 0,
+    };
   }
 
-  // Exact full-payment match (normal path): each holder gets exact slotWage
+  // Compute each holder's exact gross share first (exact match or largest-remainder integer split)
+  const grossAllocations: Array<{ citizen: Citizen; gross: number }> = [];
   if (toDistribute === totalHeldWage) {
     for (const h of heldEntries) {
-      h.citizen.wealth += h.wage;
+      grossAllocations.push({ citizen: h.citizen, gross: h.wage });
     }
-    return { citizens: next, distributed: toDistribute, unheldSlots };
+  } else {
+    const shares = heldEntries.map((h) => {
+      const exact = (toDistribute * h.wage) / totalHeldWage;
+      const floor = Math.floor(exact);
+      return { citizen: h.citizen, gross: floor, rem: exact - floor };
+    });
+
+    let allocated = 0;
+    for (const sh of shares) {
+      allocated += sh.gross;
+    }
+
+    let leftover = toDistribute - allocated;
+    shares.sort((a, b) => {
+      if (Math.abs(b.rem - a.rem) > 1e-12) return b.rem - a.rem;
+      return a.citizen.id - b.citizen.id;
+    });
+
+    for (let i = 0; i < shares.length && leftover > 0; i++) {
+      shares[i].gross += 1;
+      leftover -= 1;
+    }
+    // Restore deterministic citizen-id order before applying grant cap
+    shares.sort((a, b) => a.citizen.id - b.citizen.id);
+    for (const sh of shares) {
+      grossAllocations.push({ citizen: sh.citizen, gross: sh.gross });
+    }
   }
 
-  // Partial payment (arrears) or arrears catch-up: largest-remainder integer distribution
-  // guaranteeing sum(deltas) === toDistribute with deterministic lower-id tie-break
-  const shares = heldEntries.map((h) => {
-    const exact = (toDistribute * h.wage) / totalHeldWage;
-    const floor = Math.floor(exact);
-    return { citizen: h.citizen, floor, rem: exact - floor };
-  });
+  let totalCredited = 0;
+  let taxWithheld = 0;
+  let grantsPaid = 0;
+  let remainingGrantGold = availableGrantGold;
 
-  let allocated = 0;
-  for (const sh of shares) {
-    sh.citizen.wealth += sh.floor;
-    allocated += sh.floor;
+  for (const alloc of grossAllocations) {
+    const tr = applyWageTaxTransform(alloc.gross, taxPolicy, remainingGrantGold);
+    alloc.citizen.wealth += tr.credit;
+    totalCredited += tr.credit;
+    taxWithheld += tr.withheld;
+    grantsPaid += tr.bonus;
+    if (Number.isFinite(remainingGrantGold)) {
+      remainingGrantGold = Math.max(0, remainingGrantGold - tr.bonus);
+    }
   }
 
-  let leftover = toDistribute - allocated;
-  shares.sort((a, b) => {
-    if (Math.abs(b.rem - a.rem) > 1e-12) return b.rem - a.rem;
-    return a.citizen.id - b.citizen.id;
-  });
-
-  for (let i = 0; i < shares.length && leftover > 0; i++) {
-    shares[i].citizen.wealth += 1;
-    leftover -= 1;
-  }
-
-  return { citizens: next, distributed: toDistribute, unheldSlots };
+  return {
+    citizens: next,
+    distributed: totalCredited,
+    unheldSlots,
+    taxWithheld,
+    grantsPaid,
+  };
 }

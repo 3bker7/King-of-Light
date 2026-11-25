@@ -285,6 +285,7 @@ export function processBankMonth(
           month: input.totalMonths,
           office: 'bank',
           textAr: `البنك الشرعي: تعذّر سداد قسط هذا الشهر (${loan.missedCount}/3) — الأراضي المرهونة في خطر`,
+          status: 'unread',
         });
 
         if (loan.missedCount >= MISSES_TO_DEFAULT) {
@@ -307,6 +308,7 @@ export function processBankMonth(
             month: input.totalMonths,
             office: 'bank',
             textAr: `بنك الشعب استلم ${loan.collateralCubeIds.length} أرض محجوزة من البنك الشرعي`,
+            status: 'unread',
           });
           toastMsg = {
             message: `تم حجز ${loan.collateralCubeIds.length} أرض لصالح بنك الشعب لتعثر السداد`,
@@ -371,6 +373,7 @@ export function processBankMonth(
         month: input.totalMonths,
         office: 'bank',
         textAr: `تحذير: ثروة بنك الشعب (${netWorth}) تجاوزت 3 أضعاف خزنتك — البوت يكسب`,
+        status: 'unread',
       });
       lastBankNetWorthWarnMonth = input.totalMonths;
     }

@@ -31,6 +31,8 @@ export function createZeroLastMonthStats(): LastMonthStats {
     importSink: 0,
     leisureSink: 0,
     unmetFood: 0,
+    taxWithheld: 0,
+    grantsPaid: 0,
   };
 }
 
