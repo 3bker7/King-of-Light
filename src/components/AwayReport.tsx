@@ -1,4 +1,4 @@
-import { AlertTriangle, Clock, Coins, ScrollText, TrendingUp, Users, Wallet } from 'lucide-react';
+import { AlertTriangle, Clock, Coins, Landmark, ScrollText, TrendingUp, Users, Wallet } from 'lucide-react';
 import { MAX_OFFLINE_SECONDS, TRADED_RESOURCES } from '../game/constants';
 import { formatDurationArabic, STRINGS } from '../game/strings';
 import type { AwayReportData } from '../game/types';
@@ -142,6 +142,37 @@ export function AwayReport({ report, onClose }: AwayReportProps) {
               <span className="tabular-nums-latin">
                 أثناء غيابك: المواطنون أنفقوا {report.citizenSpentTotal ?? 0} ذهب،
                 وضرائب الأعمال {report.businessTaxTotal ?? 0}
+              </span>
+            </div>
+          )}
+
+          {/* Prompt 5 Element 6.1: Bank offline installments & trades */}
+          {(report.loanInstallmentsPaid ?? 0) > 0 && (
+            <div className="flex items-center justify-between p-2.5 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC]">
+              <div className="flex items-center gap-2 font-bold text-[#2B2118]">
+                <Landmark className="w-4 h-4 text-[#14524A]" />
+                <span>أقساط تمويل دُفعت أثناء غيابك</span>
+              </div>
+              <span className="text-sm font-extrabold text-[#A83629] tabular-nums-latin">
+                -{report.loanInstallmentsPaid}
+              </span>
+            </div>
+          )}
+
+          {(report.loanDeferredAdded ?? 0) > 0 && (
+            <div className="flex items-center gap-2 p-2.5 rounded-xl bg-[#FBE2DF] border border-[#E5ABA3] font-bold text-[#8E2A1F]">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <span>
+                أقساط تمويل مؤجلة أثناء غيابك: {report.loanDeferredAdded} ذهب
+              </span>
+            </div>
+          )}
+
+          {(report.bankTradesCount ?? 0) > 0 && (
+            <div className="flex items-center gap-2 p-2.5 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] font-bold text-[#2B2118]">
+              <TrendingUp className="w-4 h-4 text-[#C9962E] shrink-0" />
+              <span className="tabular-nums-latin">
+                صفقات بنك الشعب أثناء غيابك: {report.bankTradesCount} صفقة
               </span>
             </div>
           )}

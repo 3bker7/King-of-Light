@@ -30,6 +30,7 @@ import {
   VILLAGE_JOIN_REQUIRED_DAYS,
 } from '../game/constants';
 import { ageYears } from '../game/citizens';
+import { getBankCubeAskPrice } from '../game/bank';
 import { getHousingQueue } from '../game/housingOffice';
 import { getActiveCVs } from '../game/laborOffice';
 import {
@@ -80,6 +81,8 @@ interface InspectorProps {
   onBuyMaterials?: (items: Partial<Record<TradedResourceKey, number>>) => void;
   onBuildProducer?: (resource: TradedResourceKey) => void;
   onOpenOffice?: (tab: PalaceOfficeTab) => void;
+  onOpenBank?: () => void;
+  onBuybackCube?: (cubeId: number) => void;
   onResolveLandRequest?: (requestId: string, approve: boolean) => void;
   onTrade: (
     resource: TradedResourceKey,
@@ -337,6 +340,8 @@ export function Inspector({
   onBuyMaterials,
   onBuildProducer,
   onOpenOffice,
+  onOpenBank,
+  onBuybackCube,
   onResolveLandRequest,
   onTrade,
 }: InspectorProps) {
@@ -427,6 +432,59 @@ export function Inspector({
           {!repReady && (
             <p className="text-[11px] font-bold text-[#8A5F12] bg-[#F8E7C1] border border-[#E2BA64] rounded-lg p-2">
               {STRINGS.inspector.villageNeedRep}
+            </p>
+          )}
+        </div>
+      );
+    }
+
+    if (cube.owner === 'bank') {
+      const askPrice = getBankCubeAskPrice(state.cubes, cube, state.totalMonths);
+      const plainPrice = getCubePurchasePrice(state.cubes, cube);
+      const seizedMonth = cube.bankSeizedMonth ?? state.totalMonths;
+      const held = Math.max(0, state.totalMonths - seizedMonth);
+
+      return (
+        <div className="p-3 rounded-xl bg-[#FDF8EC] border border-[#A0AEC0] space-y-2.5">
+          <div className="flex items-center justify-between border-b border-[#E2E8F0] pb-2">
+            <div className="flex items-center gap-1.5 text-xs font-extrabold text-[#2D3748]">
+              <Landmark className="w-4 h-4 text-[#718096] shrink-0" />
+              <span>أرض لدى بنك الشعب</span>
+            </div>
+            <span className="px-2 py-0.5 rounded-md bg-[#EDF2F7] text-[10px] font-extrabold text-[#4A5568]">
+              محجوزة ({held} شهر)
+            </span>
+          </div>
+
+          <p className="text-[11px] text-[#4A5568] leading-relaxed">
+            تم حجز هذه الأرض لتعثر سداد تمويل البنك الشرعي. يتناقص سعر الاسترداد تدريجياً على مدار 12 شهراً حتى السعر الأساسي.
+          </p>
+
+          <div className="p-2.5 rounded-lg bg-[#F7FAFC] border border-[#E2E8F0] space-y-1 text-xs">
+            <div className="flex items-center justify-between font-bold">
+              <span className="text-[#718096]">سعر الاسترداد الحالي:</span>
+              <span className="text-sm font-extrabold text-[#2B6CB0] tabular-nums-latin">
+                {askPrice} ذهب
+              </span>
+            </div>
+            <div className="flex items-center justify-between text-[11px] text-[#718096]">
+              <span>السعر الأساسي للأرض:</span>
+              <span className="tabular-nums-latin">{plainPrice} ذهب</span>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            disabled={state.gold < askPrice}
+            onClick={() => onBuybackCube?.(cube.id)}
+            className="w-full py-2 px-3 rounded-xl bg-[#2B6CB0] hover:bg-[#2C5282] disabled:opacity-45 text-white text-xs font-extrabold flex items-center justify-center gap-1.5 transition-colors"
+          >
+            <Coins className="w-3.5 h-3.5 text-[#F6E05E]" />
+            <span>استرداد الأرض ({askPrice} ذهب)</span>
+          </button>
+          {state.gold < askPrice && (
+            <p className="text-[11px] font-bold text-[#A83629] text-center">
+              {STRINGS.inspector.notEnoughGold}
             </p>
           )}
         </div>
@@ -619,6 +677,21 @@ export function Inspector({
                     {officeCounts.policeTotal}
                   </span>
                 </button>
+                {onOpenBank && (
+                  <button
+                    type="button"
+                    onClick={onOpenBank}
+                    className="col-span-2 flex items-center justify-between gap-1 px-2 py-1.5 rounded-lg bg-[#FAF2DC] hover:bg-[#F2E5C4] border border-[#C9962E] text-[11px] font-extrabold text-[#2B2118] transition-colors"
+                  >
+                    <span className="flex items-center gap-1.5 min-w-0 truncate">
+                      <Landmark className="w-3.5 h-3.5 text-[#8A5F12] shrink-0" />
+                      <span>البنك الشرعي وبنك الشعب</span>
+                    </span>
+                    <span className="text-[#8A5F12] text-[10px] font-extrabold">
+                      {state.bankLoans.some((l) => l.status === 'active') ? 'تمويل قائم' : 'جاهز'}
+                    </span>
+                  </button>
+                )}
               </div>
             </div>
           )}

@@ -7,6 +7,7 @@ import type {
   FoodResourceKey,
   LastMonthStats,
   LedgerKind,
+  PalaceOfPeople,
   SlotIndex,
   ThemeId,
   Warehouse,
@@ -53,6 +54,7 @@ export interface CitizenSpendingInput {
   citizens: Citizen[];
   totalMonths: number;
   lastSpentMonth: number;
+  palaceOfPeople?: PalaceOfPeople;
   staffedSlots?: Set<string>;
   rng?: () => number;
 }
@@ -62,6 +64,7 @@ export interface CitizenSpendingResult {
   gold: number;
   citizens: Citizen[];
   citizenWealth: number;
+  palaceOfPeople: PalaceOfPeople;
   lastMonthStats: LastMonthStats;
   lastSpentMonth: number;
   ledgerItems: SpendingLedgerItem[];
@@ -166,6 +169,8 @@ export function runCitizenSpending(
   const rng = input.rng ?? Math.random;
   const currentMonth = Math.max(0, Math.trunc(input.totalMonths));
 
+  const currentPalaceGold = Math.max(0, Math.floor(input.palaceOfPeople?.gold ?? 0));
+
   // Hardening 2: Idempotent per month — never double-charge the same month
   if (input.lastSpentMonth >= currentMonth) {
     return {
@@ -173,6 +178,7 @@ export function runCitizenSpending(
       gold: input.gold,
       citizens: input.citizens,
       citizenWealth: sumCitizenWealth(input.citizens),
+      palaceOfPeople: { gold: currentPalaceGold },
       lastMonthStats: createZeroLastMonthStats(),
       lastSpentMonth: input.lastSpentMonth,
       ledgerItems: [],
@@ -462,11 +468,15 @@ export function runCitizenSpending(
     });
   }
 
+  // B1: citizen import sink and leisure sink amounts now credit palaceOfPeople.gold instead of vanishing
+  const nextPalaceGold = currentPalaceGold + stats.importSink + stats.leisureSink;
+
   return {
     warehouse: nextWarehouse,
     gold: nextGold,
     citizens: nextCitizens,
     citizenWealth: sumCitizenWealth(nextCitizens),
+    palaceOfPeople: { gold: nextPalaceGold },
     lastMonthStats: stats,
     lastSpentMonth: currentMonth,
     ledgerItems,

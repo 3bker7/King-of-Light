@@ -1,4 +1,4 @@
-export type CubeOwner = 'player' | 'neutral';
+export type CubeOwner = 'player' | 'neutral' | 'bank';
 
 export type ThemeCategory =
   | 'food'
@@ -126,6 +126,10 @@ export interface Cube {
   privateOwnerId?: number | null;
   privateIntendedTheme?: ThemeId | null;
   privateBuildRetries?: number;
+  // Prompt 5 Bank & Collateral fields
+  collateralLoanId?: string | null;
+  bankSeizedMonth?: number | null;
+  bankAskPrice?: number | null;
 }
 
 export interface ThemeInputSpec {
@@ -238,7 +242,7 @@ export interface Citizen {
 export interface OfficeFax {
   id: string;
   month: number;
-  office: 'housing' | 'labor';
+  office: 'housing' | 'labor' | 'bank';
   textAr: string;
   actionThemeId?: ThemeId;
 }
@@ -301,6 +305,38 @@ export interface AwayReportData {
   faxesSent: number;
   citizenSpentTotal?: number;
   businessTaxTotal?: number;
+  // Prompt 5 Bank offline report fields
+  loanInstallmentsPaid?: number;
+  loanDeferredAdded?: number;
+  bankTradesCount?: number;
+}
+
+export interface PalaceOfPeople {
+  gold: number;
+  totalSinksCollected: number;
+}
+
+export interface BankLoan {
+  id: string;
+  principal: number;
+  profit: number;
+  repayable: number;
+  term: number;
+  startMonth: number;
+  monthsRemaining: number;
+  collateralCubeIds: number[];
+  missedInstallments: number;
+  deferredDue: number;
+  paidSoFar: number;
+  status: 'active' | 'repaid' | 'defaulted';
+}
+
+export interface PeoplesBank {
+  gold: number;
+  portfolio: Partial<Record<TradedResourceKey, number>>;
+  totalTrades: number;
+  lastTradeMonth: number | null;
+  lastTradeSummaryAr: string | null;
 }
 
 export type ToastTone = 'info' | 'success' | 'warning';
@@ -363,6 +399,12 @@ export interface GameState {
   landRequests: LandRequest[];
   privateAds: PrivateAd[];
   lastSpentMonth: number;
+  // Prompt 5 Bank & Palace of the People fields
+  palaceOfPeople: PalaceOfPeople;
+  bankTrust: number;
+  bankLoans: BankLoan[];
+  peoplesBank: PeoplesBank;
+  lastBankNetWorthWarnMonth?: number;
 }
 
 export interface PersistedSaveData {
@@ -407,6 +449,12 @@ export interface PersistedSaveData {
   landRequests?: LandRequest[];
   privateAds?: PrivateAd[];
   lastSpentMonth?: number;
+  // Prompt 5 optional persisted fields
+  palaceOfPeople?: PalaceOfPeople;
+  bankTrust?: number;
+  bankLoans?: BankLoan[];
+  peoplesBank?: PeoplesBank;
+  lastBankNetWorthWarnMonth?: number;
 }
 
 export interface StaffingStatus {

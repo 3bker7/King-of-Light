@@ -16,15 +16,19 @@ import {
   runMonthlyLandRequests,
 } from './privateLand';
 import { computeStaffing } from './production';
+import { processBankMonth } from './bank';
 import { runCitizenSpending } from './spending';
 import type {
+  BankLoan,
   Citizen,
   Cube,
   LastMonthStats,
   LandRequest,
   LedgerEntry,
   OfficeFax,
+  PalaceOfPeople,
   PayrollRecord,
+  PeoplesBank,
   PoliceRecord,
   PriceMap,
   PrivateAd,
@@ -49,6 +53,14 @@ export interface MonthlyProcessorInput {
   landRequests: LandRequest[];
   privateAds: PrivateAd[];
   lastSpentMonth: number;
+  palaceOfPeople?: PalaceOfPeople;
+  bankTrust?: number;
+  bankLoans?: BankLoan[];
+  peoplesBank?: PeoplesBank;
+  dailyBought?: Record<string, number>;
+  dailySold?: Record<string, number>;
+  lastBankNetWorthWarnMonth?: number;
+  isOffline?: boolean;
   day: number;
   now?: number;
   rng?: () => number;
@@ -71,11 +83,23 @@ export interface MonthlyProcessorResult {
   landRequests: LandRequest[];
   privateAds: PrivateAd[];
   lastSpentMonth: number;
+  palaceOfPeople: PalaceOfPeople;
+  bankTrust: number;
+  bankLoans: BankLoan[];
+  peoplesBank: PeoplesBank;
+  dailyBought: Record<string, number>;
+  dailySold: Record<string, number>;
+  lastBankNetWorthWarnMonth: number;
   ledgerItems: LedgerEntry[];
   paid: number;
   unheldSlots: number;
   citizenSpentTotal: number;
   businessTaxCollected: number;
+  offlineBankStats?: {
+    loanInstallmentsPaid: number;
+    loanDeferredAdded: number;
+    bankTradesCount: number;
+  };
   summary: {
     births: number;
     cvsFiled: number;
@@ -261,6 +285,7 @@ export function runMonthlyProcessor(
     citizens,
     totalMonths: nextTotalMonths,
     lastSpentMonth: input.lastSpentMonth,
+    palaceOfPeople: input.palaceOfPeople,
     staffedSlots: staffingForSpending.staffedSlots,
     rng: input.rng,
   });
@@ -268,9 +293,42 @@ export function runMonthlyProcessor(
   gold = spendRes.gold;
   citizens = spendRes.citizens;
   citizenWealth = spendRes.citizenWealth;
+  let palaceOfPeople = spendRes.palaceOfPeople;
   const nextLastSpentMonth = spendRes.lastSpentMonth;
   for (const item of spendRes.ledgerItems) {
     pushLedger(item.kind, item.amount, item.labelAr);
+  }
+
+  // Hook processBankMonth (installments, bank trading, scoreboard)
+  const bankRes = processBankMonth({
+    cubes,
+    gold,
+    palaceOfPeople,
+    bankTrust: input.bankTrust ?? 70,
+    bankLoans: input.bankLoans ?? [],
+    peoplesBank: input.peoplesBank ?? { gold: 5000, portfolio: {}, lastTradeAr: null },
+    prices: input.prices,
+    dailyBought: input.dailyBought ?? {},
+    dailySold: input.dailySold ?? {},
+    totalMonths: nextTotalMonths,
+    day: input.day,
+    lastBankNetWorthWarnMonth: input.lastBankNetWorthWarnMonth ?? 0,
+    isOffline: input.isOffline,
+  });
+  cubes = bankRes.cubes;
+  gold = bankRes.gold;
+  palaceOfPeople = bankRes.palaceOfPeople;
+  const bankTrust = bankRes.bankTrust;
+  const bankLoans = bankRes.bankLoans;
+  const peoplesBank = bankRes.peoplesBank;
+  const nextDailyBought = bankRes.dailyBought;
+  const nextDailySold = bankRes.dailySold;
+  const nextBankNetWorthWarnMonth = bankRes.lastBankNetWorthWarnMonth;
+  for (const item of bankRes.ledgerItems) {
+    pushLedger(item.kind, item.amount, item.labelAr);
+  }
+  for (const fax of bankRes.officeFaxes) {
+    officeFaxes = [...officeFaxes, fax];
   }
 
   // (j1) Private Construction on approved empty plots
@@ -341,11 +399,19 @@ export function runMonthlyProcessor(
     landRequests: nextLandRequests,
     privateAds,
     lastSpentMonth: nextLastSpentMonth,
+    palaceOfPeople,
+    bankTrust,
+    bankLoans,
+    peoplesBank,
+    dailyBought: nextDailyBought,
+    dailySold: nextDailySold,
+    lastBankNetWorthWarnMonth: nextBankNetWorthWarnMonth,
     ledgerItems,
     paid,
     unheldSlots: distRes.unheldSlots,
     citizenSpentTotal: spendRes.totalCitizenSpent,
     businessTaxCollected,
+    offlineBankStats: bankRes.offlineStats,
     summary: {
       births: recRes.birthsCount,
       cvsFiled: agingRes.cvsFiled + recRes.cvsFiledCount,

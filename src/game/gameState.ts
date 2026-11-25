@@ -31,6 +31,14 @@ import {
   VILLAGE_NAMES,
 } from './constants';
 import {
+  BANK_START_GOLD,
+  PALACE_START_GOLD,
+  TRUST_START,
+  executeBuybackCube,
+  executeRepayLoanFull,
+  executeTakeLoan,
+} from './bank';
+import {
   generateInitialCitizens,
   reconcileCitizens,
   sanitizeCitizensOnHydrate,
@@ -278,6 +286,11 @@ export function createFreshGameState(now = Date.now()): GameState {
     landRequests: [],
     privateAds: [],
     lastSpentMonth: 0,
+    palaceOfPeople: { gold: PALACE_START_GOLD },
+    bankTrust: TRUST_START,
+    bankLoans: [],
+    peoplesBank: { gold: BANK_START_GOLD, portfolio: {}, lastTradeAr: null },
+    lastBankNetWorthWarnMonth: 0,
   };
 }
 
@@ -442,6 +455,21 @@ export function hydrateGameState(saved: PersistedSaveData): GameState {
       Number.isFinite(saved.lastSpentMonth)
         ? Math.max(0, Math.trunc(saved.lastSpentMonth))
         : 0,
+    palaceOfPeople: saved.palaceOfPeople ?? { gold: PALACE_START_GOLD },
+    bankTrust:
+      typeof saved.bankTrust === 'number'
+        ? Math.max(0, Math.min(100, Math.floor(saved.bankTrust)))
+        : TRUST_START,
+    bankLoans: Array.isArray(saved.bankLoans) ? saved.bankLoans : [],
+    peoplesBank: saved.peoplesBank ?? {
+      gold: BANK_START_GOLD,
+      portfolio: {},
+      lastTradeAr: null,
+    },
+    lastBankNetWorthWarnMonth:
+      typeof saved.lastBankNetWorthWarnMonth === 'number'
+        ? saved.lastBankNetWorthWarnMonth
+        : 0,
   };
 }
 
@@ -591,6 +619,14 @@ export type GameAction =
       requestId: string;
       approve: boolean;
     }
+  | {
+      type: 'TAKE_LOAN';
+      principal: number;
+      termMonths: 3 | 6 | 12;
+      collateralCubeIds: number[];
+    }
+  | { type: 'REPAY_LOAN_FULL' }
+  | { type: 'BUYBACK_CUBE'; cubeId: number }
   | { type: 'DISMISS_TOAST'; id: string }
   | { type: 'CLEAR_LEVEL2_NOTICE' }
   | { type: 'CLEAR_LEVEL2_COMPLETED_NOTICE' }
@@ -646,6 +682,11 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
       let nextLandRequests = state.landRequests;
       let nextPrivateAds = state.privateAds;
       let nextLastSpentMonth = state.lastSpentMonth;
+      let nextPalaceOfPeople = state.palaceOfPeople;
+      let nextBankTrust = state.bankTrust;
+      let nextBankLoans = state.bankLoans;
+      let nextPeoplesBank = state.peoplesBank;
+      let nextLastBankNetWorthWarnMonth = state.lastBankNetWorthWarnMonth;
       const newToasts: ToastItem[] = [];
       let pendingAudioCue = state.pendingAudioCue;
 
@@ -774,6 +815,14 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
             landRequests: nextLandRequests,
             privateAds: nextPrivateAds,
             lastSpentMonth: nextLastSpentMonth,
+            palaceOfPeople: nextPalaceOfPeople,
+            bankTrust: nextBankTrust,
+            bankLoans: nextBankLoans,
+            peoplesBank: nextPeoplesBank,
+            dailyBought: nextDailyBought,
+            dailySold: nextDailySold,
+            lastBankNetWorthWarnMonth: nextLastBankNetWorthWarnMonth,
+            isOffline: false,
             day: nextDay,
           });
           nextTotalMonths = mp.totalMonths;
@@ -792,6 +841,13 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
           nextLandRequests = mp.landRequests;
           nextPrivateAds = mp.privateAds;
           nextLastSpentMonth = mp.lastSpentMonth;
+          nextPalaceOfPeople = mp.palaceOfPeople;
+          nextBankTrust = mp.bankTrust;
+          nextBankLoans = mp.bankLoans;
+          nextPeoplesBank = mp.peoplesBank;
+          nextDailyBought = mp.dailyBought as any;
+          nextDailySold = mp.dailySold as any;
+          nextLastBankNetWorthWarnMonth = mp.lastBankNetWorthWarnMonth;
 
           for (const item of mp.ledgerItems) {
             nextLedger = appendLedger(
@@ -914,6 +970,11 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         landRequests: nextLandRequests,
         privateAds: nextPrivateAds,
         lastSpentMonth: nextLastSpentMonth,
+        palaceOfPeople: nextPalaceOfPeople,
+        bankTrust: nextBankTrust,
+        bankLoans: nextBankLoans,
+        peoplesBank: nextPeoplesBank,
+        lastBankNetWorthWarnMonth: nextLastBankNetWorthWarnMonth,
         toasts: appendToasts(state.toasts, newToasts),
         pendingAudioCue,
       };
@@ -946,6 +1007,16 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
           ...state,
           toasts: appendToasts(state.toasts, [
             createToast(STRINGS.toasts.notEnoughMaterials, 'warning'),
+          ]),
+          pendingAudioCue: makeCue('error'),
+        };
+      }
+
+      if (cube.collateralLoanId != null) {
+        return {
+          ...state,
+          toasts: appendToasts(state.toasts, [
+            createToast('لا يمكن البناء على أرض مرهونة للبنك الشرعي', 'warning'),
           ]),
           pendingAudioCue: makeCue('error'),
         };
@@ -1032,8 +1103,8 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
     case 'DEMOLISH_THEME': {
       const cube = state.cubes[action.cubeId];
       if (!cube || cube.owner !== 'player') return state;
-      // Element 5.2 & H5: Crown cannot demolish or confiscate private property
-      if (typeof cube.privateOwnerId === 'number') return state;
+      // Element 5.2 & H5: Crown cannot demolish or confiscate private property or collateral
+      if (typeof cube.privateOwnerId === 'number' || cube.collateralLoanId != null) return state;
       if (action.slot === 0 && cube.themeId && THEMES[cube.themeId].nonDemolishable) {
         return state;
       }
@@ -1292,6 +1363,69 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         pendingAudioCue: makeCue(res.approved ? 'trade' : 'day'),
       };
 
+      return evaluateObjectivesAndProgression(updated);
+    }
+
+    case 'TAKE_LOAN': {
+      const res = executeTakeLoan(state, action);
+      if (!res.success) {
+        return {
+          ...state,
+          toasts: appendToasts(state.toasts, [
+            createToast(res.errorAr ?? 'تعذر طلب التمويل', 'warning'),
+          ]),
+          pendingAudioCue: makeCue('error'),
+        };
+      }
+      const updated = {
+        ...res.state,
+        toasts: appendToasts(res.state.toasts, [
+          createToast('تم استلام تمويل البنك الشرعي بنجاح', 'success'),
+        ]),
+        pendingAudioCue: makeCue('trade'),
+      };
+      return evaluateObjectivesAndProgression(updated);
+    }
+
+    case 'REPAY_LOAN_FULL': {
+      const res = executeRepayLoanFull(state);
+      if (!res.success) {
+        return {
+          ...state,
+          toasts: appendToasts(state.toasts, [
+            createToast(res.errorAr ?? 'تعذر سداد التمويل', 'warning'),
+          ]),
+          pendingAudioCue: makeCue('error'),
+        };
+      }
+      const updated = {
+        ...res.state,
+        toasts: appendToasts(res.state.toasts, [
+          createToast('تم السداد الكامل للتمويل وارتفعت ثقة البنك الشرعي', 'success'),
+        ]),
+        pendingAudioCue: makeCue('reward'),
+      };
+      return evaluateObjectivesAndProgression(updated);
+    }
+
+    case 'BUYBACK_CUBE': {
+      const res = executeBuybackCube(state, action.cubeId);
+      if (!res.success) {
+        return {
+          ...state,
+          toasts: appendToasts(state.toasts, [
+            createToast(res.errorAr ?? 'تعذر استرداد الأرض', 'warning'),
+          ]),
+          pendingAudioCue: makeCue('error'),
+        };
+      }
+      const updated = {
+        ...res.state,
+        toasts: appendToasts(res.state.toasts, [
+          createToast('تم استرداد الأرض بنجاح من بنك الشعب', 'success'),
+        ]),
+        pendingAudioCue: makeCue('trade'),
+      };
       return evaluateObjectivesAndProgression(updated);
     }
 

@@ -11,6 +11,7 @@ import {
   SettingsModal,
 } from './components/Modals';
 import { Objectives } from './components/Objectives';
+import { BankOverlay } from './components/BankOverlay';
 import {
   PalaceOfficesOverlay,
   type PalaceOfficeTab,
@@ -133,6 +134,7 @@ export default function App() {
   const [openOfficeTab, setOpenOfficeTab] = useState<PalaceOfficeTab | null>(
     null
   );
+  const [bankOverlayOpen, setBankOverlayOpen] = useState(false);
   const [resetSignal, setResetSignal] = useState(0);
 
   const latestStateRef = useRef(state);
@@ -223,7 +225,9 @@ export default function App() {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
-      if (openOfficeTab !== null) {
+      if (bankOverlayOpen) {
+        setBankOverlayOpen(false);
+      } else if (openOfficeTab !== null) {
         setOpenOfficeTab(null);
       } else if (selectedCitizenId !== null) {
         setSelectedCitizenId(null);
@@ -708,6 +712,8 @@ export default function App() {
         onBuyMaterials={handleBuyMaterials}
         onBuildProducer={handleBuildProducer}
         onOpenOffice={(tab) => setOpenOfficeTab(tab)}
+        onOpenBank={() => setBankOverlayOpen(true)}
+        onBuybackCube={(cubeId) => dispatch({ type: 'BUYBACK_CUBE', cubeId })}
         onResolveLandRequest={(requestId, approve) =>
           dispatch({ type: 'RESOLVE_LAND_REQUEST', requestId, approve })
         }
@@ -724,6 +730,18 @@ export default function App() {
           onChangeTab={setOpenOfficeTab}
           onBuildHouseFromFax={handleBuildHouseFromFax}
           onClose={() => setOpenOfficeTab(null)}
+        />
+      )}
+
+      {/* Prompt 5 Element 4: Bank Overlay (opens ONLY on explicit chip click, never auto-opens) */}
+      {bankOverlayOpen && (
+        <BankOverlay
+          state={state}
+          onClose={() => setBankOverlayOpen(false)}
+          onTakeLoan={(principal, termMonths, collateralCubeIds) =>
+            dispatch({ type: 'TAKE_LOAN', principal, termMonths, collateralCubeIds })
+          }
+          onRepayLoanFull={() => dispatch({ type: 'REPAY_LOAN_FULL' })}
         />
       )}
 

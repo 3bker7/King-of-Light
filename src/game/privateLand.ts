@@ -63,6 +63,7 @@ export function isEligiblePrivateTargetCube(
 ): boolean {
   if (cube.owner !== 'player') return false;
   if (cube.privateOwnerId != null) return false;
+  if (cube.collateralLoanId != null) return false;
   if (cube.themeId !== null || cube.secondThemeId !== null) return false;
   if (cube.isRocky) return false;
   if (palaceCubeId !== null && cube.id === palaceCubeId) return false;
@@ -453,6 +454,7 @@ export function resolveLandRequest(input: {
     Boolean(cube) &&
     cube.owner === 'player' &&
     cube.privateOwnerId == null &&
+    cube.collateralLoanId == null &&
     cube.themeId === null &&
     cube.secondThemeId === null &&
     !cube.isRocky &&

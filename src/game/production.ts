@@ -64,7 +64,7 @@ export function isAdjacentToOwned(cubes: Cube[], cube: Cube): boolean {
 
 // Neutral cells orthogonally adjacent to owned land (independent villages join free by loyalty, not bought)
 export function isPurchasableNeutralCube(cubes: Cube[], cube: Cube): boolean {
-  if (cube.owner !== 'player' && !cube.isVillage) {
+  if (cube.owner === 'neutral' && !cube.isVillage) {
     return isAdjacentToOwned(cubes, cube);
   }
   return false;
@@ -173,7 +173,7 @@ export function canPlaceThemeOnCube(
   themeId: ThemeId,
   level: 1 | 2
 ): { valid: boolean; targetSlot: SlotIndex | null; reason?: 'rocky_required' | 'invalid' } {
-  if (cube.owner !== 'player' || cube.privateOwnerId != null) {
+  if (cube.owner !== 'player' || cube.privateOwnerId != null || cube.collateralLoanId != null) {
     return { valid: false, targetSlot: null, reason: 'invalid' };
   }
   const theme = THEMES[themeId];

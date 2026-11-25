@@ -24,6 +24,12 @@ import {
   VILLAGE_NAMES,
 } from './constants';
 import {
+  BANK_START_GOLD,
+  PALACE_START_GOLD,
+  TRUST_START,
+  sanitizeBankCubesOnHydrate,
+} from './bank';
+import {
   reconcileCitizens,
   sanitizeCitizensOnHydrate,
   sumCitizenWealth,
@@ -44,12 +50,15 @@ import { createZeroLastMonthStats } from './spending';
 import { STRINGS } from './strings';
 import type {
   AwayReportData,
+  BankLoan,
   Cube,
   GameState,
   LastMonthStats,
   LedgerEntry,
   OfficeFax,
+  PalaceOfPeople,
   PayrollRecord,
+  PeoplesBank,
   PersistedSaveData,
   PoliceRecord,
   PriceMoveSummary,
@@ -101,6 +110,11 @@ export function serializeGameState(state: GameState, now: number): PersistedSave
     landRequests: state.landRequests,
     privateAds: state.privateAds,
     lastSpentMonth: state.lastSpentMonth,
+    palaceOfPeople: state.palaceOfPeople,
+    bankTrust: state.bankTrust,
+    bankLoans: state.bankLoans,
+    peoplesBank: state.peoplesBank,
+    lastBankNetWorthWarnMonth: state.lastBankNetWorthWarnMonth,
   };
 }
 
@@ -335,7 +349,7 @@ export function simulateOfflineProgress(
     nextCitizens,
     saved.landRequests
   );
-  nextCubes = cleanPrivate.cubes;
+  nextCubes = sanitizeBankCubesOnHydrate(cleanPrivate.cubes, startTotalMonths);
   let nextLandRequests = cleanPrivate.landRequests;
 
   const initialPrivateAds: PrivateAd[] = Array.isArray(saved.privateAds)
@@ -360,6 +374,26 @@ export function simulateOfflineProgress(
     typeof saved.lastSpentMonth === 'number' &&
     Number.isFinite(saved.lastSpentMonth)
       ? Math.max(0, Math.trunc(saved.lastSpentMonth))
+      : 0;
+
+  let nextPalaceOfPeople: PalaceOfPeople = saved.palaceOfPeople ?? {
+    gold: PALACE_START_GOLD,
+  };
+  let nextBankTrust =
+    typeof saved.bankTrust === 'number'
+      ? Math.max(0, Math.min(100, Math.floor(saved.bankTrust)))
+      : TRUST_START;
+  let nextBankLoans: BankLoan[] = Array.isArray(saved.bankLoans)
+    ? saved.bankLoans.map((l) => ({ ...l }))
+    : [];
+  let nextPeoplesBank: PeoplesBank = saved.peoplesBank ?? {
+    gold: BANK_START_GOLD,
+    portfolio: {},
+    lastTradeAr: null,
+  };
+  let nextLastBankNetWorthWarnMonth =
+    typeof saved.lastBankNetWorthWarnMonth === 'number'
+      ? saved.lastBankNetWorthWarnMonth
       : 0;
 
   const pricesBeforeAway = { ...nextPrices };
@@ -616,6 +650,9 @@ export function simulateOfflineProgress(
   let faxesSent = 0;
   let citizenSpentTotal = 0;
   let businessTaxTotal = 0;
+  let loanInstallmentsPaid = 0;
+  let loanDeferredAdded = 0;
+  let bankTradesCount = 0;
 
   // Reconcile offline population delta into citizens before monthly ticks (and for sub-month away periods)
   if (nextCitizens.length !== nextPopulation) {
@@ -672,6 +709,14 @@ export function simulateOfflineProgress(
       landRequests: nextLandRequests,
       privateAds: nextPrivateAds,
       lastSpentMonth: nextLastSpentMonth,
+      palaceOfPeople: nextPalaceOfPeople,
+      bankTrust: nextBankTrust,
+      bankLoans: nextBankLoans,
+      peoplesBank: nextPeoplesBank,
+      dailyBought: nextDailyBought,
+      dailySold: nextDailySold,
+      lastBankNetWorthWarnMonth: nextLastBankNetWorthWarnMonth,
+      isOffline: true,
       day: monthBoundaryDay,
       now,
     });
@@ -691,6 +736,18 @@ export function simulateOfflineProgress(
     nextLandRequests = mp.landRequests;
     nextPrivateAds = mp.privateAds;
     nextLastSpentMonth = mp.lastSpentMonth;
+    nextPalaceOfPeople = mp.palaceOfPeople;
+    nextBankTrust = mp.bankTrust;
+    nextBankLoans = mp.bankLoans;
+    nextPeoplesBank = mp.peoplesBank;
+    nextDailyBought = mp.dailyBought as any;
+    nextDailySold = mp.dailySold as any;
+    nextLastBankNetWorthWarnMonth = mp.lastBankNetWorthWarnMonth;
+    if (mp.offlineBankStats) {
+      loanInstallmentsPaid += mp.offlineBankStats.loanInstallmentsPaid;
+      loanDeferredAdded += mp.offlineBankStats.loanDeferredAdded;
+      bankTradesCount += mp.offlineBankStats.bankTradesCount;
+    }
 
     payrollPaid += mp.paid;
     births += mp.summary.births;
@@ -705,6 +762,17 @@ export function simulateOfflineProgress(
   }
   const arrearsAdded = Math.max(0, nextArrears - startArrears);
   nextCitizenWealth = sumCitizenWealth(nextCitizens);
+
+  // Element 6.1: On return, if deferredDue > 0 after offline months, warn king
+  const activeLoanOnReturn = nextBankLoans.find((l) => l.status === 'active');
+  if (activeLoanOnReturn && activeLoanOnReturn.deferredDue > 0 && monthsToRun > 0) {
+    nextOfficeFaxes.push({
+      id: `fax-bank-offline-${nextTotalMonths}`,
+      month: nextTotalMonths,
+      office: 'bank',
+      textAr: `تراكمت أقساط بقيمة ${activeLoanOnReturn.deferredDue} أثناء غيابك — تُدفع مع قسط الشهر القادم`,
+    });
+  }
 
   if (goldEarnedByShops > 0) {
     nextLedger.push({
@@ -786,6 +854,11 @@ export function simulateOfflineProgress(
     landRequests: nextLandRequests,
     privateAds: nextPrivateAds,
     lastSpentMonth: nextLastSpentMonth,
+    palaceOfPeople: nextPalaceOfPeople,
+    bankTrust: nextBankTrust,
+    bankLoans: nextBankLoans,
+    peoplesBank: nextPeoplesBank,
+    lastBankNetWorthWarnMonth: nextLastBankNetWorthWarnMonth,
     lastSavedAt: now,
   };
 
@@ -807,6 +880,9 @@ export function simulateOfflineProgress(
           faxesSent,
           citizenSpentTotal,
           businessTaxTotal,
+          loanInstallmentsPaid,
+          loanDeferredAdded,
+          bankTradesCount,
         }
       : null;
 

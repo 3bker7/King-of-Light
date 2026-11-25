@@ -166,6 +166,50 @@ function createPrivatePennantTexture(): THREE.CanvasTexture {
   return tex;
 }
 
+function createBankPennantTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.clearRect(0, 0, 64, 64);
+    // Dark silver pole
+    ctx.fillStyle = '#4A5568';
+    ctx.fillRect(14, 10, 4, 48);
+    // Silver orb
+    ctx.beginPath();
+    ctx.arc(16, 9, 4.5, 0, Math.PI * 2);
+    ctx.fillStyle = '#E2E8F0';
+    ctx.fill();
+    // Silver swallowtail pennant
+    ctx.beginPath();
+    ctx.moveTo(18, 13);
+    ctx.lineTo(54, 21);
+    ctx.lineTo(44, 28);
+    ctx.lineTo(54, 35);
+    ctx.lineTo(18, 41);
+    ctx.closePath();
+    ctx.fillStyle = '#CBD5E1';
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#64748B';
+    ctx.stroke();
+    // Inner dark teal diamond emblem
+    ctx.beginPath();
+    ctx.moveTo(31, 22);
+    ctx.lineTo(37, 27);
+    ctx.lineTo(31, 32);
+    ctx.lineTo(25, 27);
+    ctx.closePath();
+    ctx.fillStyle = '#14524A';
+    ctx.fill();
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
 export class WorldEngine {
   private readonly container: HTMLElement;
   private readonly onCubeClick: (cubeId: number) => void;
@@ -188,6 +232,7 @@ export class WorldEngine {
   private readonly footprintTexture: THREE.CanvasTexture;
   private readonly blobShadowTexture: THREE.CanvasTexture;
   private readonly privatePennantTexture: THREE.CanvasTexture;
+  private readonly bankPennantTexture: THREE.CanvasTexture;
 
   private readonly buildingLib: BuildingLibrary;
   private readonly wilderness: WildernessProps;
@@ -202,6 +247,7 @@ export class WorldEngine {
   private readonly buildingsGroup = new THREE.Group();
   private readonly purchasableGroup = new THREE.Group();
   private readonly privatePennantGroup = new THREE.Group();
+  private readonly bankPennantGroup = new THREE.Group();
   private readonly fxGroup = new THREE.Group();
 
   private readonly waterMaterial: THREE.MeshStandardMaterial;
@@ -211,6 +257,7 @@ export class WorldEngine {
   private readonly priceTagCache = new Map<number, THREE.CanvasTexture>();
   private purchasableSprites: PurchasableTagItem[] = [];
   private privatePennants: PurchasableTagItem[] = [];
+  private bankPennants: PurchasableTagItem[] = [];
 
   private readonly hoverDecalMesh: THREE.Mesh;
   private readonly hoverDecalMat: THREE.MeshBasicMaterial;
@@ -227,6 +274,7 @@ export class WorldEngine {
   private lastOwnedSignature = '';
   private lastVillageSignature = '';
   private lastPrivateSignature = '';
+  private lastBankSignature = '';
   private initialSyncDone = false;
 
   // Camera pan/zoom state (damped)
@@ -336,6 +384,7 @@ export class WorldEngine {
     this.footprintTexture = createFootprintDecalTexture();
     this.blobShadowTexture = createBlobShadowTexture();
     this.privatePennantTexture = createPrivatePennantTexture();
+    this.bankPennantTexture = createBankPennantTexture();
 
     this.buildingLib = createBuildingLibrary(
       this.awningTexture,
@@ -445,6 +494,7 @@ export class WorldEngine {
       this.purchasableGroup,
       this.buildingsGroup,
       this.privatePennantGroup,
+      this.bankPennantGroup,
       this.peopleAgents.group,
       this.fxGroup,
       this.hoverDecalMesh,
@@ -614,6 +664,18 @@ export class WorldEngine {
       this.lastPrivateSignature = privateSignature;
     }
 
+    const bankSigParts: string[] = [];
+    for (const c of payload.cubes) {
+      if (c.owner === 'bank') {
+        bankSigParts.push(`${c.id}`);
+      }
+    }
+    const bankSignature = bankSigParts.join(',');
+    if (bankSignature !== this.lastBankSignature || seaChanged) {
+      this.rebuildBankPennants(payload.cubes);
+      this.lastBankSignature = bankSignature;
+    }
+
     this.syncBuildings(payload);
     this.peopleAgents.sync(
       payload.cubes,
@@ -724,6 +786,42 @@ export class WorldEngine {
       this.privatePennantGroup.add(sprite);
 
       this.privatePennants.push({
+        sprite,
+        baseY,
+        phase: cube.id * 0.9,
+      });
+    }
+  }
+
+  private rebuildBankPennants(cubes: Cube[]): void {
+    while (this.bankPennantGroup.children.length > 0) {
+      const child = this.bankPennantGroup.children[0];
+      this.bankPennantGroup.remove(child);
+      if ((child as THREE.Sprite).isSprite) {
+        (child as THREE.Sprite).material.dispose();
+      }
+    }
+    this.bankPennants = [];
+
+    for (let i = 0; i < cubes.length; i++) {
+      const cube = cubes[i];
+      if (cube.owner !== 'bank') continue;
+      const pos = cellSlotToWorld(cube.row, cube.col, 'full', 0);
+      const groundY = getTerrainHeightAt(pos.x, pos.z, this.seaCoords);
+      const spriteMat = new THREE.SpriteMaterial({
+        map: this.bankPennantTexture,
+        transparent: true,
+        depthTest: false,
+      });
+      const sprite = new THREE.Sprite(spriteMat);
+      const baseY = groundY + 4.8;
+      sprite.position.set(pos.x, baseY, pos.z);
+      sprite.scale.set(2.1, 2.1, 1);
+      sprite.renderOrder = 21;
+      sprite.userData.cubeId = cube.id;
+      this.bankPennantGroup.add(sprite);
+
+      this.bankPennants.push({
         sprite,
         baseY,
         phase: cube.id * 0.9,
@@ -1586,6 +1684,15 @@ export class WorldEngine {
       }
     }
 
+    // Prompt 5 B4: Subtle breeze flutter on bank silver pennants
+    if (this.bankPennants.length > 0) {
+      for (let i = 0; i < this.bankPennants.length; i++) {
+        const item = this.bankPennants[i];
+        item.sprite.position.y =
+          item.baseY + Math.sin(this.elapsedTime * 2.6 + item.phase) * 0.12;
+      }
+    }
+
     // Gentle pulse on organic hover decal and selection ground ring
     if (this.hoverDecalMesh.visible) {
       this.hoverDecalMat.opacity = 0.28 + Math.sin(this.elapsedTime * 4.2) * 0.08;
@@ -1666,6 +1773,10 @@ export class WorldEngine {
       item.sprite.material.dispose();
     }
     this.privatePennants = [];
+    for (const item of this.bankPennants) {
+      item.sprite.material.dispose();
+    }
+    this.bankPennants = [];
     this.priceTagCache.forEach((tex) => tex.dispose());
     this.priceTagCache.clear();
     this.purchasableShimmerGeo.dispose();
@@ -1700,6 +1811,7 @@ export class WorldEngine {
     this.footprintTexture.dispose();
     this.blobShadowTexture.dispose();
     this.privatePennantTexture.dispose();
+    this.bankPennantTexture.dispose();
     this.envTexture.dispose();
 
     this.renderer.dispose();
