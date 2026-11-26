@@ -1788,6 +1788,7 @@ export default function App() {
             camp={state.camp}
             citizens={state.citizens}
             embassyPlots={state.embassyPlots}
+            clockSecondsOfDay={state.clock.secondsOfDay}
             lastJoinedVillageCubeId={state.lastJoinedVillageCubeId}
             lastJoinedVillageSeq={state.lastJoinedVillageSeq}
             lastDefectedCubeId={state.lastDefectedCubeId}

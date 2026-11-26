@@ -16,12 +16,15 @@ import type {
   SlotIndex,
   ThemeId,
 } from '../game/types';
+import { CLOCK_CONSTANTS } from '../game/clock';
 import {
   computeProvinceDressingPlan,
   computeProvinceRoads,
   getCenterFlagWorldOffset,
   type ProvinceRoadSpec,
 } from './provinceVisuals';
+import { evaluateSkyState } from './skyCycle';
+import { StreetLampsManager } from './streetLamps';
 import {
   applyUnstaffedVisual,
   type BuildingLibrary,
@@ -84,6 +87,8 @@ export interface WorldSyncPayload {
   lastDefectedSeq?: number;
   // Prompt 8 Element N1.3: Hosted Embassy plots (presentation only)
   embassyPlots?: EmbassyPlotMarker[];
+  // V5 Prompt 1: Living Clock seconds of day (0..86399)
+  clockSecondsOfDay?: number;
 }
 
 interface ProvinceFlagAnim {
@@ -275,6 +280,105 @@ function createBankPennantTexture(): THREE.CanvasTexture {
   return tex;
 }
 
+// V5 Prompt 1 Element 2: Procedural glowing moon disc texture (zero external assets)
+function createMoonDiscTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 128;
+  canvas.height = 128;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.clearRect(0, 0, 128, 128);
+    // Soft cool outer halo
+    const halo = ctx.createRadialGradient(64, 64, 18, 64, 64, 62);
+    halo.addColorStop(0, 'rgba(220, 234, 255, 0.95)');
+    halo.addColorStop(0.38, 'rgba(176, 206, 255, 0.42)');
+    halo.addColorStop(0.72, 'rgba(130, 168, 240, 0.12)');
+    halo.addColorStop(1, 'rgba(130, 168, 240, 0)');
+    ctx.fillStyle = halo;
+    ctx.fillRect(0, 0, 128, 128);
+    // Crisp lunar disc
+    ctx.beginPath();
+    ctx.arc(64, 64, 22, 0, Math.PI * 2);
+    ctx.fillStyle = '#F2F7FF';
+    ctx.fill();
+    // Subtle crater shading
+    ctx.beginPath();
+    ctx.arc(57, 58, 5.5, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(165, 188, 225, 0.35)';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(71, 69, 4, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(165, 188, 225, 0.28)';
+    ctx.fill();
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+// V5 Prompt 1 Element 2: Static 600-star sky field (one Points object, zero per-frame allocs)
+function createStarFieldPoints(): {
+  points: THREE.Points;
+  material: THREE.PointsMaterial;
+} {
+  const starCount = 600;
+  const positions = new Float32Array(starCount * 3);
+  const colors = new Float32Array(starCount * 3);
+  let seed = 133791;
+  const nextRand = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 0xffffffff;
+  };
+
+  for (let i = 0; i < starCount; i++) {
+    // Spread across the sky canopy behind and above the orthographic horizon
+    const theta = nextRand() * Math.PI * 2;
+    const elev = 0.08 + nextRand() * 0.72; // above horizon
+    const radius = 215 + nextRand() * 35;
+    positions[i * 3] = Math.cos(theta) * Math.cos(elev) * radius;
+    positions[i * 3 + 1] = 28 + Math.sin(elev) * radius * 0.55;
+    positions[i * 3 + 2] = Math.sin(theta) * Math.cos(elev) * radius;
+
+    const tint = nextRand();
+    if (tint < 0.25) {
+      // Warm pale gold star
+      colors[i * 3] = 1.0;
+      colors[i * 3 + 1] = 0.93;
+      colors[i * 3 + 2] = 0.78;
+    } else if (tint < 0.65) {
+      // Pure silver-white star
+      colors[i * 3] = 0.94;
+      colors[i * 3 + 1] = 0.97;
+      colors[i * 3 + 2] = 1.0;
+    } else {
+      // Cool blue star
+      colors[i * 3] = 0.76;
+      colors[i * 3 + 1] = 0.87;
+      colors[i * 3 + 2] = 1.0;
+    }
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+  const material = new THREE.PointsMaterial({
+    size: 1.9,
+    sizeAttenuation: false,
+    vertexColors: true,
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+    fog: false,
+  });
+
+  const points = new THREE.Points(geo, material);
+  points.frustumCulled = false;
+  points.visible = false;
+  return { points, material };
+}
+
 export class WorldEngine {
   private readonly container: HTMLElement;
   private readonly onCubeClick: (cubeId: number) => void;
@@ -284,8 +388,20 @@ export class WorldEngine {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly scene: THREE.Scene;
   private readonly camera: THREE.OrthographicCamera;
+  private readonly hemiLight: THREE.HemisphereLight;
   private readonly sunLight: THREE.DirectionalLight;
   private readonly envTexture: THREE.Texture;
+  private readonly skyBgColor = new THREE.Color(HORIZON_COLOR);
+  private readonly starField: THREE.Points;
+  private readonly starFieldMat: THREE.PointsMaterial;
+  private readonly moonTexture: THREE.CanvasTexture;
+  private readonly moonSpriteMat: THREE.SpriteMaterial;
+  private readonly moonSprite: THREE.Sprite;
+  private sunTargetX = 45;
+  private sunTargetZ = 45;
+  private targetClockSeconds: number = CLOCK_CONSTANTS.DEFAULT_START_SECONDS_OF_DAY;
+  private renderedClockSeconds: number = CLOCK_CONSTANTS.DEFAULT_START_SECONDS_OF_DAY;
+  private currentLampGlow = 0;
 
   private readonly sandTexture: THREE.CanvasTexture;
   private readonly sandBumpTexture: THREE.CanvasTexture;
@@ -302,6 +418,7 @@ export class WorldEngine {
   private readonly buildingLib: BuildingLibrary;
   private readonly wilderness: WildernessProps;
   private readonly peopleAgents: PeopleAgentsManager;
+  private readonly streetLamps: StreetLampsManager;
 
   private readonly terrainGeometry: THREE.PlaneGeometry;
   private readonly terrainMaterial: THREE.MeshStandardMaterial;
@@ -438,7 +555,7 @@ export class WorldEngine {
 
     this.scene = new THREE.Scene();
     this.skyTexture = createSkyTexture();
-    this.scene.background = this.skyTexture;
+    this.scene.background = this.skyBgColor;
     this.scene.fog = new THREE.Fog(HORIZON_COLOR, 148, 295);
 
     // Procedural Studio Environment Map for crisp PBR reflections
@@ -450,9 +567,9 @@ export class WorldEngine {
     // Fixed Orthographic Isometric Camera
     this.camera = new THREE.OrthographicCamera(-50, 50, 50, -50, 1, 600);
 
-    // Element 6.1: Warm golden-hour DirectionalLight at lower Crusader angle + sky/ground HemisphereLight
-    const hemiLight = new THREE.HemisphereLight(0xcfe8ef, 0xcaa96a, 0.75);
-    this.scene.add(hemiLight);
+    // Element 6.1 + V5 Living Clock: Sun/Moon DirectionalLight + sky/ground HemisphereLight
+    this.hemiLight = new THREE.HemisphereLight(0xcfe8ef, 0xcaa96a, 0.75);
+    this.scene.add(this.hemiLight);
 
     this.sunLight = new THREE.DirectionalLight(0xffd9a0, 2.3);
     this.sunLight.position.set(70, 78, 40);
@@ -464,6 +581,25 @@ export class WorldEngine {
     this.sunLight.shadow.normalBias = 0.025;
     this.scene.add(this.sunLight);
     this.scene.add(this.sunLight.target);
+
+    // V5 Prompt 1 Element 2: Static star field (600 stars) & procedural moon disc sprite
+    const stars = createStarFieldPoints();
+    this.starField = stars.points;
+    this.starFieldMat = stars.material;
+    this.scene.add(this.starField);
+
+    this.moonTexture = createMoonDiscTexture();
+    this.moonSpriteMat = new THREE.SpriteMaterial({
+      map: this.moonTexture,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      fog: false,
+    });
+    this.moonSprite = new THREE.Sprite(this.moonSpriteMat);
+    this.moonSprite.scale.set(16, 16, 1);
+    this.moonSprite.visible = false;
+    this.scene.add(this.moonSprite);
 
     // Procedural Canvas Textures
     const maxAniso = this.renderer.capabilities.getMaxAnisotropy();
@@ -483,6 +619,7 @@ export class WorldEngine {
       this.unstaffedTexture
     );
     this.peopleAgents = new PeopleAgentsManager(this.blobShadowTexture);
+    this.streetLamps = new StreetLampsManager();
 
     // Continuous smooth desert terrain mesh
     this.terrainGeometry = new THREE.PlaneGeometry(
@@ -612,6 +749,7 @@ export class WorldEngine {
       this.privatePennantGroup,
       this.bankPennantGroup,
       this.embassyGroup,
+      this.streetLamps.group,
       this.peopleAgents.group,
       this.fxGroup,
       this.hoverDecalMesh,
@@ -661,8 +799,15 @@ export class WorldEngine {
     const frustumWidth = bounds.span + 24; // +12 units margin on every side
     const half = frustumWidth / 2;
 
+    this.sunTargetX = bounds.centerX;
+    this.sunTargetZ = bounds.centerZ;
     this.sunLight.target.position.set(bounds.centerX, 0, bounds.centerZ);
-    this.sunLight.position.set(bounds.centerX + 70, 78, bounds.centerZ + 40);
+    const sky = evaluateSkyState(this.renderedClockSeconds);
+    this.sunLight.position.set(
+      bounds.centerX + sky.sunOffset.x,
+      sky.sunOffset.y,
+      bounds.centerZ + sky.sunOffset.z
+    );
     this.sunLight.target.updateMatrixWorld();
 
     const shadowCam = this.sunLight.shadow.camera;
@@ -682,6 +827,57 @@ export class WorldEngine {
         this.sunLight.shadow.map = null;
       }
       this.sunLight.shadow.needsUpdate = true;
+    }
+  }
+
+  // V5 Prompt 1 Element 2: Pure continuous sky/sun/moon/fog/stars update driven by secondsOfDay
+  private applySkyCycle(secondsOfDay: number): void {
+    const sky = evaluateSkyState(secondsOfDay);
+    this.currentLampGlow = sky.lampGlow;
+
+    this.sunLight.color.setHex(sky.sunColorHex);
+    this.sunLight.intensity = sky.sunIntensity;
+    this.sunLight.position.set(
+      this.sunTargetX + sky.sunOffset.x,
+      sky.sunOffset.y,
+      this.sunTargetZ + sky.sunOffset.z
+    );
+
+    this.hemiLight.color.setHex(sky.hemiSkyHex);
+    this.hemiLight.groundColor.setHex(sky.hemiGroundHex);
+    this.hemiLight.intensity = sky.hemiIntensity;
+
+    this.renderer.toneMappingExposure = sky.exposure;
+    this.scene.environmentIntensity = sky.envIntensity;
+
+    this.skyBgColor.setHex(sky.skyColorHex);
+    if (this.scene.fog instanceof THREE.Fog) {
+      this.scene.fog.color.setHex(sky.fogColorHex);
+    }
+
+    // Star field visibility & opacity (single static Points object)
+    this.streetLamps.updateGlow(sky.lampGlow);
+    this.starField.position.set(this.currentTarget.x, 0, this.currentTarget.z);
+    if (sky.starOpacity > 0.01) {
+      this.starField.visible = true;
+      this.starFieldMat.opacity = sky.starOpacity;
+    } else {
+      this.starField.visible = false;
+      this.starFieldMat.opacity = 0;
+    }
+
+    // Moon disc sprite along mirrored night arc above the horizon
+    if (sky.moonOpacity > 0.01) {
+      this.moonSprite.visible = true;
+      this.moonSpriteMat.opacity = sky.moonOpacity;
+      const moonAngle = sky.moonProgress * Math.PI;
+      const mx = this.currentTarget.x - Math.cos(moonAngle) * 145 - 60;
+      const my = 42 + Math.sin(moonAngle) * 58;
+      const mz = this.currentTarget.z - 125 + Math.sin(moonAngle) * 28;
+      this.moonSprite.position.set(mx, my, mz);
+    } else {
+      this.moonSprite.visible = false;
+      this.moonSpriteMat.opacity = 0;
     }
   }
 
@@ -732,6 +928,22 @@ export class WorldEngine {
 
   public syncState(payload: WorldSyncPayload): void {
     this.latestState = payload;
+
+    // V5 Prompt 1 Element 2: Sync living clock immediately so loaded saves render accurately on frame 1
+    if (typeof payload.clockSecondsOfDay === 'number' && Number.isFinite(payload.clockSecondsOfDay)) {
+      const clamped =
+        ((payload.clockSecondsOfDay % CLOCK_CONSTANTS.GAME_SECONDS_PER_DAY) +
+          CLOCK_CONSTANTS.GAME_SECONDS_PER_DAY) %
+        CLOCK_CONSTANTS.GAME_SECONDS_PER_DAY;
+      const delta = Math.abs(clamped - this.renderedClockSeconds);
+      this.targetClockSeconds = clamped;
+      if (!this.initialSyncDone || delta > 12) {
+        this.renderedClockSeconds = clamped;
+      }
+      this.applySkyCycle(this.renderedClockSeconds);
+    } else if (!this.initialSyncDone) {
+      this.applySkyCycle(this.renderedClockSeconds);
+    }
 
     const seaCells: Cube[] = [];
     const ownedCells: Cube[] = [];
@@ -819,6 +1031,13 @@ export class WorldEngine {
     this.syncProvinceVisuals(payload);
     this.syncArrivalCampVisuals(payload);
     this.syncEmbassyPlots(payload, seaChanged);
+    this.streetLamps.sync(
+      payload.cubes,
+      this.seaCoords,
+      this.currentTarget.x,
+      this.currentTarget.z
+    );
+    this.streetLamps.updateGlow(this.currentLampGlow);
     this.peopleAgents.sync(
       payload.cubes,
       payload.population,
@@ -2425,6 +2644,19 @@ export class WorldEngine {
     }
     this.updateCameraTransform();
 
+    // V5 Prompt 1 Element 2: Smooth continuous sky/sun/moon update between 1s ticks
+    const dayLen = CLOCK_CONSTANTS.GAME_SECONDS_PER_DAY;
+    const rawDiff =
+      (this.targetClockSeconds - this.renderedClockSeconds + dayLen) % dayLen;
+    if (rawDiff > 0 && rawDiff < 12) {
+      this.renderedClockSeconds =
+        (this.renderedClockSeconds + Math.min(rawDiff, dt * CLOCK_CONSTANTS.GAME_SECONDS_PER_TICK)) %
+        dayLen;
+    } else {
+      this.renderedClockSeconds = this.targetClockSeconds;
+    }
+    this.applySkyCycle(this.renderedClockSeconds);
+
     // Water shimmer texture scroll + soft foam pulse
     this.waterTexture.offset.x = (this.elapsedTime * 0.018) % 1;
     this.waterTexture.offset.y = (this.elapsedTime * 0.012) % 1;
@@ -2682,6 +2914,7 @@ export class WorldEngine {
     this.buildingsMap.clear();
     this.buildingLib.dispose();
     this.wilderness.dispose();
+    this.streetLamps.dispose();
     this.peopleAgents.dispose();
 
     for (const item of this.purchasableSprites) {
@@ -2746,6 +2979,11 @@ export class WorldEngine {
     this.houseBanners = [];
     this.activeProvinceRoads.clear();
     this.fadingObjects = [];
+
+    this.starField.geometry.dispose();
+    this.starFieldMat.dispose();
+    this.moonTexture.dispose();
+    this.moonSpriteMat.dispose();
 
     this.sandTexture.dispose();
     this.sandBumpTexture.dispose();

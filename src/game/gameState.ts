@@ -25,7 +25,6 @@ import {
   STARTING_POPULATION,
   STARTING_REPUTATION,
   THEMES,
-  TICKS_PER_DAY,
   VILLAGE_JOIN_MIN_REPUTATION,
   VILLAGE_JOIN_REQUIRED_DAYS,
   VILLAGE_NAMES,
@@ -43,6 +42,12 @@ import {
   executeRepayLoanFull,
   executeTakeLoan,
 } from './bank';
+import {
+  advanceClock,
+  CLOCK_CONSTANTS,
+  createInitialClock,
+  sanitizeClockOnHydrate,
+} from './clock';
 import {
   generateInitialCitizens,
   reconcileCitizens,
@@ -326,7 +331,11 @@ export function createFreshGameState(now = Date.now()): GameState {
     hungerFlag: false,
     needs: evalNeeds.needs,
     day: STARTING_DAY,
-    tickInDay: 0,
+    tickInDay: Math.floor(
+      CLOCK_CONSTANTS.DEFAULT_START_SECONDS_OF_DAY /
+        CLOCK_CONSTANTS.GAME_SECONDS_PER_TICK
+    ),
+    clock: createInitialClock(),
     prices,
     previousPrices: { ...prices },
     dailyBought: createEmptyTradeVolumes(),
@@ -562,7 +571,11 @@ export function hydrateGameState(saved: PersistedSaveData): GameState {
     hungerFlag: Boolean(saved.hungerFlag),
     needs: evalNeeds.needs,
     day: safeDay,
-    tickInDay: Math.max(0, saved.tickInDay % TICKS_PER_DAY),
+    tickInDay: Math.floor(
+      sanitizeClockOnHydrate(saved.clock).secondsOfDay /
+        CLOCK_CONSTANTS.GAME_SECONDS_PER_TICK
+    ),
+    clock: sanitizeClockOnHydrate(saved.clock),
     prices: saved.prices,
     previousPrices: saved.previousPrices,
     dailyBought: saved.dailyBought,
@@ -936,7 +949,12 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
       let nextReputation = state.reputation;
       let nextHungerFlag = state.hungerFlag;
       let nextDay = state.day;
-      let nextTickInDay = state.tickInDay + 1;
+      const clockStep = advanceClock(state.clock, 1);
+      const nextClock = clockStep.clock;
+      const dayWrapped = clockStep.daysWrapped > 0;
+      let nextTickInDay = Math.floor(
+        nextClock.secondsOfDay / CLOCK_CONSTANTS.GAME_SECONDS_PER_TICK
+      );
       let nextPrices = state.prices;
       let nextPreviousPrices = state.previousPrices;
       let nextDailyBought = state.dailyBought;
@@ -990,7 +1008,7 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         nextCitizenWealth = sumCitizenWealth(nextCitizens);
       }
 
-      if (nextTickInDay >= TICKS_PER_DAY) {
+      if (dayWrapped) {
         // Element 3.5: Flush accumulated royal shop/service gold into treasury ledger
         if (nextDailyShopGold > 0) {
           nextLedger = appendLedger(
@@ -1003,7 +1021,6 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
           nextDailyShopGold = 0;
         }
 
-        nextTickInDay = 0;
         nextDay += 1;
 
         const dayTaxMoodDelta = computeTaxMoodDelta(
@@ -1325,6 +1342,7 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         needs: evalNeeds.needs,
         day: nextDay,
         tickInDay: nextTickInDay,
+        clock: nextClock,
         prices: nextPrices,
         previousPrices: nextPreviousPrices,
         dailyBought: nextDailyBought,

@@ -353,9 +353,15 @@ export interface PrivateAd {
   filledBy: number | null;
 }
 
+export interface GameClock {
+  secondsOfDay: number; // 0..86399
+  totalGameSeconds: number;
+}
+
 export interface AwayReportData {
   elapsedSeconds: number;
   daysElapsed: number;
+  wasCapped?: boolean;
   goldEarnedByShops: number;
   resourcesProduced: Partial<Record<TradedResourceKey, number>>;
   populationDelta: number;
@@ -491,6 +497,7 @@ export interface GameState {
   needs: NeedsBreakdown;
   day: number;
   tickInDay: number;
+  clock: GameClock;
   prices: PriceMap;
   previousPrices: PriceMap;
   dailyBought: TradeVolumeMap;
@@ -570,6 +577,7 @@ export interface PersistedSaveData {
   hungerFlag: boolean;
   day: number;
   tickInDay: number;
+  clock?: GameClock;
   prices: PriceMap;
   previousPrices: PriceMap;
   dailyBought: TradeVolumeMap;

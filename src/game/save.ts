@@ -16,7 +16,6 @@ import {
   SEEDED_VILLAGE_COORDS,
   SHOP_FOOD_PRIORITY,
   THEMES,
-  TICKS_PER_DAY,
   TOTAL_CUBES,
   TRADED_RESOURCES,
   VILLAGE_JOIN_MIN_REPUTATION,
@@ -37,6 +36,11 @@ import {
   TRUST_START,
   sanitizeBankCubesOnHydrate,
 } from './bank';
+import {
+  advanceClock,
+  CLOCK_CONSTANTS,
+  sanitizeClockOnHydrate,
+} from './clock';
 import {
   reconcileCitizens,
   sanitizeCitizensOnHydrate,
@@ -107,6 +111,7 @@ export function serializeGameState(state: GameState, now: number): PersistedSave
     hungerFlag: state.hungerFlag,
     day: state.day,
     tickInDay: state.tickInDay,
+    clock: state.clock,
     prices: state.prices,
     previousPrices: state.previousPrices,
     dailyBought: state.dailyBought,
@@ -314,6 +319,7 @@ export function simulateOfflineProgress(
   now: number
 ): { restored: PersistedSaveData; awayReport: AwayReportData | null } {
   const rawElapsedSeconds = Math.max(0, Math.floor((now - saved.lastSavedAt) / 1000));
+  const wasCapped = rawElapsedSeconds > MAX_OFFLINE_SECONDS;
   const elapsedSeconds = Math.min(MAX_OFFLINE_SECONDS, rawElapsedSeconds);
 
   if (elapsedSeconds <= 0) {
@@ -649,10 +655,14 @@ export function simulateOfflineProgress(
 
   nextCitizenWealth = sumCitizenWealth(nextCitizens);
 
-  // Proportional day rollovers
-  const totalTicks = saved.tickInDay + elapsedSeconds;
-  const daysElapsed = Math.floor(totalTicks / TICKS_PER_DAY);
-  const nextTickInDay = totalTicks % TICKS_PER_DAY;
+  // Proportional day rollovers driven by the living clock (1 real sec = 3 game sec, capped at 90 game days)
+  const startClock = sanitizeClockOnHydrate(saved.clock);
+  const offlineClockStep = advanceClock(startClock, elapsedSeconds);
+  const nextClock = offlineClockStep.clock;
+  const daysElapsed = offlineClockStep.daysWrapped;
+  const nextTickInDay = Math.floor(
+    nextClock.secondsOfDay / CLOCK_CONSTANTS.GAME_SECONDS_PER_TICK
+  );
   const nextDay = saved.day + daysElapsed;
 
   for (let d = 0; d < daysElapsed; d++) {
@@ -1020,6 +1030,7 @@ export function simulateOfflineProgress(
     hungerFlag: nextHungerFlag,
     day: nextDay,
     tickInDay: nextTickInDay,
+    clock: nextClock,
     prices: nextPrices,
     previousPrices: nextPreviousPrices,
     dailyBought: nextDailyBought,
@@ -1063,6 +1074,7 @@ export function simulateOfflineProgress(
       ? {
           elapsedSeconds,
           daysElapsed,
+          wasCapped,
           goldEarnedByShops,
           resourcesProduced,
           populationDelta: finalPopDelta,
