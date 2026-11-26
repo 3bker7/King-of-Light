@@ -8,6 +8,7 @@ import {
   makeSlotKey,
 } from '../game/production';
 import type {
+  ActivePrayerSession,
   ArrivalCamp,
   Citizen,
   Cube,
@@ -90,6 +91,8 @@ export interface WorldSyncPayload {
   // V5 Prompt 1: Living Clock seconds of day (0..86399) + totalMonths for citizen schedule age
   clockSecondsOfDay?: number;
   totalMonths?: number;
+  // V5 Prompt 2: Live prayer session for mosque walk/despawn flow
+  activePrayer?: ActivePrayerSession | null;
 }
 
 interface ProvinceFlagAnim {
@@ -527,7 +530,8 @@ export class WorldEngine {
     container: HTMLElement,
     initialPayload: WorldSyncPayload,
     onCubeClick: (cubeId: number) => void,
-    onCitizenClick?: (agentId: number) => void
+    onCitizenClick?: (agentId: number) => void,
+    onPrayerCitizenCompleted?: (sessionId: number, citizenId: number) => void
   ) {
     this.container = container;
     this.onCubeClick = onCubeClick;
@@ -620,6 +624,7 @@ export class WorldEngine {
       this.unstaffedTexture
     );
     this.peopleAgents = new PeopleAgentsManager(this.blobShadowTexture);
+    this.peopleAgents.setOnPrayerCompleted(onPrayerCitizenCompleted);
     this.streetLamps = new StreetLampsManager();
 
     // Continuous smooth desert terrain mesh
@@ -1048,7 +1053,8 @@ export class WorldEngine {
       payload.camp,
       payload.citizens,
       payload.clockSecondsOfDay,
-      payload.totalMonths
+      payload.totalMonths,
+      payload.activePrayer
     );
     this.peopleAgents.setSelectedAgent(payload.selectedCitizenId);
     this.followAgentId = payload.followCitizenId;

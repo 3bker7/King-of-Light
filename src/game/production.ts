@@ -16,6 +16,10 @@ import {
   WORKER_PRIORITY_ORDER,
 } from './constants';
 import { getTotalFood } from './people';
+import {
+  PRAYER_BONUS_POOL_MAX,
+  PRAYER_EFFICIENCY_BONUS,
+} from './prayer';
 import type {
   Citizen,
   Cube,
@@ -343,14 +347,23 @@ export function resolveCycleOutput(
   warehouse: Warehouse,
   gold: number,
   population: number
-): { gold: number; shortage: ShortageReason } {
+): {
+  gold: number;
+  shortage: ShortageReason;
+  resourceProduced?: { resource: TradedResourceKey; amount: number } | null;
+} {
   const def = THEMES[themeId];
   let nextGold = gold;
 
   if (themeId === 'sea') {
     const seaOut = getSeaFishOutput(allCubes, cube);
     warehouse.fish += seaOut.amount;
-    return { gold: nextGold, shortage: null };
+    return {
+      gold: nextGold,
+      shortage: null,
+      resourceProduced:
+        seaOut.amount > 0 ? { resource: 'fish', amount: seaOut.amount } : null,
+    };
   }
 
   if (themeId === 'shop') {
@@ -362,25 +375,36 @@ export function resolveCycleOutput(
         const auraBonus = getGoldServiceAuraBonus(allCubes, cube, 'shop');
         const gain = Math.round((def.goldPerCycle ?? 4) * (1 + auraBonus));
         nextGold += gain;
-        return { gold: nextGold, shortage: null };
+        return { gold: nextGold, shortage: null, resourceProduced: null };
       }
     }
-    return { gold: nextGold, shortage: 'no_surplus_food' };
+    return { gold: nextGold, shortage: 'no_surplus_food', resourceProduced: null };
   }
 
   // Check required inputs
   if (def.inputs && def.inputs.length > 0) {
     const canPay = def.inputs.every((inp) => (warehouse[inp.resource] ?? 0) >= inp.amount);
     if (!canPay) {
-      return { gold: nextGold, shortage: getShortageForTheme(themeId) };
+      return {
+        gold: nextGold,
+        shortage: getShortageForTheme(themeId),
+        resourceProduced: null,
+      };
     }
     for (const inp of def.inputs) {
       warehouse[inp.resource] = Math.max(0, (warehouse[inp.resource] ?? 0) - inp.amount);
     }
   }
 
+  let resourceProduced: { resource: TradedResourceKey; amount: number } | null = null;
   if (def.outputResource && def.outputAmount) {
     warehouse[def.outputResource] = (warehouse[def.outputResource] ?? 0) + def.outputAmount;
+    if (def.outputAmount > 0) {
+      resourceProduced = {
+        resource: def.outputResource,
+        amount: def.outputAmount,
+      };
+    }
   }
 
   if (def.goldPerCycle) {
@@ -389,7 +413,7 @@ export function resolveCycleOutput(
     nextGold += gain;
   }
 
-  return { gold: nextGold, shortage: null };
+  return { gold: nextGold, shortage: null, resourceProduced };
 }
 
 export interface ProductionTickResult {
@@ -399,6 +423,7 @@ export interface ProductionTickResult {
   royalShopGoldDelta: number;
   businessTaxDelta: number;
   privateOwnerCredits: Record<number, number>;
+  prayerBonusPool: Record<number, number>;
 }
 
 export function advanceProductionTick(
@@ -406,7 +431,9 @@ export function advanceProductionTick(
   warehouse: Warehouse,
   gold: number,
   population: number,
-  citizens?: Citizen[]
+  citizens?: Citizen[],
+  prayerBonusPool?: Record<number, number>,
+  nowTotalGameMinutes?: number
 ): ProductionTickResult {
   const staffing = computeStaffing(cubes, population, citizens);
   const nextWarehouse: Warehouse = { ...warehouse };
@@ -414,6 +441,67 @@ export function advanceProductionTick(
   let royalShopGoldDelta = 0;
   let businessTaxDelta = 0;
   const privateOwnerCredits: Record<number, number> = {};
+  const nextPrayerBonusPool: Record<number, number> = prayerBonusPool
+    ? { ...prayerBonusPool }
+    : {};
+  const canApplyPrayerBuff =
+    typeof nowTotalGameMinutes === 'number' &&
+    Number.isFinite(nowTotalGameMinutes) &&
+    Array.isArray(citizens) &&
+    citizens.length > 0;
+
+  // V5 Prompt 2 Element 3 (Single buff application site): +28% efficiency on resource outputs ONLY
+  // Never applies to goldPerCycle or shop gold. Accumulates fractional remainder per cube.
+  const applyPrayerResourceBonus = (
+    cubeId: number,
+    slot: SlotIndex,
+    produced: { resource: TradedResourceKey; amount: number } | null | undefined
+  ) => {
+    if (!canApplyPrayerBuff || !produced || produced.amount <= 0) return;
+    let totalWorkers = 0;
+    let buffedWorkers = 0;
+    for (let i = 0; i < citizens!.length; i++) {
+      const c = citizens![i];
+      if (c.jobCubeId !== cubeId) continue;
+      if (c.jobSlot !== undefined && c.jobSlot !== null && c.jobSlot !== slot) {
+        continue;
+      }
+      totalWorkers += 1;
+      if (
+        typeof c.prayerBuffUntil === 'number' &&
+        Number.isFinite(c.prayerBuffUntil) &&
+        c.prayerBuffUntil > nowTotalGameMinutes!
+      ) {
+        buffedWorkers += 1;
+      }
+    }
+    if (totalWorkers === 0 || buffedWorkers === 0) return;
+
+    const buffedRatio = buffedWorkers / totalWorkers;
+    const bonus = produced.amount * PRAYER_EFFICIENCY_BONUS * buffedRatio;
+    if (!Number.isFinite(bonus) || bonus <= 0) return;
+
+    const prevRaw = nextPrayerBonusPool[cubeId];
+    const prevPool =
+      typeof prevRaw === 'number' && Number.isFinite(prevRaw) && prevRaw > 0
+        ? prevRaw
+        : 0;
+    const accumulated = Math.round((prevPool + bonus) * 1e6) / 1e6;
+    const extraUnits = Math.floor(accumulated);
+    if (extraUnits > 0) {
+      nextWarehouse[produced.resource] =
+        (nextWarehouse[produced.resource] ?? 0) + extraUnits;
+    }
+    const remainder = Math.min(
+      PRAYER_BONUS_POOL_MAX,
+      Math.max(0, Math.round((accumulated - extraUnits) * 1e6) / 1e6)
+    );
+    if (remainder > 0) {
+      nextPrayerBonusPool[cubeId] = remainder;
+    } else {
+      delete nextPrayerBonusPool[cubeId];
+    }
+  };
 
   const applyCycleGold = (cube: Cube, gain: number) => {
     if (gain <= 0) return;
@@ -460,6 +548,7 @@ export function advanceProductionTick(
               0,
               population
             );
+            applyPrayerResourceBonus(cube.id, 0, res.resourceProduced);
             applyCycleGold(cube, res.gold);
             shortage = res.shortage;
           } else if (shortage && hasInputsForTheme(cube.themeId, nextWarehouse, population)) {
@@ -486,6 +575,7 @@ export function advanceProductionTick(
               0,
               population
             );
+            applyPrayerResourceBonus(cube.id, 1, res.resourceProduced);
             applyCycleGold(cube, res.gold);
             secondShortage = res.shortage;
           } else if (
@@ -515,5 +605,6 @@ export function advanceProductionTick(
     royalShopGoldDelta,
     businessTaxDelta,
     privateOwnerCredits,
+    prayerBonusPool: nextPrayerBonusPool,
   };
 }

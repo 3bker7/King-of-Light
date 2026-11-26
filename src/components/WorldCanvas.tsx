@@ -10,6 +10,7 @@ import {
 } from 'react';
 import { STRINGS } from '../game/strings';
 import type {
+  ActivePrayerSession,
   ArrivalCamp,
   Citizen,
   Cube,
@@ -46,9 +47,11 @@ interface WorldCanvasProps {
   embassyPlots?: EmbassyPlotMarker[];
   clockSecondsOfDay?: number;
   totalMonths?: number;
+  activePrayer?: ActivePrayerSession | null;
   resetSignal: number;
   onCubeClick: (cubeId: number) => void;
   onCitizenClick: (agentId: number) => void;
+  onPrayerCitizenCompleted?: (sessionId: number, citizenId: number) => void;
   onCancelBuild: () => void;
   onRecenter?: () => void;
   children?: ReactNode;
@@ -76,9 +79,11 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
       embassyPlots,
       clockSecondsOfDay,
       totalMonths,
+      activePrayer,
       resetSignal,
       onCubeClick,
       onCitizenClick,
+      onPrayerCitizenCompleted,
       onCancelBuild,
       onRecenter,
       children,
@@ -92,6 +97,8 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
     onCubeClickRef.current = onCubeClick;
     const onCitizenClickRef = useRef(onCitizenClick);
     onCitizenClickRef.current = onCitizenClick;
+    const onPrayerCitizenCompletedRef = useRef(onPrayerCitizenCompleted);
+    onPrayerCitizenCompletedRef.current = onPrayerCitizenCompleted;
     const latestCubesRef = useRef(cubes);
     latestCubesRef.current = cubes;
 
@@ -115,6 +122,7 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
       embassyPlots,
       clockSecondsOfDay,
       totalMonths,
+      activePrayer,
     });
 
     const [webglError, setWebglError] = useState(false);
@@ -144,7 +152,9 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
           container,
           initialPayloadRef.current,
           (cubeId) => onCubeClickRef.current(cubeId),
-          (agentId) => onCitizenClickRef.current(agentId)
+          (agentId) => onCitizenClickRef.current(agentId),
+          (sessionId, citizenId) =>
+            onPrayerCitizenCompletedRef.current?.(sessionId, citizenId)
         );
         engineRef.current = engine;
       } catch {
@@ -181,6 +191,7 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
         embassyPlots,
         clockSecondsOfDay,
         totalMonths,
+        activePrayer,
       });
     }, [
       cubes,
@@ -202,6 +213,7 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
       embassyPlots,
       clockSecondsOfDay,
       totalMonths,
+      activePrayer,
     ]);
 
     // Element 4.1: Smoothly refit camera ONLY when owned-cell count changes (purchases & village joins)

@@ -16,7 +16,14 @@ import {
   type SchedulePhase,
   type ScheduleStateView,
 } from '../game/schedules';
-import type { ArrivalCamp, Citizen, Cube, SlotIndex, ThemeId } from '../game/types';
+import type {
+  ActivePrayerSession,
+  ArrivalCamp,
+  Citizen,
+  Cube,
+  SlotIndex,
+  ThemeId,
+} from '../game/types';
 import {
   type AnchorPoint,
   type BuildingAnchors,
@@ -55,7 +62,11 @@ type RoutineState =
   | 'TO_HOME'
   | 'PLAYING'
   | 'PATROL'
-  | 'WAITING';
+  | 'WAITING'
+  | 'TO_PRAYER'
+  | 'ENTERING_MOSQUE'
+  | 'PRAYING'
+  | 'RETURNING_FROM_PRAYER';
 
 type BreakThemeId =
   | 'mosque'
@@ -124,6 +135,11 @@ interface LivingAgent {
   playKind: 'house' | 'school' | 'garden';
   patrolStep: number;
   patrolAtPalace: boolean;
+  // V5 Prompt 2 Element 2: Prayer mosque flow state
+  prayerSessionId: number | null;
+  prayerMosqueSpot: BreakAnchorSpot | null;
+  prayerTimer: number;
+  prayerReturnTarget: 'work' | 'break' | 'home' | 'school' | null;
 }
 
 const CAMP_AGENT_ID_OFFSET = 100000;
@@ -169,6 +185,9 @@ const ROLE_LABELS_AR: Record<CitizenRoleId, string> = {
 export const WAITING_NO_PATH_TEXT = 'ينتظر — لا يوجد طريق سالك الآن';
 export const AT_HOME_TEXT = 'في بيته يستريح';
 export const SLEEPING_AT_HOME_TEXT = 'نائم في بيته';
+export const TO_PRAYER_TEXT = 'في طريقه إلى المسجد للصلاة';
+export const PRAYING_IN_MOSQUE_TEXT = 'يصلّي في المسجد';
+export const RETURNING_FROM_PRAYER_TEXT = 'عائد من الصلاة';
 
 export const THEME_GOING_TEXT: Record<ThemeId, string> = {
   palace: 'في طريقه إلى ساحة قصر الحاكم',
@@ -408,6 +427,14 @@ export class PeopleAgentsManager {
   private lastStaffedSlots: Set<string> = new Set();
   private lastCitizens: Citizen[] = [];
   private citizenById = new Map<number, Citizen>();
+  // V5 Prompt 2 Element 2: Mosque anchors, prayer completion callback & off-screen attendee timers
+  private mosqueSpots = new Map<number, BreakAnchorSpot>();
+  private onPrayerCompleted?: (sessionId: number, citizenId: number) => void;
+  private offscreenPrayerTimers = new Map<
+    number,
+    { sessionId: number; mosqueCubeId: number; remaining: number }
+  >();
+  private offscreenPrayerDispatchedKey: string | null = null;
 
   constructor(blobShadowTexture: THREE.CanvasTexture | null) {
     // Element 5.1: Widen robe/dress geometries by x1.25 for chunkier Stronghold silhouettes
@@ -953,7 +980,215 @@ export class PeopleAgentsManager {
     );
   }
 
+  public setOnPrayerCompleted(
+    cb?: (sessionId: number, citizenId: number) => void
+  ): void {
+    this.onPrayerCompleted = cb;
+  }
+
+  private isInPrayerFlow(state: RoutineState): boolean {
+    return (
+      state === 'TO_PRAYER' ||
+      state === 'ENTERING_MOSQUE' ||
+      state === 'PRAYING' ||
+      state === 'RETURNING_FROM_PRAYER'
+    );
+  }
+
+  private routeReturnFromPrayer(agent: LivingAgent): void {
+    const { phase, isStudent, hasRealShift } = this.resolveAgentSchedule(agent);
+    agent.lastSchedulePhase = phase;
+    agent.activeBreakSpot = null;
+    agent.state = 'RETURNING_FROM_PRAYER';
+    agent.stateTimer = 0;
+
+    if (
+      (phase === 'commute' || phase === 'working') &&
+      hasRealShift &&
+      agent.workSpot &&
+      !isStudent
+    ) {
+      agent.prayerReturnTarget = 'work';
+      agent.workSpotIdx = agent.id % agent.workSpot.workSpots.length;
+      const targetPt =
+        agent.workSpot.workSpots[agent.workSpotIdx] ?? agent.workSpot.doorstep;
+      this.routeAgentTo(
+        agent,
+        targetPt,
+        agent.workSpot.themeId,
+        agent.workSpot.faceTarget,
+        agent.workSpot.cubeId,
+        agent.workSpot.approachOffset
+      );
+      return;
+    }
+
+    if (
+      (phase === 'school' || (phase === 'commute' && isStudent)) &&
+      this.schoolSpots.length > 0
+    ) {
+      agent.prayerReturnTarget = 'school';
+      const s = this.schoolSpots[agent.id % this.schoolSpots.length];
+      agent.playKind = 'school';
+      this.routeAgentTo(
+        agent,
+        s.doorstep,
+        'school',
+        s.faceTarget,
+        s.cubeId,
+        s.approachOffset
+      );
+      return;
+    }
+
+    if (phase === 'evening') {
+      agent.prayerReturnTarget = 'break';
+      const b = this.pickNearestBreakSpot(
+        agent.x,
+        agent.z,
+        agent.role === 'elder'
+      );
+      agent.activeBreakSpot = b;
+      this.routeAgentTo(
+        agent,
+        b.doorstep,
+        b.themeId,
+        b.faceTarget,
+        b.cubeId,
+        b.approachOffset
+      );
+      return;
+    }
+
+    // sleep or home_morning -> walk home cleanly
+    agent.prayerReturnTarget = 'home';
+    const anchor = agent.role === 'police' ? this.palaceSpot : agent.homeSpot;
+    this.routeAgentTo(
+      agent,
+      anchor.doorstep,
+      agent.role === 'police' ? 'palace' : 'house',
+      anchor.faceTarget,
+      anchor.cubeId,
+      anchor.approachOffset
+    );
+  }
+
+  private syncActivePrayer(session: ActivePrayerSession | null): void {
+    if (!session || session.logged) {
+      this.offscreenPrayerTimers.clear();
+      this.offscreenPrayerDispatchedKey = null;
+      for (let i = 0; i < this.agents.length; i++) {
+        const a = this.agents[i];
+        if (a.state === 'TO_PRAYER') {
+          a.prayerMosqueSpot = null;
+          a.prayerReturnTarget = null;
+          this.assignNextRoutine(a);
+        }
+      }
+      return;
+    }
+
+    const attendeeMosque = new Map<number, number>();
+    for (let i = 0; i < session.attendees.length; i++) {
+      const att = session.attendees[i];
+      attendeeMosque.set(att.citizenId, att.mosqueCubeId);
+    }
+    const completedSet = new Set<number>(session.completedCitizenIds);
+    const visibleCitizenIds = new Set<number>();
+
+    for (let i = 0; i < this.agents.length; i++) {
+      const a = this.agents[i];
+      if (a.citizenId === null) continue;
+      visibleCitizenIds.add(a.citizenId);
+
+      const mosqueCubeId = attendeeMosque.get(a.citizenId);
+      if (mosqueCubeId === undefined || completedSet.has(a.citizenId)) continue;
+      if (a.prayerSessionId === session.id) continue;
+
+      const mosqueSpot = this.mosqueSpots.get(mosqueCubeId);
+      if (!mosqueSpot) continue;
+
+      this.ensureVisibleAtDoorstepIfLeavingHome(a);
+      a.prayerSessionId = session.id;
+      a.prayerMosqueSpot = mosqueSpot;
+      a.prayerTimer = 0;
+      a.prayerReturnTarget = null;
+      a.activeBreakSpot = null;
+      a.state = 'TO_PRAYER';
+      a.stateTimer = 0;
+      a.bodyPivot.rotation.x = a.role === 'elder' ? 0.14 : 0;
+      a.bodyPivot.rotation.z = 0;
+      if (a.castingPivot) {
+        a.castingPivot.rotation.x = 0;
+      }
+
+      this.routeAgentTo(
+        a,
+        mosqueSpot.doorstep,
+        'mosque',
+        mosqueSpot.faceTarget,
+        mosqueSpot.cubeId,
+        mosqueSpot.approachOffset
+      );
+    }
+
+    // For kingdoms with > MAX_VISIBLE_AGENTS citizens (or visual police offset), track off-screen selected attendees
+    // using real street-grid reachability + realistic walk time + 1 game-minute prayer duration (never teleporting)
+    const dispatchKey = `${session.id}`;
+    if (this.offscreenPrayerDispatchedKey !== dispatchKey) {
+      this.offscreenPrayerTimers.clear();
+      this.offscreenPrayerDispatchedKey = dispatchKey;
+
+      for (let i = 0; i < session.attendees.length; i++) {
+        const att = session.attendees[i];
+        if (
+          completedSet.has(att.citizenId) ||
+          visibleCitizenIds.has(att.citizenId)
+        ) {
+          continue;
+        }
+        const mosqueSpot = this.mosqueSpots.get(att.mosqueCubeId);
+        if (!mosqueSpot || !this.streetGrid) continue;
+        const cit = this.citizenById.get(att.citizenId);
+        const startCubeId = cit?.jobCubeId ?? cit?.homeCubeId ?? this.palaceSpot.cubeId;
+        const startCube = this.lastCubes[startCubeId];
+        const startPt = startCube
+          ? cellToWorldCenter(startCube.row, startCube.col)
+          : this.palaceSpot.doorstep;
+        const path = computeStreetPath(
+          this.streetGrid,
+          startPt.x,
+          startPt.z,
+          mosqueSpot.doorstep,
+          {
+            destCubeId: mosqueSpot.cubeId,
+            destThemeId: 'mosque',
+            destApproachOffset: mosqueSpot.approachOffset,
+          }
+        );
+        if (!path.reachable) continue;
+        let pathLen = 0;
+        let px = startPt.x;
+        let pz = startPt.z;
+        for (let w = 0; w < path.waypoints.length; w++) {
+          pathLen += Math.hypot(path.waypoints[w].x - px, path.waypoints[w].z - pz);
+          px = path.waypoints[w].x;
+          pz = path.waypoints[w].z;
+        }
+        const walkSeconds = pathLen / 2.0;
+        this.offscreenPrayerTimers.set(att.citizenId, {
+          sessionId: session.id,
+          mosqueCubeId: att.mosqueCubeId,
+          remaining: walkSeconds + CLOCK_CONSTANTS.REAL_SECONDS_PER_GAME_MINUTE,
+        });
+      }
+    }
+  }
+
   private enforceScheduleTransition(agent: LivingAgent): void {
+    if (this.isInPrayerFlow(agent.state)) {
+      return;
+    }
     const { phase, isStudent, hasRealShift } = this.resolveAgentSchedule(agent);
     agent.lastSchedulePhase = phase;
 
@@ -1050,6 +1285,7 @@ export class PeopleAgentsManager {
 
     for (let i = 0; i < this.agents.length; i++) {
       const a = this.agents[i];
+      if (this.isInPrayerFlow(a.state)) continue;
       const { phase } = this.resolveAgentSchedule(a);
       if (phase !== a.lastSchedulePhase) {
         this.enforceScheduleTransition(a);
@@ -1276,7 +1512,8 @@ export class PeopleAgentsManager {
     camp?: ArrivalCamp,
     citizens?: Citizen[],
     clockSecondsOfDay?: number,
-    totalMonths?: number
+    totalMonths?: number,
+    activePrayer?: ActivePrayerSession | null
   ): void {
     this.lastCubes = cubes;
     this.lastPopulation = population;
@@ -1301,6 +1538,7 @@ export class PeopleAgentsManager {
     this.schoolSpots = [];
     this.gardenSpots = [];
     this.freeStreetCenters = [];
+    this.mosqueSpots.clear();
 
     // Element 2.1: Rebuild 12x12 walkability street grid from current cubes
     this.streetGrid = buildStreetGrid(cubes, seaCoords);
@@ -1310,6 +1548,7 @@ export class PeopleAgentsManager {
       spot: WorkAnchorSpot;
       count: number;
     }> = [];
+    const workSpotByCubeTheme = new Map<string, WorkAnchorSpot>();
 
     // Rebuild Palace courtyard anchor first
     const palaceCube = findPalaceCube(cubes);
@@ -1393,13 +1632,17 @@ export class PeopleAgentsManager {
           entry.themeId === 'shop' ||
           entry.themeId === 'theater'
         ) {
-          this.breakSpots.push({
+          const spot: BreakAnchorSpot = {
             cubeId: c.id,
             themeId: entry.themeId,
             doorstep: anchors.doorstep,
             faceTarget: anchors.faceTarget,
             approachOffset: anchors.approachOffset,
-          });
+          };
+          this.breakSpots.push(spot);
+          if (entry.themeId === 'mosque') {
+            this.mosqueSpots.set(c.id, spot);
+          }
         }
 
         // Staffed workplace assignment (sea spawns a visible shoreline fisher even though workers === 0)
@@ -1407,16 +1650,18 @@ export class PeopleAgentsManager {
         const slotKey = makeSlotKey(c.id, entry.slot);
         if (role && (entry.themeId === 'sea' || staffedSlots.has(slotKey))) {
           const desired = entry.themeId === 'sea' ? 1 : Math.min(2, Math.max(1, def.workers));
+          const workSpot: WorkAnchorSpot = {
+            cubeId: c.id,
+            themeId: entry.themeId,
+            doorstep: anchors.doorstep,
+            workSpots: anchors.workSpots,
+            faceTarget: anchors.faceTarget,
+            approachOffset: anchors.approachOffset,
+          };
+          workSpotByCubeTheme.set(`${c.id}:${entry.themeId}`, workSpot);
           staffedWorkSlots.push({
             role,
-            spot: {
-              cubeId: c.id,
-              themeId: entry.themeId,
-              doorstep: anchors.doorstep,
-              workSpots: anchors.workSpots,
-              faceTarget: anchors.faceTarget,
-              approachOffset: anchors.approachOffset,
-            },
+            spot: workSpot,
             count: desired,
           });
         }
@@ -1515,6 +1760,7 @@ export class PeopleAgentsManager {
         );
       }
 
+      let resolvedWorkSpot: WorkAnchorSpot | null = null;
       if (!bound) {
         bound = claimCitizen((c) => c.jobCubeId === null);
         if (bound) {
@@ -1530,9 +1776,33 @@ export class PeopleAgentsManager {
         }
       }
 
+      if (!bound) {
+        bound = claimCitizen(() => true);
+        if (bound) {
+          const age = ageYears(bound, this.totalMonths);
+          const jobRole = bound.jobThemeId
+            ? themeToWorkerRole(bound.jobThemeId)
+            : null;
+          resolvedRole =
+            jobRole ??
+            (age < 14
+              ? 'child'
+              : age >= 55
+                ? 'elder'
+                : bound.gender === 'f'
+                  ? 'woman'
+                  : 'man');
+          if (bound.jobCubeId !== null && bound.jobThemeId !== null) {
+            resolvedWorkSpot =
+              workSpotByCubeTheme.get(`${bound.jobCubeId}:${bound.jobThemeId}`) ??
+              null;
+          }
+        }
+      }
+
       desiredSpecs.push({
         role: resolvedRole,
-        workSpot: null,
+        workSpot: resolvedWorkSpot,
         citizen: bound,
       });
       cycleIdx += 1;
@@ -1642,16 +1912,26 @@ export class PeopleAgentsManager {
             existing.state = 'AT_HOME';
             existing.stateTimer = 0.1;
             this.assignNextRoutine(existing);
-          } else if (existing.state !== 'AT_HOME' && existing.state !== 'ENTERING_HOME' && existing.stateTimer <= 0) {
+          } else if (
+            existing.state !== 'AT_HOME' &&
+            existing.state !== 'ENTERING_HOME' &&
+            existing.state !== 'ENTERING_MOSQUE' &&
+            existing.state !== 'PRAYING' &&
+            existing.stateTimer <= 0
+          ) {
             // Re-validate active path against updated street grid (e.g. player just built a sea or building)
             const lastWp = existing.waypoints[existing.waypoints.length - 1];
             if (lastWp) {
+              const destCubeId =
+                existing.state === 'TO_PRAYER'
+                  ? existing.prayerMosqueSpot?.cubeId
+                  : existing.workSpot?.cubeId;
               this.routeAgentTo(
                 existing,
                 lastWp,
                 existing.targetThemeId,
                 existing.activeFaceTarget,
-                existing.workSpot?.cubeId
+                destCubeId
               );
             }
           }
@@ -1709,6 +1989,10 @@ export class PeopleAgentsManager {
             playKind: 'house',
             patrolStep: id,
             patrolAtPalace: true,
+            prayerSessionId: null,
+            prayerMosqueSpot: null,
+            prayerTimer: 0,
+            prayerReturnTarget: null,
           };
           this.assignNextRoutine(agent);
           this.agents.push(agent);
@@ -1718,6 +2002,7 @@ export class PeopleAgentsManager {
       // Even when roster signature is unchanged, ensure schedule phases stay aligned with latest clock
       for (let i = 0; i < this.agents.length; i++) {
         const a = this.agents[i];
+        if (this.isInPrayerFlow(a.state)) continue;
         const { phase } = this.resolveAgentSchedule(a);
         if (phase !== a.lastSchedulePhase) {
           this.enforceScheduleTransition(a);
@@ -1725,6 +2010,26 @@ export class PeopleAgentsManager {
       }
     }
 
+    // Safety guard: if a mosque was demolished while an agent was walking to / praying in it, release cleanly
+    for (let i = 0; i < this.agents.length; i++) {
+      const a = this.agents[i];
+      if (
+        (a.state === 'TO_PRAYER' ||
+          a.state === 'ENTERING_MOSQUE' ||
+          a.state === 'PRAYING') &&
+        a.prayerMosqueSpot &&
+        !this.mosqueSpots.has(a.prayerMosqueSpot.cubeId)
+      ) {
+        a.group.visible = true;
+        a.group.scale.setScalar(1);
+        a.prayerMosqueSpot = null;
+        a.prayerReturnTarget = null;
+        a.prayerTimer = 0;
+        this.assignNextRoutine(a);
+      }
+    }
+
+    this.syncActivePrayer(activePrayer ?? null);
     this.syncCampAgents(cubes, seaCoords, camp, citizens);
   }
 
@@ -2033,7 +2338,26 @@ export class PeopleAgentsManager {
           }
           break;
         }
+        case 'TO_PRAYER':
+        case 'ENTERING_MOSQUE':
+          destinationAr = TO_PRAYER_TEXT;
+          break;
+        case 'PRAYING':
+          destinationAr = PRAYING_IN_MOSQUE_TEXT;
+          break;
+        case 'RETURNING_FROM_PRAYER':
+          destinationAr = RETURNING_FROM_PRAYER_TEXT;
+          break;
       }
+
+      const prayerStatus: CitizenInfo['prayerStatus'] =
+        a.state === 'TO_PRAYER' || a.state === 'ENTERING_MOSQUE'
+          ? 'to_prayer'
+          : a.state === 'PRAYING'
+            ? 'praying'
+            : a.state === 'RETURNING_FROM_PRAYER'
+              ? 'returning'
+              : null;
 
       const mood = getMoodFromSatisfaction(this.lastSatisfaction);
       return {
@@ -2046,6 +2370,7 @@ export class PeopleAgentsManager {
         moodAr: mood.moodAr,
         moodTone: mood.moodTone,
         workThemeId: a.workSpot?.themeId ?? null,
+        prayerStatus,
         x: a.x,
         z: a.z,
       };
@@ -2119,6 +2444,52 @@ export class PeopleAgentsManager {
           a.group.visible = false;
           a.state = 'AT_HOME';
           a.stateTimer = 2.4 + Math.random() * 2.0;
+        }
+      } else if (a.state === 'ENTERING_MOSQUE') {
+        // V5 Prompt 2 Element 2: 200ms step-forward shrink into mosque front door -> invisible inside during prayer
+        a.enterDoorTimer -= dt;
+        const progress = THREE.MathUtils.clamp(
+          1 - a.enterDoorTimer / ENTER_DOOR_DURATION,
+          0,
+          1
+        );
+        const mosqueAnchor = a.prayerMosqueSpot ?? this.palaceSpot;
+        const fx = mosqueAnchor.faceTarget.x - a.enterStartX;
+        const fz = mosqueAnchor.faceTarget.z - a.enterStartZ;
+        const flen = Math.hypot(fx, fz) || 1;
+        const stepIn = 0.55 * progress;
+        const curX = a.enterStartX + (fx / flen) * stepIn;
+        const curZ = a.enterStartZ + (fz / flen) * stepIn;
+        const groundY = this.getLandHeight(a.enterStartX, a.enterStartZ);
+        a.group.position.set(curX, groundY, curZ);
+        a.group.rotation.y = Math.atan2(fx, fz);
+        a.group.scale.setScalar(Math.max(0.05, 1 - progress * 0.95));
+
+        if (a.enterDoorTimer <= 0) {
+          a.x = mosqueAnchor.doorstep.x;
+          a.z = mosqueAnchor.doorstep.z;
+          a.group.position.set(a.x, groundY, a.z);
+          a.group.scale.setScalar(1);
+          a.group.visible = false;
+          a.state = 'PRAYING';
+          a.prayerTimer = CLOCK_CONSTANTS.REAL_SECONDS_PER_GAME_MINUTE;
+        }
+      } else if (a.state === 'PRAYING') {
+        // V5 Prompt 2 Element 2: Inside mosque for exactly 1 game-minute (20 real seconds)
+        a.prayerTimer -= dt;
+        a.group.visible = false;
+        if (a.prayerTimer <= 0) {
+          const mosqueAnchor = a.prayerMosqueSpot ?? this.palaceSpot;
+          a.x = mosqueAnchor.doorstep.x;
+          a.z = mosqueAnchor.doorstep.z;
+          const groundY = this.getLandHeight(a.x, a.z);
+          a.group.position.set(a.x, groundY, a.z);
+          a.group.scale.setScalar(1);
+          a.group.visible = true;
+          if (a.prayerSessionId !== null && a.citizenId !== null) {
+            this.onPrayerCompleted?.(a.prayerSessionId, a.citizenId);
+          }
+          this.routeReturnFromPrayer(a);
         }
       } else if (a.stateTimer > 0) {
         // Stationary timed states (AT_HOME, WORKING, ON_BREAK, PLAYING pause, PATROL pause, WAITING)
@@ -2225,6 +2596,36 @@ export class PeopleAgentsManager {
                 a.state = 'ON_BREAK';
                 a.stateTimer = 2.8 + Math.random() * 2.4;
                 this.facePoint(a, a.activeFaceTarget);
+              } else if (a.state === 'TO_PRAYER') {
+                // V5 Prompt 2 Element 2: Arrived at mosque doorstep -> step into mosque door
+                a.state = 'ENTERING_MOSQUE';
+                a.enterDoorTimer = ENTER_DOOR_DURATION;
+                a.enterStartX = a.x;
+                a.enterStartZ = a.z;
+              } else if (a.state === 'RETURNING_FROM_PRAYER') {
+                const returnTarget = a.prayerReturnTarget;
+                a.prayerMosqueSpot = null;
+                a.prayerReturnTarget = null;
+                if (returnTarget === 'work') {
+                  a.state = 'WORKING';
+                  a.stateTimer = 5.2 + Math.random() * 3.5;
+                  a.workSpotSwitchTimer = 2.4 + Math.random() * 1.2;
+                  this.facePoint(a, a.activeFaceTarget);
+                } else if (returnTarget === 'break') {
+                  a.state = 'ON_BREAK';
+                  a.stateTimer = 2.8 + Math.random() * 2.4;
+                  this.facePoint(a, a.activeFaceTarget);
+                } else if (returnTarget === 'school') {
+                  a.state = 'PLAYING';
+                  a.playKind = 'school';
+                  a.stateTimer = 3.0 + Math.random() * 2.0;
+                  this.facePoint(a, a.activeFaceTarget);
+                } else {
+                  a.state = 'ENTERING_HOME';
+                  a.enterDoorTimer = ENTER_DOOR_DURATION;
+                  a.enterStartX = a.x;
+                  a.enterStartZ = a.z;
+                }
               } else if (a.state === 'TO_HOME') {
                 // Element 3.1: Arrived at house doorstep -> 200ms step-forward shrink -> invisible inside
                 a.state = 'ENTERING_HOME';
@@ -2347,6 +2748,28 @@ export class PeopleAgentsManager {
       if (c) {
         this.group.remove(c.group);
         this.campAgents.delete(citId);
+      }
+    }
+
+    // Advance off-screen reachable prayer attendees (only active when kingdom pop > visible agent cap)
+    if (this.offscreenPrayerTimers.size > 0) {
+      const doneOffscreen: Array<{ sessionId: number; citizenId: number }> = [];
+      for (const [citId, entry] of this.offscreenPrayerTimers.entries()) {
+        if (!this.mosqueSpots.has(entry.mosqueCubeId)) {
+          this.offscreenPrayerTimers.delete(citId);
+          continue;
+        }
+        entry.remaining -= dt;
+        if (entry.remaining <= 0) {
+          doneOffscreen.push({ sessionId: entry.sessionId, citizenId: citId });
+          this.offscreenPrayerTimers.delete(citId);
+        }
+      }
+      for (let i = 0; i < doneOffscreen.length; i++) {
+        this.onPrayerCompleted?.(
+          doneOffscreen[i].sessionId,
+          doneOffscreen[i].citizenId
+        );
       }
     }
 

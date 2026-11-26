@@ -53,6 +53,11 @@ import {
   isPurchasableNeutralCube,
   makeSlotKey,
 } from '../game/production';
+import {
+  getNextPrayer,
+  getPrayerTimesForDay,
+  PRAYER_NAMES_AR,
+} from '../game/prayer';
 import { STRINGS } from '../game/strings';
 import {
   computeTaxMoodDelta,
@@ -162,6 +167,7 @@ function MeterBar({ label, value }: { label: string; value: number }) {
 interface SlotCardProps {
   cube: Cube;
   allCubes: Cube[];
+  gameState?: GameState;
   slot: SlotIndex;
   slotTitle?: string;
   themeId: ThemeId;
@@ -175,6 +181,7 @@ interface SlotCardProps {
 function SlotCard({
   cube,
   allCubes,
+  gameState,
   slotTitle,
   themeId,
   progress,
@@ -274,6 +281,53 @@ function SlotCard({
           </div>
         )}
       </div>
+
+      {/* V5 Prompt 2 Element 5: Mosque prayer schedule & last recorded attendance */}
+      {themeId === 'mosque' && gameState && (() => {
+        const prayerTimes = getPrayerTimesForDay(gameState);
+        const nextPrayer = getNextPrayer(gameState);
+        const lastPrayer =
+          gameState.prayerLog.length > 0
+            ? gameState.prayerLog[gameState.prayerLog.length - 1]
+            : null;
+        return (
+          <div className="pt-2 border-t border-[#EFE3C5] space-y-1.5">
+            <div className="text-[11px] font-extrabold text-[#4F3F2B]">
+              مواقيت الصلاة اليوم
+            </div>
+            <div className="grid grid-cols-5 gap-1 text-center">
+              {prayerTimes.map((p) => {
+                const isNext = nextPrayer.key === p.key;
+                return (
+                  <div
+                    key={p.key}
+                    className={`px-1 py-1 rounded-lg border text-[10px] leading-tight ${
+                      isNext
+                        ? 'bg-[#F8E7C1] border-[#C9962E] text-[#8A5F12] font-extrabold'
+                        : 'bg-[#F7EED8] border-[#E7D8B4] text-[#4F3F2B] font-bold'
+                    }`}
+                  >
+                    <div>{p.nameAr}</div>
+                    <div className="tabular-nums-latin mt-0.5">
+                      {formatClock(p.minute)}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="text-[11px] font-bold text-[#14524A] pt-1">
+              {lastPrayer ? (
+                <span className="tabular-nums-latin">
+                  آخر صلاة: {PRAYER_NAMES_AR[lastPrayer.key]} — حضر{' '}
+                  {lastPrayer.attendance}
+                </span>
+              ) : (
+                <span className="text-[#7C684C]">لا صلوات مسجلة بعد</span>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Unstaffed warning */}
       {unstaffed && (
@@ -671,6 +725,39 @@ export function Inspector({
               </span>
             </div>
           </div>
+
+          {/* V5 Prompt 2 Element 5: Today's 5 prayer times (read-only) */}
+          {(() => {
+            const prayerTimes = getPrayerTimesForDay(state);
+            const nextPrayer = getNextPrayer(state);
+            return (
+              <div className="pt-2 border-t border-[#EFE3C5] space-y-1.5">
+                <div className="text-[11px] font-extrabold text-[#4F3F2B]">
+                  مواقيت الصلاة اليوم
+                </div>
+                <div className="grid grid-cols-5 gap-1 text-center">
+                  {prayerTimes.map((p) => {
+                    const isNext = nextPrayer.key === p.key;
+                    return (
+                      <div
+                        key={p.key}
+                        className={`px-1 py-1 rounded-lg border text-[10px] leading-tight ${
+                          isNext
+                            ? 'bg-[#F8E7C1] border-[#C9962E] text-[#8A5F12] font-extrabold'
+                            : 'bg-[#F7EED8] border-[#E7D8B4] text-[#4F3F2B] font-bold'
+                        }`}
+                      >
+                        <div>{p.nameAr}</div>
+                        <div className="tabular-nums-latin mt-0.5">
+                          {formatClock(p.minute)}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
 
           <p className="text-[11px] font-bold text-[#8A5F12] pt-1.5 border-t border-[#EFE3C5]">
             {STRINGS.inspector.palaceNonDemolishable}
@@ -1403,6 +1490,7 @@ export function Inspector({
                     <SlotCard
                       cube={selectedCube}
                       allCubes={state.cubes}
+                      gameState={state}
                       slot={0}
                       themeId={selectedCube.themeId}
                       progress={selectedCube.progress}
@@ -1463,6 +1551,7 @@ export function Inspector({
             <SlotCard
               cube={selectedCube}
               allCubes={state.cubes}
+              gameState={state}
               slot={0}
               themeId={selectedCube.themeId}
               progress={selectedCube.progress}
@@ -1478,6 +1567,7 @@ export function Inspector({
               <SlotCard
                 cube={selectedCube}
                 allCubes={state.cubes}
+                gameState={state}
                 slot={0}
                 slotTitle={STRINGS.inspector.slotPrimary}
                 themeId={selectedCube.themeId}
@@ -1493,6 +1583,7 @@ export function Inspector({
                 <SlotCard
                   cube={selectedCube}
                   allCubes={state.cubes}
+                  gameState={state}
                   slot={1}
                   slotTitle={STRINGS.inspector.slotSecondary}
                   themeId={selectedCube.secondThemeId}

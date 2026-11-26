@@ -19,6 +19,7 @@ import {
   PalaceOfficesOverlay,
   type PalaceOfficeTab,
 } from './components/PalaceOfficesOverlay';
+import { PrayerBanner } from './components/PrayerBanner';
 import { ProvincePanel, ProvincePanelChip } from './components/ProvincePanel';
 import { SharedWorldOverlay } from './components/SharedWorldOverlay';
 import { Ticker } from './components/Ticker';
@@ -789,6 +790,16 @@ export default function App() {
     }, 5000);
     return () => window.clearTimeout(timeout);
   }, [state.toasts]);
+
+  // V5 Prompt 2 Element 4: Auto-dismiss prayer banner after 6 real seconds (new banner replaces prior, never stacks)
+  const prayerBannerId = state.prayerBanner?.id ?? null;
+  useEffect(() => {
+    if (prayerBannerId === null) return;
+    const timeout = window.setTimeout(() => {
+      dispatch({ type: 'CLEAR_PRAYER_BANNER' });
+    }, 6000);
+    return () => window.clearTimeout(timeout);
+  }, [prayerBannerId]);
 
   // Live refresh of selected citizen's destination & mood while citizen card is open
   useEffect(() => {
@@ -1720,6 +1731,9 @@ export default function App() {
         onOpenBourse={() => setBourseModalOpen(true)}
       />
 
+      {/* V5 Prompt 2 Element 5: Slim non-blocking Prayer Banner (auto-dismisses after 6s) */}
+      <PrayerBanner banner={state.prayerBanner} />
+
       {/* Explicit Clickable Milestone Notice Banners (never auto-opening modals) */}
       {(state.level2UnlockedNotice || state.level2CompletedNotice) && (
         <div className="w-full bg-[#11453E] border-b border-[#C9962E]/50 px-3 py-1 flex items-center justify-center gap-2 flex-wrap shrink-0">
@@ -1790,6 +1804,7 @@ export default function App() {
             embassyPlots={state.embassyPlots}
             clockSecondsOfDay={state.clock.secondsOfDay}
             totalMonths={state.totalMonths}
+            activePrayer={state.activePrayer}
             lastJoinedVillageCubeId={state.lastJoinedVillageCubeId}
             lastJoinedVillageSeq={state.lastJoinedVillageSeq}
             lastDefectedCubeId={state.lastDefectedCubeId}
@@ -1797,6 +1812,9 @@ export default function App() {
             resetSignal={resetSignal}
             onCubeClick={handleCubeClick}
             onCitizenClick={handleCitizenClick}
+            onPrayerCitizenCompleted={(sessionId, citizenId) =>
+              dispatch({ type: 'PRAYER_CITIZEN_COMPLETED', sessionId, citizenId })
+            }
             onCancelBuild={() => {
               setActiveBuildTheme(null);
               setInspectedShortTheme(null);

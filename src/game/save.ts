@@ -159,6 +159,9 @@ export function serializeGameState(state: GameState, now: number): PersistedSave
     ...(state.visaHistory && state.visaHistory.length > 0 ? { visaHistory: state.visaHistory } : {}),
     ...(state.lastMarketClaimAt !== undefined ? { lastMarketClaimAt: state.lastMarketClaimAt } : {}),
     ...(state.lastEmbassyPaymentAt !== undefined ? { lastEmbassyPaymentAt: state.lastEmbassyPaymentAt } : {}),
+    prayerLog: state.prayerLog,
+    lastPrayerTriggerKey: state.lastPrayerTriggerKey,
+    prayerBonusPool: state.prayerBonusPool,
   };
 }
 

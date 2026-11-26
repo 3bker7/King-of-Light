@@ -241,6 +241,8 @@ export interface Citizen {
   inCamp?: boolean;
   // Prompt 8 Visa 12-month cooldown marker (hydrate default null)
   lastVisaMonth?: number | null;
+  // V5 Prompt 2 Prayer efficiency buff expiry (absolute totalGameMinutes; hydrate default 0)
+  prayerBuffUntil?: number;
 }
 
 export type OfficeFaxStatus = 'unread' | 'read' | 'acted' | 'dismissed';
@@ -356,6 +358,35 @@ export interface PrivateAd {
 export interface GameClock {
   secondsOfDay: number; // 0..86399
   totalGameSeconds: number;
+}
+
+export type PrayerKey = 'fajr' | 'dhuhr' | 'asr' | 'maghrib' | 'isha';
+
+export interface PrayerLogEntry {
+  day: number;
+  key: PrayerKey;
+  attendance: number;
+}
+
+export interface ActivePrayerSession {
+  id: number;
+  day: number;
+  key: PrayerKey;
+  nameAr: string;
+  triggerAbsMinute: number;
+  deadlineAbsMinute: number;
+  attendees: Array<{ citizenId: number; mosqueCubeId: number }>;
+  completedCitizenIds: number[];
+  logged: boolean;
+}
+
+export interface PrayerBannerEvent {
+  id: number;
+  day: number;
+  key: PrayerKey;
+  nameAr: string;
+  selectedCount: number;
+  hasStaffedMosque: boolean;
 }
 
 export interface AwayReportData {
@@ -484,7 +515,14 @@ export interface ToastItem {
   focusCubeId?: number;
 }
 
-export type AudioCue = 'build' | 'reward' | 'day' | 'levelUp' | 'trade' | 'error';
+export type AudioCue =
+  | 'build'
+  | 'reward'
+  | 'day'
+  | 'levelUp'
+  | 'trade'
+  | 'error'
+  | 'prayer';
 
 export interface GameState {
   cubes: Cube[];
@@ -564,6 +602,13 @@ export interface GameState {
   lastMarketClaimAt?: number;
   lastEmbassyPaymentAt?: number;
   lastImportedFoodUnits?: number;
+  // V5 Prompt 2 Prayer state fields (hydrate defaults: [], null, {})
+  prayerLog: PrayerLogEntry[];
+  lastPrayerTriggerKey: string | null;
+  prayerBonusPool: Record<number, number>;
+  // Transient live-only prayer state (never persisted; never triggered offline)
+  activePrayer: ActivePrayerSession | null;
+  prayerBanner: PrayerBannerEvent | null;
 }
 
 export interface PersistedSaveData {
@@ -632,6 +677,10 @@ export interface PersistedSaveData {
   visaHistory?: VisaGrantRecord[];
   lastMarketClaimAt?: number;
   lastEmbassyPaymentAt?: number;
+  // V5 Prompt 2 optional persisted prayer fields
+  prayerLog?: PrayerLogEntry[];
+  lastPrayerTriggerKey?: string | null;
+  prayerBonusPool?: Record<number, number>;
 }
 
 export interface StaffingStatus {

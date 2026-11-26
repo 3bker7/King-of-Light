@@ -1,6 +1,17 @@
 import type { AudioCue } from './types';
 
 let audioContext: AudioContext | null = null;
+let userGestureUnlocked = false;
+
+if (typeof window !== 'undefined') {
+  const markUnlocked = () => {
+    userGestureUnlocked = true;
+    window.removeEventListener('pointerdown', markUnlocked);
+    window.removeEventListener('keydown', markUnlocked);
+  };
+  window.addEventListener('pointerdown', markUnlocked, { passive: true });
+  window.addEventListener('keydown', markUnlocked, { passive: true });
+}
 
 function getAudioContext(): AudioContext | null {
   if (typeof window === 'undefined') return null;
@@ -75,6 +86,15 @@ export function playAudioCue(cue: AudioCue, muted: boolean): void {
       break;
     case 'error':
       playTone(ctx, 220, 0, 0.12, 0.05, 'sawtooth');
+      break;
+    case 'prayer':
+      // Soft harmonic bell chime — only plays after user interaction (never violates browser autoplay)
+      if (!userGestureUnlocked && ctx.state !== 'running') {
+        return;
+      }
+      playTone(ctx, 440, 0, 0.65, 0.04, 'sine');
+      playTone(ctx, 659.25, 0.12, 0.72, 0.035, 'sine');
+      playTone(ctx, 880, 0.24, 0.85, 0.025, 'sine');
       break;
   }
 }

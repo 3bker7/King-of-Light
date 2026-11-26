@@ -1062,6 +1062,12 @@ export function sanitizeCitizensOnHydrate(
         ? Math.min(safeTotalMonths, Math.trunc(raw.lastVisaMonth))
         : null;
 
+    const prayerBuffUntil =
+      typeof raw.prayerBuffUntil === 'number' &&
+      Number.isFinite(raw.prayerBuffUntil)
+        ? Math.max(0, Math.floor(raw.prayerBuffUntil))
+        : 0;
+
     sanitized.push({
       id,
       name:
@@ -1083,6 +1089,7 @@ export function sanitizeCitizensOnHydrate(
       employerId,
       deniedLandMonth,
       lastVisaMonth,
+      prayerBuffUntil,
       wealth,
       attrs,
       cvFiled,

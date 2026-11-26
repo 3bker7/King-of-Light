@@ -30,6 +30,7 @@ export interface CitizenInfo {
   moodAr: string;
   moodTone: 'good' | 'neutral' | 'low';
   workThemeId: ThemeId | null;
+  prayerStatus?: 'to_prayer' | 'praying' | 'returning' | null;
   x: number;
   z: number;
 }
@@ -52,7 +53,13 @@ export function CitizenCard({
   onClose,
 }: CitizenCardProps) {
   let scheduleLineAr: string | null = null;
-  if (state) {
+  if (citizen.prayerStatus === 'to_prayer') {
+    scheduleLineAr = 'في طريقه إلى المسجد للصلاة';
+  } else if (citizen.prayerStatus === 'praying') {
+    scheduleLineAr = 'يصلّي في المسجد';
+  } else if (citizen.prayerStatus === 'returning') {
+    scheduleLineAr = 'عائد من الصلاة';
+  } else if (state) {
     const registryCitizen: Citizen | undefined =
       typeof citizen.citizenId === 'number'
         ? state.citizens.find((c) => c.id === citizen.citizenId)

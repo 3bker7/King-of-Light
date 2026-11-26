@@ -71,6 +71,18 @@ import {
   processDayRolloverPeople,
 } from './people';
 import {
+  appendPrayerLog,
+  detectPrayerCrossing,
+  getStaffedMosqueCubes,
+  PRAYER_BUFF_DURATION_MINUTES,
+  PRAYER_SESSION_MAX_MINUTES,
+  sanitizeLastPrayerTriggerKeyOnHydrate,
+  sanitizePrayerBonusPoolOnHydrate,
+  sanitizePrayerLogOnHydrate,
+  selectPrayerAttendees,
+  totalGameMinutes,
+} from './prayer';
+import {
   cleanupEmigratedPrivateOwners,
   syncPrivateAds,
 } from './privateJobs';
@@ -141,6 +153,7 @@ import type { CitizenSnapshot } from '../net/worldTypes';
 
 let toastCounter = 1;
 let audioCounter = 1;
+let prayerSessionCounter = 1;
 let ledgerCounter = 1;
 
 function createToast(
@@ -388,6 +401,11 @@ export function createFreshGameState(now = Date.now()): GameState {
     borderOpen: true,
     visaHistory: [],
     lastImportedFoodUnits: 0,
+    prayerLog: [],
+    lastPrayerTriggerKey: null,
+    prayerBonusPool: {},
+    activePrayer: null,
+    prayerBanner: null,
   };
 }
 
@@ -668,6 +686,13 @@ export function hydrateGameState(saved: PersistedSaveData): GameState {
         ? saved.lastEmbassyPaymentAt
         : undefined,
     lastImportedFoodUnits: 0,
+    prayerLog: sanitizePrayerLogOnHydrate(saved.prayerLog),
+    lastPrayerTriggerKey: sanitizeLastPrayerTriggerKeyOnHydrate(
+      saved.lastPrayerTriggerKey
+    ),
+    prayerBonusPool: sanitizePrayerBonusPoolOnHydrate(saved.prayerBonusPool),
+    activePrayer: null,
+    prayerBanner: null,
   };
 }
 
@@ -919,6 +944,8 @@ export type GameAction =
       }>;
     }
   | { type: 'DISMISS_TOAST'; id: string }
+  | { type: 'PRAYER_CITIZEN_COMPLETED'; sessionId: number; citizenId: number }
+  | { type: 'CLEAR_PRAYER_BANNER' }
   | { type: 'CLEAR_LEVEL2_NOTICE' }
   | { type: 'CLEAR_LEVEL2_COMPLETED_NOTICE' }
   | { type: 'TOGGLE_MUTE' }
@@ -937,7 +964,9 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         state.warehouse,
         state.gold,
         state.population,
-        state.citizens
+        state.citizens,
+        state.prayerBonusPool,
+        totalGameMinutes(state.clock)
       );
 
       let nextCubes = prod.cubes;
@@ -949,8 +978,10 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
       let nextReputation = state.reputation;
       let nextHungerFlag = state.hungerFlag;
       let nextDay = state.day;
+      const prevTotalGameMin = totalGameMinutes(state.clock);
       const clockStep = advanceClock(state.clock, 1);
       const nextClock = clockStep.clock;
+      const nextTotalGameMin = totalGameMinutes(nextClock);
       const dayWrapped = clockStep.daysWrapped > 0;
       let nextTickInDay = Math.floor(
         nextClock.secondsOfDay / CLOCK_CONSTANTS.GAME_SECONDS_PER_TICK
@@ -990,6 +1021,11 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
       let nextPendingArrivals = state.pendingArrivals;
       let nextProvinceEvents = state.provinceEvents;
       let nextLastImportedFoodUnits = state.lastImportedFoodUnits ?? 0;
+      let nextPrayerLog = state.prayerLog;
+      let nextLastPrayerTriggerKey = state.lastPrayerTriggerKey;
+      const nextPrayerBonusPool = prod.prayerBonusPool;
+      let nextActivePrayer = state.activePrayer;
+      let nextPrayerBanner = state.prayerBanner;
       const tickEmbassyCubeIds =
         state.embassyPlots.length > 0
           ? new Set(state.embassyPlots.map((p) => p.cubeId))
@@ -1006,6 +1042,92 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
           return bonus ? { ...c, wealth: c.wealth + bonus } : c;
         });
         nextCitizenWealth = sumCitizenWealth(nextCitizens);
+      }
+
+      // V5 Prompt 2 Element 2 (Single prayer trigger site): clock advance -> prayer trigger -> day/month rollover
+      const dayForPrayer = dayWrapped ? state.day + 1 : state.day;
+      const prayerCross = detectPrayerCrossing(
+        prevTotalGameMin,
+        nextTotalGameMin,
+        dayForPrayer,
+        nextClock,
+        nextLastPrayerTriggerKey
+      );
+      if (prayerCross) {
+        // Finalize any prior unlogged prayer session before starting a new one
+        if (nextActivePrayer && !nextActivePrayer.logged) {
+          nextPrayerLog = appendPrayerLog(nextPrayerLog, {
+            day: nextActivePrayer.day,
+            key: nextActivePrayer.key,
+            attendance: nextActivePrayer.completedCitizenIds.length,
+          });
+          nextActivePrayer = null;
+        }
+
+        nextLastPrayerTriggerKey = prayerCross.triggerKey;
+        const staffedMosques = getStaffedMosqueCubes(
+          nextCubes,
+          nextPopulation,
+          nextCitizens
+        );
+        const hasStaffedMosque = staffedMosques.length > 0;
+        const attendees = hasStaffedMosque
+          ? selectPrayerAttendees(
+              {
+                clock: nextClock,
+                cubes: nextCubes,
+                totalMonths: nextTotalMonths,
+                population: nextPopulation,
+                citizens: nextCitizens,
+              },
+              staffedMosques
+            )
+          : [];
+
+        prayerSessionCounter += 1;
+        nextPrayerBanner = {
+          id: prayerSessionCounter,
+          day: dayForPrayer,
+          key: prayerCross.entry.key,
+          nameAr: prayerCross.entry.nameAr,
+          selectedCount: attendees.length,
+          hasStaffedMosque,
+        };
+        pendingAudioCue = makeCue('prayer');
+
+        if (hasStaffedMosque) {
+          if (attendees.length > 0) {
+            nextActivePrayer = {
+              id: prayerSessionCounter,
+              day: dayForPrayer,
+              key: prayerCross.entry.key,
+              nameAr: prayerCross.entry.nameAr,
+              triggerAbsMinute: nextTotalGameMin,
+              deadlineAbsMinute: nextTotalGameMin + PRAYER_SESSION_MAX_MINUTES,
+              attendees,
+              completedCitizenIds: [],
+              logged: false,
+            };
+          } else {
+            nextPrayerLog = appendPrayerLog(nextPrayerLog, {
+              day: dayForPrayer,
+              key: prayerCross.entry.key,
+              attendance: 0,
+            });
+          }
+        }
+      } else if (
+        nextActivePrayer &&
+        !nextActivePrayer.logged &&
+        nextTotalGameMin >= nextActivePrayer.deadlineAbsMinute
+      ) {
+        // 5 game-minutes after trigger: log actual completions and close the session
+        nextPrayerLog = appendPrayerLog(nextPrayerLog, {
+          day: nextActivePrayer.day,
+          key: nextActivePrayer.key,
+          attendance: nextActivePrayer.completedCitizenIds.length,
+        });
+        nextActivePrayer = null;
       }
 
       if (dayWrapped) {
@@ -1380,6 +1502,11 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         pendingArrivals: nextPendingArrivals,
         provinceEvents: nextProvinceEvents,
         lastImportedFoodUnits: nextLastImportedFoodUnits,
+        prayerLog: nextPrayerLog,
+        lastPrayerTriggerKey: nextLastPrayerTriggerKey,
+        prayerBonusPool: nextPrayerBonusPool,
+        activePrayer: nextActivePrayer,
+        prayerBanner: nextPrayerBanner,
         toasts: appendToasts(state.toasts, newToasts),
         pendingAudioCue,
       };
@@ -2303,6 +2430,58 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
           ),
         ]),
       };
+    }
+
+    case 'PRAYER_CITIZEN_COMPLETED': {
+      const session = state.activePrayer;
+      if (!session || session.logged || session.id !== action.sessionId) {
+        return state;
+      }
+      const isAttendee = session.attendees.some(
+        (a) => a.citizenId === action.citizenId
+      );
+      if (!isAttendee || session.completedCitizenIds.includes(action.citizenId)) {
+        return state;
+      }
+
+      const completionMin = totalGameMinutes(state.clock);
+      const targetUntil = completionMin + PRAYER_BUFF_DURATION_MINUTES;
+      const nextCitizens = state.citizens.map((c) =>
+        c.id === action.citizenId
+          ? {
+              ...c,
+              prayerBuffUntil: Math.max(c.prayerBuffUntil ?? 0, targetUntil),
+            }
+          : c
+      );
+
+      const nextCompleted = [...session.completedCitizenIds, action.citizenId];
+      if (nextCompleted.length >= session.attendees.length) {
+        return {
+          ...state,
+          citizens: nextCitizens,
+          prayerLog: appendPrayerLog(state.prayerLog, {
+            day: session.day,
+            key: session.key,
+            attendance: nextCompleted.length,
+          }),
+          activePrayer: null,
+        };
+      }
+
+      return {
+        ...state,
+        citizens: nextCitizens,
+        activePrayer: {
+          ...session,
+          completedCitizenIds: nextCompleted,
+        },
+      };
+    }
+
+    case 'CLEAR_PRAYER_BANNER': {
+      if (!state.prayerBanner) return state;
+      return { ...state, prayerBanner: null };
     }
 
     case 'DISMISS_TOAST': {
