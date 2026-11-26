@@ -5,9 +5,17 @@ import {
   CAMP_CITIZEN_CARD_TEXT_AR,
   computeCampToHouseWalk,
 } from '../game/arrivalCamp';
+import { ageYears } from '../game/citizens';
+import { CLOCK_CONSTANTS } from '../game/clock';
 import { THEMES } from '../game/constants';
 import { FEMALE_NAMES, MALE_NAMES } from '../game/names';
 import { findPalaceCube, makeSlotKey } from '../game/production';
+import {
+  getCitizenShift,
+  getSchedulePhase,
+  type SchedulePhase,
+  type ScheduleStateView,
+} from '../game/schedules';
 import type { ArrivalCamp, Citizen, Cube, SlotIndex, ThemeId } from '../game/types';
 import {
   type AnchorPoint,
@@ -85,6 +93,7 @@ export interface BreakAnchorSpot {
 
 interface LivingAgent {
   id: number;
+  citizenId: number | null;
   name: string;
   isFemale: boolean;
   role: CitizenRoleId;
@@ -98,6 +107,7 @@ interface LivingAgent {
   pathReachable: boolean;
   speed: number;
   state: RoutineState;
+  lastSchedulePhase: SchedulePhase;
   stateTimer: number;
   enterDoorTimer: number;
   enterStartX: number;
@@ -158,6 +168,7 @@ const ROLE_LABELS_AR: Record<CitizenRoleId, string> = {
 // Element 4.1 & 4.2: Complete per-theme truthful text tables for ALL 29 ThemeIds (zero generic fallback)
 export const WAITING_NO_PATH_TEXT = 'ينتظر — لا يوجد طريق سالك الآن';
 export const AT_HOME_TEXT = 'في بيته يستريح';
+export const SLEEPING_AT_HOME_TEXT = 'نائم في بيته';
 
 export const THEME_GOING_TEXT: Record<ThemeId, string> = {
   palace: 'في طريقه إلى ساحة قصر الحاكم',
@@ -390,6 +401,13 @@ export class PeopleAgentsManager {
   private prevCampResidentIds = new Set<number>();
   private prevCampCubeId: number | null = null;
   private initialCampSyncDone = false;
+  // V5 Prompt 1 Element S1: Living Clock + Registry Citizen schedule wiring
+  private clockSecondsOfDay: number = CLOCK_CONSTANTS.DEFAULT_START_SECONDS_OF_DAY;
+  private totalMonths = 0;
+  private lastPopulation = 0;
+  private lastStaffedSlots: Set<string> = new Set();
+  private lastCitizens: Citizen[] = [];
+  private citizenById = new Map<number, Citizen>();
 
   constructor(blobShadowTexture: THREE.CanvasTexture | null) {
     // Element 5.1: Widen robe/dress geometries by x1.25 for chunkier Stronghold silhouettes
@@ -816,8 +834,10 @@ export class PeopleAgentsManager {
 
   private ensureVisibleAtDoorstepIfLeavingHome(agent: LivingAgent): void {
     if (!agent.group.visible) {
-      agent.x = agent.homeSpot.doorstep.x;
-      agent.z = agent.homeSpot.doorstep.z;
+      const anchor =
+        agent.role === 'police' ? this.palaceSpot : agent.homeSpot;
+      agent.x = anchor.doorstep.x;
+      agent.z = anchor.doorstep.z;
       const y = this.getLandHeight(agent.x, agent.z);
       agent.group.position.set(agent.x, y, agent.z);
       agent.group.scale.setScalar(1);
@@ -825,7 +845,288 @@ export class PeopleAgentsManager {
     }
   }
 
+  private buildScheduleStateView(): ScheduleStateView {
+    return {
+      clock: {
+        secondsOfDay: this.clockSecondsOfDay,
+        totalGameSeconds: 0,
+      },
+      cubes: this.lastCubes,
+      totalMonths: this.totalMonths,
+      population: this.lastPopulation,
+      citizens: this.lastCitizens,
+    };
+  }
+
+  private resolveAgentSchedule(agent: LivingAgent): {
+    phase: SchedulePhase;
+    isStudent: boolean;
+    hasRealShift: boolean;
+  } {
+    const view = this.buildScheduleStateView();
+    let citizen =
+      agent.citizenId !== null
+        ? this.citizenById.get(agent.citizenId) ?? null
+        : null;
+
+    if (!citizen) {
+      // Visual-only fallback for palace guards (no police_post slot in build) or shoreline fishers
+      const synthAge =
+        agent.role === 'child' ? 9 : agent.role === 'elder' ? 62 : 28;
+      citizen = {
+        id: agent.id,
+        name: agent.name,
+        gender: agent.isFemale ? 'f' : 'm',
+        birthMonth: this.totalMonths - synthAge,
+        householdId: 0,
+        homeCubeId: agent.homeSpot.cubeId,
+        spouseId: null,
+        parentIds: null,
+        jobCubeId:
+          agent.role === 'police' || agent.role === 'child'
+            ? null
+            : agent.workSpot?.cubeId ?? null,
+        jobThemeId:
+          agent.role === 'police' || agent.role === 'child'
+            ? null
+            : agent.workSpot?.themeId ?? null,
+        wealth: 0,
+        attrs: {
+          physical: 50,
+          professional: 50,
+          social: 50,
+          health: 50,
+          intelligence: 50,
+        },
+        cvFiled: false,
+        housingRequestMonth: null,
+      };
+    }
+
+    const shift = getCitizenShift(citizen, view, this.lastStaffedSlots);
+    const phase = getSchedulePhase(citizen, view, this.lastStaffedSlots);
+    return {
+      phase,
+      isStudent: shift?.template === 'SCHOOL',
+      hasRealShift: shift !== null,
+    };
+  }
+
+  private tuckAgentIndoors(agent: LivingAgent): void {
+    const anchor =
+      agent.role === 'police' ? this.palaceSpot : agent.homeSpot;
+    agent.x = anchor.doorstep.x;
+    agent.z = anchor.doorstep.z;
+    const y = this.getLandHeight(agent.x, agent.z);
+    agent.group.position.set(agent.x, y, agent.z);
+    agent.group.scale.setScalar(1);
+    agent.group.visible = false;
+    agent.state = 'AT_HOME';
+    agent.stateTimer = 3.0;
+    agent.waypoints = [];
+    agent.waypointIdx = 0;
+    agent.activeBreakSpot = null;
+    agent.targetThemeId = 'house';
+    agent.activeFaceTarget = anchor.faceTarget;
+  }
+
+  private routeAgentHome(agent: LivingAgent): void {
+    if (agent.state === 'AT_HOME' && !agent.group.visible) {
+      agent.stateTimer = 3.0;
+      return;
+    }
+    if (agent.state === 'ENTERING_HOME' || agent.state === 'TO_HOME') {
+      return;
+    }
+    const anchor =
+      agent.role === 'police' ? this.palaceSpot : agent.homeSpot;
+    agent.activeBreakSpot = null;
+    agent.state = 'TO_HOME';
+    agent.stateTimer = 0;
+    this.routeAgentTo(
+      agent,
+      anchor.doorstep,
+      agent.role === 'police' ? 'palace' : 'house',
+      anchor.faceTarget,
+      anchor.cubeId,
+      anchor.approachOffset
+    );
+  }
+
+  private enforceScheduleTransition(agent: LivingAgent): void {
+    const { phase, isStudent, hasRealShift } = this.resolveAgentSchedule(agent);
+    agent.lastSchedulePhase = phase;
+
+    if (phase === 'sleep') {
+      if (agent.state === 'AT_HOME') {
+        this.tuckAgentIndoors(agent);
+      } else {
+        this.routeAgentHome(agent);
+      }
+      return;
+    }
+
+    if (phase === 'commute' || phase === 'working') {
+      if (isStudent && this.schoolSpots.length > 0) {
+        if (agent.state !== 'PLAYING' || agent.playKind !== 'school') {
+          this.ensureVisibleAtDoorstepIfLeavingHome(agent);
+          const s = this.schoolSpots[agent.id % this.schoolSpots.length];
+          agent.state = 'PLAYING';
+          agent.stateTimer = 0;
+          agent.playKind = 'school';
+          this.routeAgentTo(
+            agent,
+            s.doorstep,
+            'school',
+            s.faceTarget,
+            s.cubeId,
+            s.approachOffset
+          );
+        }
+        return;
+      }
+      if (hasRealShift && agent.workSpot) {
+        if (agent.state !== 'TO_WORK' && agent.state !== 'WORKING') {
+          this.ensureVisibleAtDoorstepIfLeavingHome(agent);
+          agent.activeBreakSpot = null;
+          agent.state = 'TO_WORK';
+          agent.stateTimer = 0;
+          agent.workSpotIdx = agent.id % agent.workSpot.workSpots.length;
+          const targetPt =
+            agent.workSpot.workSpots[agent.workSpotIdx] ??
+            agent.workSpot.doorstep;
+          this.routeAgentTo(
+            agent,
+            targetPt,
+            agent.workSpot.themeId,
+            agent.workSpot.faceTarget,
+            agent.workSpot.cubeId,
+            agent.workSpot.approachOffset
+          );
+        }
+        return;
+      }
+    }
+
+    if (phase === 'school' && this.schoolSpots.length > 0) {
+      if (agent.state !== 'PLAYING' || agent.playKind !== 'school') {
+        this.ensureVisibleAtDoorstepIfLeavingHome(agent);
+        const s = this.schoolSpots[agent.id % this.schoolSpots.length];
+        agent.state = 'PLAYING';
+        agent.stateTimer = 0;
+        agent.playKind = 'school';
+        this.routeAgentTo(
+          agent,
+          s.doorstep,
+          'school',
+          s.faceTarget,
+          s.cubeId,
+          s.approachOffset
+        );
+      }
+      return;
+    }
+
+    if (phase === 'home_morning' && hasRealShift) {
+      if (agent.state === 'AT_HOME') {
+        agent.stateTimer = 3.0;
+      } else {
+        this.routeAgentHome(agent);
+      }
+      return;
+    }
+
+    if (phase === 'evening' && (agent.state === 'WORKING' || agent.state === 'TO_WORK')) {
+      agent.stateTimer = 0;
+      this.assignNextRoutine(agent);
+    }
+  }
+
+  public setClockSeconds(secondsOfDay: number): void {
+    const prevMinute = Math.floor(this.clockSecondsOfDay / 60);
+    this.clockSecondsOfDay = secondsOfDay;
+    const nextMinute = Math.floor(this.clockSecondsOfDay / 60);
+    if (prevMinute === nextMinute) return;
+
+    for (let i = 0; i < this.agents.length; i++) {
+      const a = this.agents[i];
+      const { phase } = this.resolveAgentSchedule(a);
+      if (phase !== a.lastSchedulePhase) {
+        this.enforceScheduleTransition(a);
+      }
+    }
+  }
+
   private assignNextRoutine(agent: LivingAgent): void {
+    const { phase, isStudent, hasRealShift } = this.resolveAgentSchedule(agent);
+    agent.lastSchedulePhase = phase;
+
+    // Sleep (22:00–05:00 for all non-NIGHT citizens): remain indoors invisible, or walk straight home
+    if (phase === 'sleep') {
+      if (agent.state === 'AT_HOME') {
+        this.tuckAgentIndoors(agent);
+      } else {
+        this.routeAgentHome(agent);
+      }
+      return;
+    }
+
+    // Morning before shift for scheduled workers/students: remain resting at home until commute window
+    if (phase === 'home_morning' && hasRealShift) {
+      if (agent.state === 'AT_HOME') {
+        this.tuckAgentIndoors(agent);
+      } else {
+        this.routeAgentHome(agent);
+      }
+      return;
+    }
+
+    // Commute or active work shift for citizens with real registry jobs
+    if ((phase === 'commute' || phase === 'working') && hasRealShift && agent.workSpot && !isStudent) {
+      if (agent.state === 'WORKING') {
+        agent.stateTimer = 5.2 + Math.random() * 3.5;
+        return;
+      }
+      this.ensureVisibleAtDoorstepIfLeavingHome(agent);
+      agent.activeBreakSpot = null;
+      agent.state = 'TO_WORK';
+      agent.stateTimer = 0;
+      agent.workSpotIdx = agent.id % agent.workSpot.workSpots.length;
+      const targetPt = agent.workSpot.workSpots[agent.workSpotIdx] ?? agent.workSpot.doorstep;
+      this.routeAgentTo(
+        agent,
+        targetPt,
+        agent.workSpot.themeId,
+        agent.workSpot.faceTarget,
+        agent.workSpot.cubeId,
+        agent.workSpot.approachOffset
+      );
+      return;
+    }
+
+    // Student commute / active school hours when a staffed school exists
+    if ((phase === 'school' || (phase === 'commute' && isStudent)) && this.schoolSpots.length > 0) {
+      if (agent.state === 'PLAYING' && agent.playKind === 'school' && agent.waypoints.length === 0) {
+        agent.stateTimer = 4.0 + Math.random() * 2.5;
+        return;
+      }
+      this.ensureVisibleAtDoorstepIfLeavingHome(agent);
+      agent.activeBreakSpot = null;
+      const s = this.schoolSpots[agent.id % this.schoolSpots.length];
+      agent.state = 'PLAYING';
+      agent.stateTimer = 0;
+      agent.playKind = 'school';
+      this.routeAgentTo(
+        agent,
+        s.doorstep,
+        'school',
+        s.faceTarget,
+        s.cubeId,
+        s.approachOffset
+      );
+      return;
+    }
+
     this.ensureVisibleAtDoorstepIfLeavingHome(agent);
     agent.activeBreakSpot = null;
 
@@ -856,18 +1157,7 @@ export class PeopleAgentsManager {
     if (agent.role === 'child') {
       agent.state = 'PLAYING';
       const roll = Math.random();
-      if (this.schoolSpots.length > 0 && roll < 0.4) {
-        const s = this.schoolSpots[agent.id % this.schoolSpots.length];
-        agent.playKind = 'school';
-        this.routeAgentTo(
-          agent,
-          s.doorstep,
-          'school',
-          s.faceTarget,
-          s.cubeId,
-          s.approachOffset
-        );
-      } else if (this.gardenSpots.length > 0 && roll < 0.72) {
+      if (this.gardenSpots.length > 0 && roll < 0.55) {
         const g = this.gardenSpots[agent.id % this.gardenSpots.length];
         agent.playKind = 'garden';
         this.routeAgentTo(
@@ -923,23 +1213,9 @@ export class PeopleAgentsManager {
       return;
     }
 
-    // Workers with real staffed buildings: AT_HOME -> TO_WORK -> WORKING -> TO_BREAK -> ON_BREAK -> TO_HOME
-    if (agent.workSpot) {
-      if (agent.state === 'AT_HOME' || agent.state === 'WAITING') {
-        agent.state = 'TO_WORK';
-        agent.workSpotIdx = agent.id % agent.workSpot.workSpots.length;
-        const targetPt = agent.workSpot.workSpots[agent.workSpotIdx] ?? agent.workSpot.doorstep;
-        this.routeAgentTo(
-          agent,
-          targetPt,
-          agent.workSpot.themeId,
-          agent.workSpot.faceTarget,
-          agent.workSpot.cubeId,
-          agent.workSpot.approachOffset
-        );
-        return;
-      }
-      if (agent.state === 'WORKING') {
+    // Evening / post-work routine for workers (shift ended, before 22:00 sleep)
+    if (agent.workSpot && hasRealShift) {
+      if (agent.state === 'WORKING' || agent.state === 'AT_HOME' || agent.state === 'WAITING') {
         const b = this.pickNearestBreakSpot(agent.x, agent.z, false);
         agent.activeBreakSpot = b;
         agent.state = 'TO_BREAK';
@@ -953,21 +1229,19 @@ export class PeopleAgentsManager {
         );
         return;
       }
-      if (agent.state === 'ON_BREAK') {
-        agent.state = 'TO_HOME';
-        this.routeAgentTo(
-          agent,
-          agent.homeSpot.doorstep,
-          'house',
-          agent.homeSpot.faceTarget,
-          agent.homeSpot.cubeId,
-          agent.homeSpot.approachOffset
-        );
-        return;
-      }
+      agent.state = 'TO_HOME';
+      this.routeAgentTo(
+        agent,
+        agent.homeSpot.doorstep,
+        'house',
+        agent.homeSpot.faceTarget,
+        agent.homeSpot.cubeId,
+        agent.homeSpot.approachOffset
+      );
+      return;
     }
 
-    // General townsfolk (man / woman without assigned workplace)
+    // General townsfolk (unemployed adults without assigned workplace — never routed to a workplace)
     if (agent.state === 'AT_HOME' || agent.state === 'WAITING') {
       const b = this.pickNearestBreakSpot(agent.x, agent.z, false);
       agent.activeBreakSpot = b;
@@ -1000,11 +1274,28 @@ export class PeopleAgentsManager {
     staffedSlots: Set<string>,
     seaCoords: AnchorPoint[],
     camp?: ArrivalCamp,
-    citizens?: Citizen[]
+    citizens?: Citizen[],
+    clockSecondsOfDay?: number,
+    totalMonths?: number
   ): void {
     this.lastCubes = cubes;
+    this.lastPopulation = population;
     this.lastSatisfaction = satisfaction;
+    this.lastStaffedSlots = staffedSlots;
     this.seaCoords = seaCoords;
+    if (typeof clockSecondsOfDay === 'number' && Number.isFinite(clockSecondsOfDay)) {
+      this.clockSecondsOfDay = clockSecondsOfDay;
+    }
+    if (typeof totalMonths === 'number' && Number.isFinite(totalMonths)) {
+      this.totalMonths = totalMonths;
+    }
+    this.lastCitizens = citizens ?? [];
+    this.citizenById.clear();
+    if (citizens) {
+      for (let i = 0; i < citizens.length; i++) {
+        this.citizenById.set(citizens[i].id, citizens[i]);
+      }
+    }
     this.houseSpots = [];
     this.breakSpots = [];
     this.schoolSpots = [];
@@ -1148,39 +1439,110 @@ export class PeopleAgentsManager {
 
     // Visible agents capped at min(population, 36)
     const targetCount = Math.min(MAX_VISIBLE_AGENTS, Math.max(0, Math.floor(population)));
-    const desiredSpecs: Array<{ role: CitizenRoleId; workSpot: WorkAnchorSpot | null }> = [];
+    const campSet = new Set<number>(camp?.residentIds ?? []);
+    const availableCitizens = (citizens ?? []).filter((c) => !campSet.has(c.id));
+    const claimedCitizenIds = new Set<number>();
+
+    const claimCitizen = (predicate: (c: Citizen) => boolean): Citizen | null => {
+      for (let k = 0; k < availableCitizens.length; k++) {
+        const c = availableCitizens[k];
+        if (claimedCitizenIds.has(c.id)) continue;
+        if (predicate(c)) {
+          claimedCitizenIds.add(c.id);
+          return c;
+        }
+      }
+      return null;
+    };
+
+    const desiredSpecs: Array<{
+      role: CitizenRoleId;
+      workSpot: WorkAnchorSpot | null;
+      citizen: Citizen | null;
+    }> = [];
 
     // Internal security police officers (1-2 depending on population)
     if (targetCount >= 6) {
-      desiredSpecs.push({ role: 'police', workSpot: null });
+      desiredSpecs.push({ role: 'police', workSpot: null, citizen: null });
     }
     if (targetCount >= 22) {
-      desiredSpecs.push({ role: 'police', workSpot: null });
+      desiredSpecs.push({ role: 'police', workSpot: null, citizen: null });
     }
 
-    // Staffed workers
+    // Staffed workers — bound to real registry citizens employed at each exact cube + theme
     for (let i = 0; i < staffedWorkSlots.length; i++) {
       const ws = staffedWorkSlots[i];
       for (let k = 0; k < ws.count; k++) {
         if (desiredSpecs.length >= targetCount) break;
-        desiredSpecs.push({ role: ws.role, workSpot: ws.spot });
+        const bound = claimCitizen(
+          (c) =>
+            c.jobCubeId === ws.spot.cubeId &&
+            c.jobThemeId === ws.spot.themeId &&
+            ageYears(c, this.totalMonths) >= 14
+        );
+        desiredSpecs.push({ role: ws.role, workSpot: ws.spot, citizen: bound });
       }
       if (desiredSpecs.length >= targetCount) break;
     }
 
-    // Fill remaining visible citizens with diverse townsfolk (women, children, men, elders)
+    // Fill remaining visible citizens with real registry townsfolk (children, elders, unemployed adults)
     const familyCycle: CitizenRoleId[] = ['woman', 'child', 'man', 'woman', 'elder', 'child'];
     let cycleIdx = 0;
     while (desiredSpecs.length < targetCount) {
+      const preferredRole = familyCycle[cycleIdx % familyCycle.length];
+      let bound: Citizen | null = null;
+      let resolvedRole: CitizenRoleId = preferredRole;
+
+      if (preferredRole === 'child') {
+        bound = claimCitizen((c) => ageYears(c, this.totalMonths) < 14);
+      } else if (preferredRole === 'elder') {
+        bound = claimCitizen(
+          (c) => ageYears(c, this.totalMonths) >= 55 && c.jobCubeId === null
+        );
+      } else if (preferredRole === 'woman') {
+        bound = claimCitizen(
+          (c) =>
+            ageYears(c, this.totalMonths) >= 14 &&
+            c.gender === 'f' &&
+            c.jobCubeId === null
+        );
+      } else {
+        bound = claimCitizen(
+          (c) =>
+            ageYears(c, this.totalMonths) >= 14 &&
+            c.gender === 'm' &&
+            c.jobCubeId === null
+        );
+      }
+
+      if (!bound) {
+        bound = claimCitizen((c) => c.jobCubeId === null);
+        if (bound) {
+          const age = ageYears(bound, this.totalMonths);
+          resolvedRole =
+            age < 14
+              ? 'child'
+              : age >= 55
+                ? 'elder'
+                : bound.gender === 'f'
+                  ? 'woman'
+                  : 'man';
+        }
+      }
+
       desiredSpecs.push({
-        role: familyCycle[cycleIdx % familyCycle.length],
+        role: resolvedRole,
         workSpot: null,
+        citizen: bound,
       });
       cycleIdx += 1;
     }
 
     const roleSig = desiredSpecs
-      .map((s) => `${s.role}:${s.workSpot ? `${s.workSpot.cubeId}:${s.workSpot.doorstep.x.toFixed(1)},${s.workSpot.doorstep.z.toFixed(1)}` : '-'}`)
+      .map(
+        (s) =>
+          `${s.role}:${s.citizen ? s.citizen.id : '-'}:${s.workSpot ? `${s.workSpot.cubeId}:${s.workSpot.doorstep.x.toFixed(1)},${s.workSpot.doorstep.z.toFixed(1)}` : '-'}`
+      )
       .join('|');
     const gridSig = `${seaCoords.length}:${this.houseSpots.length}:${this.freeStreetCenters.length}`;
     const fullSig = `${roleSig}#${gridSig}`;
@@ -1202,14 +1564,24 @@ export class PeopleAgentsManager {
 
       for (let i = 0; i < targetCount; i++) {
         const spec = desiredSpecs[i];
+        const homeByCube =
+          spec.citizen && spec.citizen.homeCubeId !== null
+            ? this.houseSpots.find((h) => h.cubeId === spec.citizen!.homeCubeId) ?? null
+            : null;
         const home =
-          this.houseSpots.length > 0
+          homeByCube ??
+          (this.houseSpots.length > 0
             ? this.houseSpots[i % this.houseSpots.length]
-            : fallbackHome;
+            : fallbackHome);
 
         const existing = this.agents[i];
         if (existing) {
           existing.homeSpot = home;
+          existing.citizenId = spec.citizen?.id ?? null;
+          if (spec.citizen) {
+            existing.name = spec.citizen.name;
+            existing.isFemale = spec.citizen.gender === 'f';
+          }
           const workChanged =
             existing.workSpot?.cubeId !== spec.workSpot?.cubeId ||
             existing.workSpot?.themeId !== spec.workSpot?.themeId;
@@ -1244,11 +1616,14 @@ export class PeopleAgentsManager {
           if (existing.role !== spec.role) {
             this.group.remove(existing.group);
             existing.role = spec.role;
-            existing.isFemale =
-              spec.role === 'woman' || (spec.role === 'child' && existing.id % 2 === 1);
-            existing.name = existing.isFemale
-              ? FEMALE_NAMES[existing.id % FEMALE_NAMES.length]
-              : MALE_NAMES[existing.id % MALE_NAMES.length];
+            existing.isFemale = spec.citizen
+              ? spec.citizen.gender === 'f'
+              : spec.role === 'woman' || (spec.role === 'child' && existing.id % 2 === 1);
+            existing.name = spec.citizen
+              ? spec.citizen.name
+              : existing.isFemale
+                ? FEMALE_NAMES[existing.id % FEMALE_NAMES.length]
+                : MALE_NAMES[existing.id % MALE_NAMES.length];
             const baseSpeed = getBaseSpeedForRole(spec.role);
             const speedVar = 0.85 + deterministicUnit(existing.id * 7 + 3) * 0.3;
             existing.speed = baseSpeed * speedVar;
@@ -1282,11 +1657,14 @@ export class PeopleAgentsManager {
           }
         } else {
           const id = this.nextAgentId++;
-          const isFemale =
-            spec.role === 'woman' || (spec.role === 'child' && id % 2 === 1);
-          const name = isFemale
-            ? FEMALE_NAMES[id % FEMALE_NAMES.length]
-            : MALE_NAMES[id % MALE_NAMES.length];
+          const isFemale = spec.citizen
+            ? spec.citizen.gender === 'f'
+            : spec.role === 'woman' || (spec.role === 'child' && id % 2 === 1);
+          const name = spec.citizen
+            ? spec.citizen.name
+            : isFemale
+              ? FEMALE_NAMES[id % FEMALE_NAMES.length]
+              : MALE_NAMES[id % MALE_NAMES.length];
           const baseSpeed = getBaseSpeedForRole(spec.role);
           const speedVar = 0.85 + deterministicUnit(id * 7 + 3) * 0.3; // +-15%
 
@@ -1300,6 +1678,7 @@ export class PeopleAgentsManager {
 
           const agent: LivingAgent = {
             id,
+            citizenId: spec.citizen?.id ?? null,
             name,
             isFemale,
             role: spec.role,
@@ -1313,6 +1692,7 @@ export class PeopleAgentsManager {
             pathReachable: true,
             speed: baseSpeed * speedVar,
             state: 'AT_HOME',
+            lastSchedulePhase: 'home_morning',
             stateTimer: deterministicUnit(id * 11) * 1.2,
             enterDoorTimer: 0,
             enterStartX: startAnchor.x,
@@ -1332,6 +1712,15 @@ export class PeopleAgentsManager {
           };
           this.assignNextRoutine(agent);
           this.agents.push(agent);
+        }
+      }
+    } else {
+      // Even when roster signature is unchanged, ensure schedule phases stay aligned with latest clock
+      for (let i = 0; i < this.agents.length; i++) {
+        const a = this.agents[i];
+        const { phase } = this.resolveAgentSchedule(a);
+        if (phase !== a.lastSchedulePhase) {
+          this.enforceScheduleTransition(a);
         }
       }
     }
@@ -1536,6 +1925,31 @@ export class PeopleAgentsManager {
     };
   }
 
+  public getAgentSnapshots(): Array<{
+    id: number;
+    citizenId: number | null;
+    role: CitizenRoleId;
+    state: RoutineState;
+    visible: boolean;
+    phase: SchedulePhase;
+    workThemeId: ThemeId | null;
+    destinationAr: string;
+  }> {
+    return this.agents.map((a) => {
+      const info = this.getAgentInfo(a.id);
+      return {
+        id: a.id,
+        citizenId: a.citizenId,
+        role: a.role,
+        state: a.state,
+        visible: a.group.visible,
+        phase: this.resolveAgentSchedule(a).phase,
+        workThemeId: a.workSpot?.themeId ?? null,
+        destinationAr: info?.destinationAr ?? '',
+      };
+    });
+  }
+
   /**
    * Element 4.1: Truthful Arabic card text derived strictly from the agent's actual current leg,
    * target anchor theme, and current visibility/waiting state. Zero generic fallback.
@@ -1545,17 +1959,22 @@ export class PeopleAgentsManager {
       const a = this.agents[i];
       if (a.id !== agentId) continue;
 
+      const { phase } = this.resolveAgentSchedule(a);
       let destinationAr: string;
       switch (a.state) {
         case 'WAITING':
           destinationAr = WAITING_NO_PATH_TEXT;
           break;
         case 'AT_HOME':
-          destinationAr = AT_HOME_TEXT;
+          destinationAr =
+            phase === 'sleep' ? SLEEPING_AT_HOME_TEXT : AT_HOME_TEXT;
           break;
         case 'ENTERING_HOME':
         case 'TO_HOME':
-          destinationAr = THEME_GOING_TEXT.house;
+          destinationAr =
+            a.role === 'police'
+              ? THEME_GOING_TEXT.palace
+              : THEME_GOING_TEXT.house;
           break;
         case 'TO_WORK': {
           const workTheme: ThemeId = a.targetThemeId ?? a.workSpot?.themeId ?? 'palace';
@@ -1581,7 +2000,9 @@ export class PeopleAgentsManager {
           if (a.stateTimer > 0) {
             destinationAr =
               a.playKind === 'school'
-                ? 'يلعب عند مدخل المدرسة'
+                ? phase === 'school'
+                  ? 'يتعلّم في المدرسة'
+                  : 'يلعب عند مدخل المدرسة'
                 : a.playKind === 'garden'
                   ? 'يلعب بين أشجار الحديقة'
                   : 'يلعب قرب باب البيت';
@@ -1617,6 +2038,7 @@ export class PeopleAgentsManager {
       const mood = getMoodFromSatisfaction(this.lastSatisfaction);
       return {
         id: a.id,
+        citizenId: a.citizenId,
         name: a.name,
         role: a.role,
         roleLabelAr: ROLE_LABELS_AR[a.role],
@@ -1635,6 +2057,7 @@ export class PeopleAgentsManager {
       const mood = getMoodFromSatisfaction(this.lastSatisfaction);
       return {
         id: c.agentId,
+        citizenId: c.citizenId,
         name: c.name,
         role: c.role,
         roleLabelAr: ROLE_LABELS_AR[c.role],
@@ -1675,8 +2098,10 @@ export class PeopleAgentsManager {
           0,
           1
         );
-        const fx = a.homeSpot.faceTarget.x - a.enterStartX;
-        const fz = a.homeSpot.faceTarget.z - a.enterStartZ;
+        const doorAnchor =
+          a.role === 'police' ? this.palaceSpot : a.homeSpot;
+        const fx = doorAnchor.faceTarget.x - a.enterStartX;
+        const fz = doorAnchor.faceTarget.z - a.enterStartZ;
         const flen = Math.hypot(fx, fz) || 1;
         const stepIn = 0.55 * progress;
         const curX = a.enterStartX + (fx / flen) * stepIn;
@@ -1687,8 +2112,8 @@ export class PeopleAgentsManager {
         a.group.scale.setScalar(Math.max(0.05, 1 - progress * 0.95));
 
         if (a.enterDoorTimer <= 0) {
-          a.x = a.homeSpot.doorstep.x;
-          a.z = a.homeSpot.doorstep.z;
+          a.x = doorAnchor.doorstep.x;
+          a.z = doorAnchor.doorstep.z;
           a.group.position.set(a.x, groundY, a.z);
           a.group.scale.setScalar(1);
           a.group.visible = false;

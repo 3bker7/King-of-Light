@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import {
   Compass,
   Frown,
@@ -14,7 +15,13 @@ import {
   Users,
 } from 'lucide-react';
 import { countUnreadFaxes } from '../game/advisor';
-import { TICKS_PER_DAY, TRADED_RESOURCES } from '../game/constants';
+import {
+  CLOCK_CONSTANTS,
+  formatClock,
+  isNightMinute,
+  minuteOfDayOf,
+} from '../game/clock';
+import { TRADED_RESOURCES } from '../game/constants';
 import { STRINGS } from '../game/strings';
 import type { GameState } from '../game/types';
 import type { CloudSyncStatus } from '../net/worldTypes';
@@ -47,13 +54,20 @@ export function TopBar({
   onOpenBourse,
   onOpenSettings,
 }: TopBarProps) {
+  const [clockTipOpen, setClockTipOpen] = useState(false);
   const unreadFaxes = countUnreadFaxes(state.officeFaxes);
   const hasCriticalBrief = Boolean(
     state.advisorBriefing?.lines.some((l) => l.severity === 'critical')
   );
+  const minuteOfDay = minuteOfDayOf(state);
+  const clockText = formatClock(minuteOfDay);
+  const isNight = isNightMinute(minuteOfDay);
+  const clockTooltipAr = 'اليوم في المملكة = 8 ساعات حقيقية';
   const dayProgressPct = Math.min(
     100,
-    Math.round((state.tickInDay / TICKS_PER_DAY) * 100)
+    Math.round(
+      (state.clock.secondsOfDay / CLOCK_CONSTANTS.GAME_SECONDS_PER_DAY) * 100
+    )
   );
   const roundedRep = Math.round(state.reputation);
   const filledStars = Math.round((roundedRep / 100) * 5);
@@ -123,17 +137,60 @@ export function TopBar({
 
       {/* Left side (RTL end): Day, Satisfaction, Reputation, Bourse (L2), Settings */}
       <div className="flex items-center gap-2 shrink-0">
-        {/* Day Counter */}
-        <div className="flex flex-col items-center min-w-[48px] shrink-0">
-          <span className="text-[11px] font-extrabold text-[#FBF3DF] whitespace-nowrap leading-none">
-            {STRINGS.dayLabel(state.day)}
-          </span>
-          <div className="w-full h-1 bg-[#0B2E29] rounded-full overflow-hidden mt-1">
+        {/* Day Counter + Living Clock Readout (single source of truth: state.clock) */}
+        <div className="relative shrink-0">
+          <button
+            type="button"
+            onClick={() => setClockTipOpen((prev) => !prev)}
+            onBlur={() => setClockTipOpen(false)}
+            title={clockTooltipAr}
+            aria-label={`${STRINGS.dayLabel(state.day)} — ${clockText} — ${clockTooltipAr}`}
+            className="flex flex-col items-center px-2 py-1 rounded-lg bg-[#0E3A34]/75 hover:bg-[#0B2E29] border border-[#2C7268]/70 transition-colors shrink-0"
+          >
+            <div className="flex items-center gap-1.5 text-[11px] font-extrabold text-[#FBF3DF] whitespace-nowrap leading-none">
+              {isNight ? (
+                <svg
+                  viewBox="0 0 16 16"
+                  aria-hidden="true"
+                  className="w-3.5 h-3.5 text-[#A7D8CE] shrink-0"
+                  fill="currentColor"
+                >
+                  <path d="M11.8 10.6A5.2 5.2 0 0 1 5.4 4.2a5.3 5.3 0 0 1 .4-2A6 6 0 1 0 13.8 10.2a5.3 5.3 0 0 1-2 .4Z" />
+                </svg>
+              ) : (
+                <svg
+                  viewBox="0 0 16 16"
+                  aria-hidden="true"
+                  className="w-3.5 h-3.5 text-[#F2CA6B] shrink-0"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                >
+                  <circle cx="8" cy="8" r="3" fill="currentColor" stroke="none" />
+                  <path d="M8 1.6v1.6M8 12.8v1.6M1.6 8h1.6M12.8 8h1.6M3.5 3.5l1.1 1.1M11.4 11.4l1.1 1.1M12.5 3.5l-1.1 1.1M4.6 11.4l-1.1 1.1" />
+                </svg>
+              )}
+              <span className="hidden sm:inline">
+                {STRINGS.dayLabel(state.day)} —{' '}
+              </span>
+              <span className="tabular-nums-latin">{clockText}</span>
+            </div>
+            <div className="w-full h-1 bg-[#0B2E29] rounded-full overflow-hidden mt-1">
+              <div
+                className="h-full bg-[#C9962E] transition-[width] duration-300"
+                style={{ width: `${dayProgressPct}%` }}
+              />
+            </div>
+          </button>
+          {clockTipOpen && (
             <div
-              className="h-full bg-[#C9962E] transition-[width] duration-300"
-              style={{ width: `${dayProgressPct}%` }}
-            />
-          </div>
+              role="tooltip"
+              className="absolute left-0 top-full mt-1.5 z-40 px-2.5 py-1.5 rounded-lg bg-[#FBF3DF] border border-[#C9962E] text-[#2B2118] text-[11px] font-bold whitespace-nowrap shadow-md"
+            >
+              {clockTooltipAr}
+            </div>
+          )}
         </div>
 
         {/* Satisfaction Face Meter */}

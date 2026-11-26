@@ -1,5 +1,10 @@
-import { Compass, Frown, Meh, Navigation, Smile, User, X } from 'lucide-react';
-import type { ThemeId } from '../game/types';
+import { Clock, Compass, Frown, Meh, Navigation, Smile, User, X } from 'lucide-react';
+import { minuteOfDayOf } from '../game/clock';
+import {
+  formatCitizenScheduleLineAr,
+  SCHEDULE_CONSTANTS,
+} from '../game/schedules';
+import type { Citizen, GameState, ThemeId } from '../game/types';
 
 export type CitizenRoleId =
   | 'farmer'
@@ -17,6 +22,7 @@ export type CitizenRoleId =
 
 export interface CitizenInfo {
   id: number;
+  citizenId?: number | null;
   name: string;
   role: CitizenRoleId;
   roleLabelAr: string;
@@ -30,6 +36,8 @@ export interface CitizenInfo {
 
 interface CitizenCardProps {
   citizen: CitizenInfo;
+  state?: GameState;
+  staffedSlots?: Set<string>;
   isFollowing: boolean;
   onToggleFollow: () => void;
   onClose: () => void;
@@ -37,10 +45,77 @@ interface CitizenCardProps {
 
 export function CitizenCard({
   citizen,
+  state,
+  staffedSlots,
   isFollowing,
   onToggleFollow,
   onClose,
 }: CitizenCardProps) {
+  let scheduleLineAr: string | null = null;
+  if (state) {
+    const registryCitizen: Citizen | undefined =
+      typeof citizen.citizenId === 'number'
+        ? state.citizens.find((c) => c.id === citizen.citizenId)
+        : undefined;
+
+    if (registryCitizen) {
+      scheduleLineAr = formatCitizenScheduleLineAr(
+        registryCitizen,
+        state,
+        staffedSlots
+      );
+    } else if (citizen.role === 'police') {
+      const minute = minuteOfDayOf(state.clock);
+      const sleeping =
+        minute >= SCHEDULE_CONSTANTS.SLEEP_START_MINUTE ||
+        minute < SCHEDULE_CONSTANTS.SLEEP_END_MINUTE;
+      scheduleLineAr = sleeping
+        ? 'نائم في القصر — الحراسة 05:00–22:00'
+        : 'حراسة يومية 05:00–22:00';
+    } else {
+      const synthAge =
+        citizen.role === 'child' ? 9 : citizen.role === 'elder' ? 62 : 28;
+      const synthJobCube =
+        citizen.workThemeId !== null
+          ? state.cubes.find(
+              (c) =>
+                c.owner === 'player' &&
+                (c.themeId === citizen.workThemeId ||
+                  c.secondThemeId === citizen.workThemeId)
+            )?.id ?? null
+          : null;
+      const synthetic: Citizen = {
+        id: citizen.id,
+        name: citizen.name,
+        gender: citizen.role === 'woman' ? 'f' : 'm',
+        birthMonth: state.totalMonths - synthAge,
+        householdId: 0,
+        homeCubeId: null,
+        spouseId: null,
+        parentIds: null,
+        jobCubeId: citizen.role === 'child' ? null : synthJobCube,
+        jobThemeId:
+          citizen.role === 'child' || synthJobCube === null
+            ? null
+            : citizen.workThemeId,
+        wealth: 0,
+        attrs: {
+          physical: 50,
+          professional: 50,
+          social: 50,
+          health: 50,
+          intelligence: 50,
+        },
+        cvFiled: false,
+        housingRequestMonth: null,
+      };
+      scheduleLineAr = formatCitizenScheduleLineAr(
+        synthetic,
+        state,
+        staffedSlots
+      );
+    }
+  }
   const MoodIcon =
     citizen.moodTone === 'good'
       ? Smile
@@ -87,6 +162,16 @@ export function CitizenCard({
           <Navigation className="w-3.5 h-3.5 text-[#14524A] shrink-0 mt-0.5" />
           <span className="leading-snug">{citizen.destinationAr}</span>
         </div>
+
+        {scheduleLineAr && (
+          <div className="flex items-start gap-2 pt-1.5 border-t border-[#EFE3C5] text-xs font-bold text-[#4F3F2B]">
+            <Clock className="w-3.5 h-3.5 text-[#8A5F12] shrink-0 mt-0.5" />
+            <span className="leading-snug">
+              <span className="text-[#6F5C43]">جدوله اليوم: </span>
+              <span className="tabular-nums-latin">{scheduleLineAr}</span>
+            </span>
+          </div>
+        )}
 
         <div className="flex items-center gap-2 pt-1.5 border-t border-[#EFE3C5] text-xs font-bold">
           <MoodIcon className={`w-4 h-4 shrink-0 ${moodClass}`} />

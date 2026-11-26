@@ -87,8 +87,9 @@ export interface WorldSyncPayload {
   lastDefectedSeq?: number;
   // Prompt 8 Element N1.3: Hosted Embassy plots (presentation only)
   embassyPlots?: EmbassyPlotMarker[];
-  // V5 Prompt 1: Living Clock seconds of day (0..86399)
+  // V5 Prompt 1: Living Clock seconds of day (0..86399) + totalMonths for citizen schedule age
   clockSecondsOfDay?: number;
+  totalMonths?: number;
 }
 
 interface ProvinceFlagAnim {
@@ -1045,7 +1046,9 @@ export class WorldEngine {
       payload.staffedSlots,
       this.seaCoords,
       payload.camp,
-      payload.citizens
+      payload.citizens,
+      payload.clockSecondsOfDay,
+      payload.totalMonths
     );
     this.peopleAgents.setSelectedAgent(payload.selectedCitizenId);
     this.followAgentId = payload.followCitizenId;
@@ -2656,6 +2659,7 @@ export class WorldEngine {
       this.renderedClockSeconds = this.targetClockSeconds;
     }
     this.applySkyCycle(this.renderedClockSeconds);
+    this.peopleAgents.setClockSeconds(this.renderedClockSeconds);
 
     // Water shimmer texture scroll + soft foam pulse
     this.waterTexture.offset.x = (this.elapsedTime * 0.018) % 1;

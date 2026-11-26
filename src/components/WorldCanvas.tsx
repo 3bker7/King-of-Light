@@ -45,6 +45,7 @@ interface WorldCanvasProps {
   lastDefectedSeq: number;
   embassyPlots?: EmbassyPlotMarker[];
   clockSecondsOfDay?: number;
+  totalMonths?: number;
   resetSignal: number;
   onCubeClick: (cubeId: number) => void;
   onCitizenClick: (agentId: number) => void;
@@ -74,6 +75,7 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
       lastDefectedSeq,
       embassyPlots,
       clockSecondsOfDay,
+      totalMonths,
       resetSignal,
       onCubeClick,
       onCitizenClick,
@@ -112,6 +114,7 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
       lastDefectedSeq,
       embassyPlots,
       clockSecondsOfDay,
+      totalMonths,
     });
 
     const [webglError, setWebglError] = useState(false);
@@ -177,6 +180,7 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
         lastDefectedSeq,
         embassyPlots,
         clockSecondsOfDay,
+        totalMonths,
       });
     }, [
       cubes,
@@ -197,6 +201,7 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
       lastDefectedSeq,
       embassyPlots,
       clockSecondsOfDay,
+      totalMonths,
     ]);
 
     // Element 4.1: Smoothly refit camera ONLY when owned-cell count changes (purchases & village joins)

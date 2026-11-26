@@ -1789,6 +1789,7 @@ export default function App() {
             citizens={state.citizens}
             embassyPlots={state.embassyPlots}
             clockSecondsOfDay={state.clock.secondsOfDay}
+            totalMonths={state.totalMonths}
             lastJoinedVillageCubeId={state.lastJoinedVillageCubeId}
             lastJoinedVillageSeq={state.lastJoinedVillageSeq}
             lastDefectedCubeId={state.lastDefectedCubeId}

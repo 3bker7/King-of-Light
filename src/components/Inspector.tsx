@@ -27,6 +27,7 @@ import {
   computeMonthLedgerSummary,
   countUnreadFaxes,
 } from '../game/advisor';
+import { formatClock, minuteOfDayOf } from '../game/clock';
 import {
   MATERIAL_PRODUCER_THEME,
   THEMES,
@@ -661,6 +662,12 @@ export function Inspector({
               </span>
               <span className="font-extrabold text-[#2B2118] tabular-nums-latin">
                 {state.villagesJoined}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-2 pt-1 border-t border-[#EFE3C5]">
+              <span className="text-[#6F5C43] font-bold shrink-0">التوقيت</span>
+              <span className="font-extrabold text-[#14524A] tabular-nums-latin text-left">
+                {formatClock(minuteOfDayOf(state))} — الشروق 06:00 — الغروب 18:00
               </span>
             </div>
           </div>
@@ -1327,6 +1334,8 @@ export function Inspector({
       return (
         <CitizenCard
           citizen={selectedCitizen}
+          state={state}
+          staffedSlots={staffing.staffedSlots}
           isFollowing={isFollowingCitizen}
           onToggleFollow={onToggleFollowCitizen}
           onClose={onClose}

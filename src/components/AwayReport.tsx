@@ -1,5 +1,5 @@
 import { AlertTriangle, Clock, Coins, Flag, Globe, Landmark, ScrollText, TrendingUp, Users, Wallet } from 'lucide-react';
-import { MAX_OFFLINE_SECONDS, TRADED_RESOURCES } from '../game/constants';
+import { TRADED_RESOURCES } from '../game/constants';
 import { formatDurationArabic, STRINGS } from '../game/strings';
 import type { AwayReportData } from '../game/types';
 import { ResourceIcon } from './ResourceIcon';
@@ -13,7 +13,12 @@ export function AwayReport({ report, onClose }: AwayReportProps) {
   const producedEntries = TRADED_RESOURCES.filter(
     (key) => (report.resourcesProduced[key] ?? 0) > 0
   );
-  const wasCapped = report.elapsedSeconds >= MAX_OFFLINE_SECONDS;
+  // Honesty rule (S3): true ONLY when raw real absence strictly exceeded 90 game days (never on an exact 90-day absence)
+  const wasCapped = report.wasCapped === true;
+  const kingdomDaysLineAr =
+    report.daysElapsed > 0
+      ? `غبتَ ${report.daysElapsed} من أيام المملكة`
+      : 'غبتَ أقل من يوم من أيام المملكة';
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
@@ -22,16 +27,23 @@ export function AwayReport({ report, onClose }: AwayReportProps) {
           <div className="w-10 h-10 rounded-xl bg-[#14524A] text-[#F2CA6B] flex items-center justify-center shrink-0">
             <Clock className="w-5 h-5" />
           </div>
-          <div>
+          <div className="space-y-0.5">
             <h2 className="text-lg font-extrabold text-[#2B2118]">
               {STRINGS.modals.awayTitle}
             </h2>
             <p className="text-xs text-[#6F5C43]">
               {STRINGS.modals.awaySubtitle(
                 formatDurationArabic(report.elapsedSeconds)
-              )}{' '}
-              {wasCapped ? STRINGS.modals.awayCappedNote : ''}
+              )}
             </p>
+            <p className="text-xs font-extrabold text-[#14524A] tabular-nums-latin">
+              {kingdomDaysLineAr}
+            </p>
+            {wasCapped && (
+              <p className="text-[11px] font-bold text-[#8A5F12]">
+                مرّ وقت أطول، لكن المملكة انتظرتك 90 يوماً كحد أقصى
+              </p>
+            )}
           </div>
         </div>
 
