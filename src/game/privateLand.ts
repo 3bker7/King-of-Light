@@ -5,12 +5,18 @@ import {
   getTopAttribute,
   sumCitizenWealth,
 } from './citizens';
+import {
+  formatTransferLabelAr,
+  transferGold,
+  type GoldStateSlice,
+} from './goldLedger';
 import { findPalaceCube, getCubePurchasePrice } from './production';
 import type {
   Citizen,
   Cube,
   LandRequest,
   LedgerKind,
+  PalaceOfPeople,
   PoliceRecord,
   PriceMap,
   ThemeId,
@@ -100,6 +106,7 @@ export function processPrivateConstruction(input: {
   warehouse: Warehouse;
   prices: PriceMap;
   gold: number;
+  palaceOfPeople?: PalaceOfPeople;
   now?: number;
 }): {
   cubes: Cube[];
@@ -107,6 +114,7 @@ export function processPrivateConstruction(input: {
   warehouse: Warehouse;
   gold: number;
   citizenWealth: number;
+  palaceOfPeople: PalaceOfPeople;
   ledgerItems: PrivateLandLedgerItem[];
   importSink: number;
   builtCount: number;
@@ -114,22 +122,35 @@ export function processPrivateConstruction(input: {
 } {
   const now = input.now ?? Date.now();
   const nextCubes = input.cubes.map((c) => ({ ...c }));
-  const nextCitizens = input.citizens.map((c) => ({
-    ...c,
-    attrs: { ...c.attrs },
-    parentIds: c.parentIds ? ([c.parentIds[0], c.parentIds[1]] as [number, number]) : null,
-  }));
+  let goldSlice: GoldStateSlice = {
+    gold: Math.max(0, Math.floor(input.gold)),
+    citizens: input.citizens.map((c) => ({
+      ...c,
+      attrs: { ...c.attrs },
+      parentIds: c.parentIds ? ([c.parentIds[0], c.parentIds[1]] as [number, number]) : null,
+    })),
+    citizenWealth: sumCitizenWealth(input.citizens),
+    palaceOfPeople: {
+      gold: Math.max(0, Math.floor(input.palaceOfPeople?.gold ?? 0)),
+    },
+    peoplesBank: {
+      gold: 0,
+      portfolio: {},
+      totalTrades: 0,
+      lastTradeMonth: null,
+      lastTradeAr: null,
+    },
+    ledger: [],
+    day: 0,
+  };
   const nextWarehouse: Warehouse = { ...input.warehouse };
-  let nextGold = Math.max(0, Math.floor(input.gold));
   let importSink = 0;
   let builtCount = 0;
   let revertedCount = 0;
   const ledgerItems: PrivateLandLedgerItem[] = [];
 
-  const citizenById = new Map<number, Citizen>();
-  for (const c of nextCitizens) {
-    citizenById.set(c.id, c);
-  }
+  const getOwner = (id: number): Citizen | undefined =>
+    goldSlice.citizens?.find((c) => c.id === id);
 
   for (let i = 0; i < nextCubes.length; i++) {
     const cube = nextCubes[i];
@@ -137,7 +158,7 @@ export function processPrivateConstruction(input: {
     if (typeof cube.privateOwnerId !== 'number') continue;
     if (cube.themeId !== null || cube.secondThemeId !== null) continue;
 
-    const owner = citizenById.get(cube.privateOwnerId);
+    const owner = getOwner(cube.privateOwnerId);
     if (!owner) {
       // Owner no longer exists — revert safely to crown
       cube.privateOwnerId = null;
@@ -176,30 +197,61 @@ export function processPrivateConstruction(input: {
 
     const totalCost = goldCost + warehouseCharge + importCharge;
     if (owner.wealth >= totalCost) {
-      owner.wealth = Math.max(0, owner.wealth - totalCost);
-      for (const draw of matDraws) {
-        nextWarehouse[draw.res] = Math.max(
-          0,
-          (nextWarehouse[draw.res] ?? 0) - draw.qty
-        );
-      }
+      let nextSlice = goldSlice;
+      let paidOk = true;
       if (warehouseCharge > 0) {
-        nextGold += warehouseCharge;
-        ledgerItems.push({
-          kind: 'materials',
+        const txWh = transferGold(nextSlice, {
+          from: 'citizens',
+          to: 'treasury',
+          citizenId: owner.id,
           amount: warehouseCharge,
+          kind: 'materials',
           labelAr: 'خامات بناء خاص',
+          exact: true,
         });
+        paidOk = txWh.ok;
+        if (txWh.ok) nextSlice = txWh.state;
       }
-      importSink += importCharge;
+      const palaceAmount = goldCost + importCharge;
+      if (paidOk && palaceAmount > 0) {
+        const txPalace = transferGold(nextSlice, {
+          from: 'citizens',
+          to: 'palace',
+          citizenId: owner.id,
+          amount: palaceAmount,
+          kind: 'build',
+          labelAr: 'تكلفة بناء خاص واستيراد خامات',
+          exact: true,
+        });
+        paidOk = txPalace.ok;
+        if (txPalace.ok) nextSlice = txPalace.state;
+      }
 
-      cube.themeId = themeId;
-      cube.builtAt = now;
-      cube.progress = 0;
-      cube.shortage = null;
-      cube.privateIntendedTheme = null;
-      cube.privateBuildRetries = 0;
-      builtCount += 1;
+      if (paidOk) {
+        goldSlice = nextSlice;
+        for (const draw of matDraws) {
+          nextWarehouse[draw.res] = Math.max(
+            0,
+            (nextWarehouse[draw.res] ?? 0) - draw.qty
+          );
+        }
+        if (warehouseCharge > 0) {
+          ledgerItems.push({
+            kind: 'materials',
+            amount: warehouseCharge,
+            labelAr: formatTransferLabelAr('citizens', 'treasury', 'خامات بناء خاص'),
+          });
+        }
+        importSink += importCharge;
+
+        cube.themeId = themeId;
+        cube.builtAt = now;
+        cube.progress = 0;
+        cube.shortage = null;
+        cube.privateIntendedTheme = null;
+        cube.privateBuildRetries = 0;
+        builtCount += 1;
+      }
     } else {
       const retries = (cube.privateBuildRetries ?? 0) + 1;
       if (retries >= PRIVATE_BUILD_MAX_RETRIES) {
@@ -215,10 +267,11 @@ export function processPrivateConstruction(input: {
 
   return {
     cubes: nextCubes,
-    citizens: nextCitizens,
+    citizens: goldSlice.citizens ?? input.citizens,
     warehouse: nextWarehouse,
-    gold: nextGold,
-    citizenWealth: sumCitizenWealth(nextCitizens),
+    gold: goldSlice.gold,
+    citizenWealth: goldSlice.citizenWealth,
+    palaceOfPeople: goldSlice.palaceOfPeople,
     ledgerItems,
     importSink,
     builtCount,
@@ -495,11 +548,46 @@ export function resolveLandRequest(input: {
     };
   }
 
-  const nextCitizens = input.citizens.map((c) =>
-    c.id === citizen.id
-      ? { ...c, wealth: Math.max(0, c.wealth - req.price) }
-      : c
-  );
+  const slice: GoldStateSlice = {
+    gold: Math.max(0, Math.floor(input.gold)),
+    citizens: input.citizens,
+    citizenWealth: sumCitizenWealth(input.citizens),
+    palaceOfPeople: { gold: 0 },
+    peoplesBank: {
+      gold: 0,
+      portfolio: {},
+      totalTrades: 0,
+      lastTradeMonth: null,
+      lastTradeAr: null,
+    },
+    ledger: [],
+    day: 0,
+  };
+  const saleLabel = `بيع أرض للمواطن ${citizen.name}`;
+  const tx = transferGold(slice, {
+    from: 'citizens',
+    to: 'treasury',
+    citizenId: citizen.id,
+    amount: req.price,
+    kind: 'land',
+    labelAr: saleLabel,
+    exact: true,
+  });
+  if (!tx.ok) {
+    return {
+      cubes: input.cubes,
+      citizens: input.citizens,
+      landRequests: remainingRequests,
+      policeRecords: input.policeRecords,
+      gold: input.gold,
+      citizenWealth: sumCitizenWealth(input.citizens),
+      resolved: true,
+      approved: false,
+      ledgerItem: null,
+    };
+  }
+
+  const nextCitizens = tx.state.citizens ?? input.citizens;
 
   const nextCubes = input.cubes.map((c) =>
     c.id === cube.id
@@ -529,14 +617,14 @@ export function resolveLandRequest(input: {
     citizens: nextCitizens,
     landRequests: prunedRequests,
     policeRecords: [...input.policeRecords, policeRec],
-    gold: Math.max(0, input.gold) + req.price,
-    citizenWealth: sumCitizenWealth(nextCitizens),
+    gold: tx.state.gold,
+    citizenWealth: tx.state.citizenWealth,
     resolved: true,
     approved: true,
     ledgerItem: {
       kind: 'land',
-      amount: req.price,
-      labelAr: `بيع أرض للمواطن ${citizen.name}`,
+      amount: tx.moved,
+      labelAr: formatTransferLabelAr('citizens', 'treasury', saleLabel),
     },
   };
 }

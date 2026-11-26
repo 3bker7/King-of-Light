@@ -400,6 +400,7 @@ export interface ReconcileResult {
   policeRecords: PoliceRecord[];
   birthsCount: number;
   cvsFiledCount: number;
+  localEmigratedWealth: number;
 }
 
 function findEligibleBirthCouple(
@@ -494,11 +495,16 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
   const policeRecords: PoliceRecord[] = [...input.policeRecords];
   let birthsCount = 0;
   let cvsFiledCount = 0;
+  let localEmigratedWealth = 0;
 
-  const removeCitizensById = (idsToRemove: Set<number>) => {
+  const removeCitizensById = (idsToRemove: Set<number>, isExternalVisa = false) => {
     const leaving = list.filter((c) => idsToRemove.has(c.id));
     for (const remCitizen of leaving) {
-      nextCitizenWealth = Math.max(0, nextCitizenWealth - remCitizen.wealth);
+      const remWealth = Math.max(0, Math.floor(remCitizen.wealth));
+      nextCitizenWealth = Math.max(0, nextCitizenWealth - remWealth);
+      if (!isExternalVisa && remWealth > 0) {
+        localEmigratedWealth += remWealth;
+      }
       if (remCitizen.spouseId !== null && !idsToRemove.has(remCitizen.spouseId)) {
         const spouse = list.find((s) => s.id === remCitizen.spouseId);
         if (spouse) {
@@ -524,7 +530,7 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
 
   // Optional online visa departures (untouched in local mode)
   if (input.forcedEmigrateIds && input.forcedEmigrateIds.size > 0) {
-    removeCitizensById(new Set(input.forcedEmigrateIds));
+    removeCitizensById(new Set(input.forcedEmigrateIds), true);
   }
 
   // Optional online visa arrivals (untouched in local mode)
@@ -875,6 +881,7 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
     policeRecords,
     birthsCount,
     cvsFiledCount,
+    localEmigratedWealth,
   };
 }
 

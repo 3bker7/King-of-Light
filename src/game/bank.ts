@@ -1,4 +1,9 @@
 import { BASE_BUY_PRICES, TRADED_RESOURCES } from './constants';
+import {
+  formatTransferLabelAr,
+  transferGold,
+  type GoldStateSlice,
+} from './goldLedger';
 import { findPalaceCube, getCubePurchasePrice } from './production';
 import { STRINGS } from './strings';
 import type {
@@ -204,6 +209,15 @@ export function processBankMonth(
     bankTradesCount: 0,
   };
 
+  let goldSlice: GoldStateSlice = {
+    gold,
+    citizenWealth: 0,
+    palaceOfPeople,
+    peoplesBank,
+    ledger: [],
+    day: input.day,
+  };
+
   // 1. Process active loan installments
   const activeLoanIndex = bankLoans.findIndex((l) => l.status === 'active');
   if (activeLoanIndex !== -1) {
@@ -217,18 +231,31 @@ export function processBankMonth(
     const due = Math.min(loan.repayable - loan.paidSoFar, loan.deferredDue + scheduled);
 
     if (input.isOffline) {
-      if (gold >= due) {
-        gold -= due;
-        palaceOfPeople.gold += due;
+      if (goldSlice.gold >= due) {
+        if (due > 0) {
+          const tx = transferGold(goldSlice, {
+            from: 'treasury',
+            to: 'palace',
+            amount: due,
+            kind: 'trade',
+            labelAr: 'قسط تمويل البنك الشرعي',
+            exact: true,
+          });
+          if (tx.ok) {
+            goldSlice = tx.state;
+          }
+        }
         loan.paidSoFar += due;
         loan.deferredDue = 0;
         loan.monthsElapsed += 1;
         offlineStats.loanInstallmentsPaid += due;
-        ledgerItems.push({
-          kind: 'trade',
-          amount: -due,
-          labelAr: 'قسط تمويل البنك الشرعي',
-        });
+        if (due > 0) {
+          ledgerItems.push({
+            kind: 'trade',
+            amount: -due,
+            labelAr: formatTransferLabelAr('treasury', 'palace', 'قسط تمويل البنك الشرعي'),
+          });
+        }
         if (loan.paidSoFar >= loan.repayable) {
           loan.status = 'repaid';
           bankTrust = Math.min(100, bankTrust + TRUST_DELTA_REPAID);
@@ -250,17 +277,30 @@ export function processBankMonth(
       }
     } else {
       // Active play month
-      if (gold >= due) {
-        gold -= due;
-        palaceOfPeople.gold += due;
+      if (goldSlice.gold >= due) {
+        if (due > 0) {
+          const tx = transferGold(goldSlice, {
+            from: 'treasury',
+            to: 'palace',
+            amount: due,
+            kind: 'trade',
+            labelAr: 'قسط تمويل البنك الشرعي',
+            exact: true,
+          });
+          if (tx.ok) {
+            goldSlice = tx.state;
+          }
+        }
         loan.paidSoFar += due;
         loan.deferredDue = 0;
         loan.monthsElapsed += 1;
-        ledgerItems.push({
-          kind: 'trade',
-          amount: -due,
-          labelAr: 'قسط تمويل البنك الشرعي',
-        });
+        if (due > 0) {
+          ledgerItems.push({
+            kind: 'trade',
+            amount: -due,
+            labelAr: formatTransferLabelAr('treasury', 'palace', 'قسط تمويل البنك الشرعي'),
+          });
+        }
         if (loan.paidSoFar >= loan.repayable) {
           loan.status = 'repaid';
           bankTrust = Math.min(100, bankTrust + TRUST_DELTA_REPAID);
@@ -323,33 +363,93 @@ export function processBankMonth(
     }
   }
 
-  // 2. People's Bank monthly bourse trading (B3)
+  // 2. People's Bank monthly bourse trading (B3) — settled against Palace of the People via transferGold
   const trades: string[] = [];
   for (const res of TRADED_RESOURCES) {
     const base = BASE_BUY_PRICES[res];
     if (typeof base !== 'number') continue;
     const price = input.prices[res] ?? base;
-    const currentPortfolio = peoplesBank.portfolio[res] ?? 0;
+    const currentPortfolio = goldSlice.peoplesBank.portfolio[res] ?? 0;
     const buyThreshold = 0.85 * base;
     const sellThreshold = 1.20 * base;
 
     if (
       price <= buyThreshold &&
-      peoplesBank.gold - 10 * price > BANK_RESERVE_FLOOR &&
+      goldSlice.peoplesBank.gold - BANK_TRADE_UNITS * price > BANK_RESERVE_FLOOR &&
       currentPortfolio < BANK_PORTFOLIO_CAP
     ) {
-      peoplesBank.gold -= 10 * price;
-      peoplesBank.portfolio[res] = currentPortfolio + BANK_TRADE_UNITS;
-      dailyBought[res] = (dailyBought[res] ?? 0) + BANK_TRADE_UNITS;
-      trades.push(`اشترى 10 ${STRINGS.resources[res] ?? res}`);
+      const cost = BANK_TRADE_UNITS * price;
+      const tx = transferGold(goldSlice, {
+        from: 'bank',
+        to: 'palace',
+        amount: cost,
+        kind: 'trade',
+        labelAr: `شراء بنك الشعب ${BANK_TRADE_UNITS} ${STRINGS.resources[res] ?? res}`,
+        exact: true,
+      });
+      if (tx.ok) {
+        goldSlice = {
+          ...tx.state,
+          peoplesBank: {
+            ...tx.state.peoplesBank,
+            portfolio: {
+              ...tx.state.peoplesBank.portfolio,
+              [res]: currentPortfolio + BANK_TRADE_UNITS,
+            },
+          },
+        };
+        dailyBought[res] = (dailyBought[res] ?? 0) + BANK_TRADE_UNITS;
+        trades.push(`اشترى ${BANK_TRADE_UNITS} ${STRINGS.resources[res] ?? res}`);
+      }
     } else if (price >= sellThreshold && currentPortfolio >= BANK_TRADE_UNITS) {
-      const proceeds = BANK_TRADE_UNITS * Math.round(price * 0.7);
-      peoplesBank.gold += proceeds;
-      peoplesBank.portfolio[res] = currentPortfolio - BANK_TRADE_UNITS;
-      dailySold[res] = (dailySold[res] ?? 0) + BANK_TRADE_UNITS;
-      trades.push(`باع 10 ${STRINGS.resources[res] ?? res}`);
+      const unitSell = Math.round(price * 0.7);
+      const maxUnitsByPalace =
+        unitSell > 0
+          ? Math.floor(goldSlice.palaceOfPeople.gold / unitSell)
+          : BANK_TRADE_UNITS;
+      const unitsToSell = Math.min(
+        BANK_TRADE_UNITS,
+        currentPortfolio,
+        maxUnitsByPalace
+      );
+      if (unitsToSell > 0) {
+        const proceeds = unitsToSell * unitSell;
+        let settledOk = true;
+        if (proceeds > 0) {
+          const tx = transferGold(goldSlice, {
+            from: 'palace',
+            to: 'bank',
+            amount: proceeds,
+            kind: 'trade',
+            labelAr: `بيع بنك الشعب ${unitsToSell} ${STRINGS.resources[res] ?? res}`,
+            exact: true,
+          });
+          settledOk = tx.ok;
+          if (tx.ok) {
+            goldSlice = tx.state;
+          }
+        }
+        if (settledOk) {
+          goldSlice = {
+            ...goldSlice,
+            peoplesBank: {
+              ...goldSlice.peoplesBank,
+              portfolio: {
+                ...goldSlice.peoplesBank.portfolio,
+                [res]: currentPortfolio - unitsToSell,
+              },
+            },
+          };
+          dailySold[res] = (dailySold[res] ?? 0) + unitsToSell;
+          trades.push(`باع ${unitsToSell} ${STRINGS.resources[res] ?? res}`);
+        }
+      }
     }
   }
+
+  gold = goldSlice.gold;
+  palaceOfPeople = goldSlice.palaceOfPeople;
+  peoplesBank = { ...goldSlice.peoplesBank };
 
   if (trades.length > 0) {
     peoplesBank.lastTradeAr = trades.join('، ');
@@ -485,22 +585,23 @@ export function executeTakeLoan(
     uniqueIds.has(c.id) ? { ...c, collateralLoanId: loanId } : c
   );
 
-  const nextLedger: LedgerEntry = {
-    id: `tx-loan-${state.day}-${Date.now()}`,
-    day: state.day,
-    kind: 'trade',
+  const tx = transferGold(state, {
+    from: 'palace',
+    to: 'treasury',
     amount: principal,
+    kind: 'trade',
     labelAr: 'تمويل البنك الشرعي',
-  };
+    exact: true,
+  });
+  if (!tx.ok) {
+    return { state, success: false, errorAr: 'سيولة قصر الشعب غير كافية لتقديم هذا التمويل' };
+  }
 
   return {
     state: {
-      ...state,
+      ...tx.state,
       cubes: nextCubes,
-      gold: state.gold + principal,
-      palaceOfPeople: { gold: state.palaceOfPeople.gold - principal },
       bankLoans: [...state.bankLoans, newLoan],
-      ledger: [...state.ledger, nextLedger],
     },
     success: true,
   };
@@ -539,23 +640,28 @@ export function executeRepayLoanFull(state: GameState): {
       : l
   );
 
-  const nextLedger: LedgerEntry = {
-    id: `tx-repay-${state.day}-${Date.now()}`,
-    day: state.day,
-    kind: 'trade',
-    amount: -remaining,
-    labelAr: 'سداد كامل مبكر لتمويل البنك الشرعي',
-  };
+  let nextState = state;
+  if (remaining > 0) {
+    const tx = transferGold(state, {
+      from: 'treasury',
+      to: 'palace',
+      amount: remaining,
+      kind: 'trade',
+      labelAr: 'سداد كامل مبكر لتمويل البنك الشرعي',
+      exact: true,
+    });
+    if (!tx.ok) {
+      return { state, success: false, errorAr: 'الذهب غير كافٍ لسداد كامل التمويل' };
+    }
+    nextState = tx.state;
+  }
 
   return {
     state: {
-      ...state,
+      ...nextState,
       cubes: nextCubes,
-      gold: state.gold - remaining,
-      palaceOfPeople: { gold: state.palaceOfPeople.gold + remaining },
       bankTrust: Math.min(100, state.bankTrust + TRUST_DELTA_REPAID),
       bankLoans: updatedLoans,
-      ledger: [...state.ledger, nextLedger],
     },
     success: true,
   };
@@ -587,24 +693,22 @@ export function executeBuybackCube(
       : c
   );
 
-  const nextLedger: LedgerEntry = {
-    id: `tx-buyback-${state.day}-${Date.now()}`,
-    day: state.day,
+  const tx = transferGold(state, {
+    from: 'treasury',
+    to: 'bank',
+    amount: askPrice,
     kind: 'land',
-    amount: -askPrice,
     labelAr: 'استرداد أرض من بنك الشعب',
-  };
+    exact: true,
+  });
+  if (!tx.ok) {
+    return { state, success: false, errorAr: 'الذهب غير كافٍ لاسترداد الأرض' };
+  }
 
   return {
     state: {
-      ...state,
+      ...tx.state,
       cubes: nextCubes,
-      gold: state.gold - askPrice,
-      peoplesBank: {
-        ...state.peoplesBank,
-        gold: state.peoplesBank.gold + askPrice,
-      },
-      ledger: [...state.ledger, nextLedger],
     },
     success: true,
   };

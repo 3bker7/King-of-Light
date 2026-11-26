@@ -46,7 +46,6 @@ import {
 } from '../game/people';
 import {
   getCubePurchasePrice,
-  getGoldServiceAuraBonus,
   getManhattanDistanceToPalace,
   getSeaFishOutput,
   isAdjacentToOwned,
@@ -201,10 +200,11 @@ function SlotCard({
   const unstaffed = def.workers > 0 && !isStaffed;
 
   const seaStats = themeId === 'sea' ? getSeaFishOutput(allCubes, cube) : null;
-  const auraBonus =
-    def.goldPerCycle !== undefined
-      ? getGoldServiceAuraBonus(allCubes, cube, themeId)
-      : 0;
+  const isCommercialVenue =
+    themeId === 'shop' ||
+    themeId === 'restaurant' ||
+    themeId === 'cafe' ||
+    themeId === 'hotel';
 
   const missingRes = shortage ? getShortageResource(shortage) : null;
   const producerTheme = missingRes ? MATERIAL_PRODUCER_THEME[missingRes] : undefined;
@@ -267,17 +267,15 @@ function SlotCard({
           <div>{STRINGS.inspector.houseCapacityLabel(def.shelters)}</div>
         )}
 
-        {themeId === 'shop' && def.goldPerCycle && (
-          <div>{STRINGS.inspector.shopOutputPerCycle(def.goldPerCycle)}</div>
+        {isCommercialVenue && (
+          <div className="font-bold text-[#4F3F2B]">
+            الدخل من مشتريات المواطنين
+          </div>
         )}
 
-        {themeId !== 'shop' && def.goldPerCycle && (
-          <div>{STRINGS.inspector.goldOutputPerCycle(def.goldPerCycle)}</div>
-        )}
-
-        {auraBonus > 0 && (
-          <div className="text-[11px] font-bold text-[#14524A] mt-0.5">
-            {STRINGS.inspector.logisticsBonusNote(Math.round(auraBonus * 100))}
+        {themeId === 'hotel' && (
+          <div className="text-[11px] text-[#6F5C43] mt-0.5">
+            نظام النزلاء الكامل قادم — الدخل حالياً من إقامات المواطنين الأثرياء فقط
           </div>
         )}
       </div>
@@ -1219,7 +1217,7 @@ export function Inspector({
                   >
                     <div className="flex items-center gap-1.5 min-w-0">
                       <span className="text-[10px] font-bold text-[#7C684C] shrink-0 tabular-nums-latin">
-                        ي{entry.day}
+                        {entry.day === 0 ? 'تأسيس' : `ي${entry.day}`}
                       </span>
                       <span className="font-bold text-[#2B2118] truncate">
                         {entry.labelAr}

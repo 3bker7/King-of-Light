@@ -126,10 +126,14 @@ export function rolloverBoursePrices(
 
 export interface TradeResult {
   gold: number;
+  palaceGold: number;
   warehouse: Warehouse;
   dailyBought: TradeVolumeMap;
   dailySold: TradeVolumeMap;
   tradedQty: number;
+  requestedQty: number;
+  totalGoldMoved: number;
+  palaceLimited: boolean;
 }
 
 export function executeTrade(
@@ -142,7 +146,8 @@ export function executeTrade(
   resource: TradedResourceKey,
   side: 'buy' | 'sell',
   quantity: number | 'max',
-  maxQuantityCap?: number
+  maxQuantityCap?: number,
+  palaceGold?: number
 ): TradeResult {
   const nextWarehouse: Warehouse = { ...warehouse };
   const nextBought: TradeVolumeMap = { ...dailyBought };
@@ -150,6 +155,11 @@ export function executeTrade(
   const hasCap =
     typeof maxQuantityCap === 'number' && Number.isFinite(maxQuantityCap);
   const cap = hasCap ? Math.max(0, Math.floor(maxQuantityCap)) : Infinity;
+  const hasPalaceFund =
+    typeof palaceGold === 'number' && Number.isFinite(palaceGold);
+  const safePalaceGold = hasPalaceFund
+    ? Math.max(0, Math.floor(palaceGold))
+    : Infinity;
 
   if (side === 'buy') {
     const unitPrice = getEffectiveBuyPrice(prices[resource], cubes);
@@ -157,16 +167,20 @@ export function executeTrade(
     const rawQty =
       quantity === 'max'
         ? maxAffordable
-        : Math.max(0, Math.min(quantity, maxAffordable));
+        : Math.max(0, Math.min(Math.floor(quantity), maxAffordable));
     const actualQty = Math.min(rawQty, cap);
 
     if (actualQty <= 0) {
       return {
         gold,
+        palaceGold: hasPalaceFund ? safePalaceGold : 0,
         warehouse: nextWarehouse,
         dailyBought: nextBought,
         dailySold: nextSold,
         tradedQty: 0,
+        requestedQty: 0,
+        totalGoldMoved: 0,
+        palaceLimited: false,
       };
     }
 
@@ -176,38 +190,61 @@ export function executeTrade(
 
     return {
       gold: Math.max(0, gold - totalCost),
+      palaceGold: hasPalaceFund ? safePalaceGold + totalCost : totalCost,
       warehouse: nextWarehouse,
       dailyBought: nextBought,
       dailySold: nextSold,
       tradedQty: actualQty,
+      requestedQty: actualQty,
+      totalGoldMoved: totalCost,
+      palaceLimited: false,
     };
   }
 
-  // Sell
+  // Sell — settled against Palace of the People fund (capped by floor(palaceGold / unitSellPrice))
   const unitSellPrice = getSellPrice(prices[resource], cubes);
-  const inStock = Math.max(0, warehouse[resource] ?? 0);
+  const inStock = Math.max(0, Math.floor(warehouse[resource] ?? 0));
   const rawQty =
-    quantity === 'max' ? inStock : Math.max(0, Math.min(quantity, inStock));
-  const actualQty = Math.min(rawQty, cap);
+    quantity === 'max'
+      ? inStock
+      : Math.max(0, Math.min(Math.floor(quantity), inStock));
+  const requestedQty = Math.min(rawQty, cap);
+  const maxFundQty =
+    unitSellPrice > 0
+      ? hasPalaceFund
+        ? Math.floor(safePalaceGold / unitSellPrice)
+        : Infinity
+      : requestedQty;
+  const filledQty = Math.min(requestedQty, maxFundQty);
+  const palaceLimited = requestedQty > 0 && filledQty < requestedQty;
 
-  if (actualQty <= 0) {
+  if (filledQty <= 0) {
     return {
       gold,
+      palaceGold: hasPalaceFund ? safePalaceGold : 0,
       warehouse: nextWarehouse,
       dailyBought: nextBought,
       dailySold: nextSold,
       tradedQty: 0,
+      requestedQty,
+      totalGoldMoved: 0,
+      palaceLimited,
     };
   }
 
-  nextWarehouse[resource] = Math.max(0, (nextWarehouse[resource] ?? 0) - actualQty);
-  nextSold[resource] = (nextSold[resource] ?? 0) + actualQty;
+  const proceeds = filledQty * unitSellPrice;
+  nextWarehouse[resource] = Math.max(0, (nextWarehouse[resource] ?? 0) - filledQty);
+  nextSold[resource] = (nextSold[resource] ?? 0) + filledQty;
 
   return {
-    gold: Math.max(0, gold + actualQty * unitSellPrice),
+    gold: Math.max(0, gold + proceeds),
+    palaceGold: hasPalaceFund ? Math.max(0, safePalaceGold - proceeds) : 0,
     warehouse: nextWarehouse,
     dailyBought: nextBought,
     dailySold: nextSold,
-    tradedQty: actualQty,
+    tradedQty: filledQty,
+    requestedQty,
+    totalGoldMoved: proceeds,
+    palaceLimited,
   };
 }

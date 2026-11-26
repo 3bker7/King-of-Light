@@ -1,4 +1,10 @@
 import { ageYears, sumCitizenWealth } from './citizens';
+import {
+  formatTransferLabelAr,
+  transferGold,
+  type CitizenGoldShare,
+  type GoldStateSlice,
+} from './goldLedger';
 import { getTotalFood } from './people';
 import { computeStaffing, makeSlotKey } from './production';
 import type {
@@ -149,19 +155,23 @@ function getOrderedHouseholdPayers(
   return ordered;
 }
 
-function deductSequentially(payers: Citizen[], amount: number): number {
+function buildSequentialShares(
+  payers: Citizen[],
+  amount: number
+): { shares: CitizenGoldShare[]; total: number } {
   let remaining = Math.max(0, Math.floor(amount));
-  let deducted = 0;
+  let total = 0;
+  const shares: CitizenGoldShare[] = [];
   for (const p of payers) {
     if (remaining <= 0) break;
     const take = Math.min(Math.max(0, Math.floor(p.wealth)), remaining);
     if (take > 0) {
-      p.wealth = Math.max(0, p.wealth - take);
-      deducted += take;
+      shares.push({ citizenId: p.id, amount: take });
+      total += take;
       remaining -= take;
     }
   }
-  return deducted;
+  return { shares, total };
 }
 
 // Element 2: Monthly citizen spending engine (runs AFTER payroll inside monthlyProcessor).
@@ -196,17 +206,34 @@ export function runCitizenSpending(
   }
 
   const nextWarehouse: Warehouse = { ...input.warehouse };
-  const nextCitizens: Citizen[] = input.citizens.map((c) => ({
+  const initialCitizens: Citizen[] = input.citizens.map((c) => ({
     ...c,
     wealth: Math.max(0, Math.floor(c.wealth)),
     attrs: { ...c.attrs },
     parentIds: c.parentIds ? ([c.parentIds[0], c.parentIds[1]] as [number, number]) : null,
   }));
 
-  const citizenById = new Map<number, Citizen>();
-  for (const c of nextCitizens) {
-    citizenById.set(c.id, c);
-  }
+  let goldSlice: GoldStateSlice = {
+    gold: Math.max(0, Math.floor(input.gold)),
+    citizens: initialCitizens,
+    citizenWealth: sumCitizenWealth(initialCitizens),
+    palaceOfPeople: { gold: currentPalaceGold },
+    peoplesBank: {
+      gold: 0,
+      portfolio: {},
+      totalTrades: 0,
+      lastTradeMonth: null,
+      lastTradeAr: null,
+    },
+    ledger: [],
+    day: 0,
+  };
+
+  const getCitizens = (): Citizen[] => goldSlice.citizens ?? [];
+  const citizenIdSet = new Set<number>(initialCitizens.map((c) => c.id));
+  const citizenById = {
+    has: (id: number) => citizenIdSet.has(id),
+  };
 
   const staffedSlots =
     input.staffedSlots ?? computeStaffing(input.cubes, input.population).staffedSlots;
@@ -275,7 +302,6 @@ export function runCitizenSpending(
   }
 
   const stats = createZeroLastMonthStats();
-  let nextGold = Math.max(0, Math.floor(input.gold));
   let totalCitizenSpent = 0;
   let treasuryFoodGain = 0;
   let treasuryLeisureGain = 0;
@@ -291,18 +317,20 @@ export function runCitizenSpending(
     hasStaffedFoodSeller && getTotalFood(nextWarehouse) >= input.population;
   const usedImports = !domesticAvailable;
 
-  // Group citizens by household deterministically
-  const households = new Map<number, Citizen[]>();
-  for (const c of nextCitizens) {
-    const arr = households.get(c.householdId);
-    if (arr) arr.push(c);
-    else households.set(c.householdId, [c]);
+  // Group citizen ids by household deterministically
+  const householdIdsMap = new Map<number, number[]>();
+  for (const c of getCitizens()) {
+    const arr = householdIdsMap.get(c.householdId);
+    if (arr) arr.push(c.id);
+    else householdIdsMap.set(c.householdId, [c.id]);
   }
-  const sortedHouseholds = Array.from(households.entries()).sort(
+  const sortedHouseholds = Array.from(householdIdsMap.entries()).sort(
     (a, b) => a[0] - b[0]
   );
 
-  for (const [, members] of sortedHouseholds) {
+  for (const [, memberIds] of sortedHouseholds) {
+    const memberSet = new Set(memberIds);
+    const members = getCitizens().filter((c) => memberSet.has(c.id));
     const householdSize = members.length;
     if (householdSize <= 0) continue;
 
@@ -322,8 +350,22 @@ export function runCitizenSpending(
       if (boughtUnits > 0) {
         const actuallyConsumed = consumeDomesticFoodUnits(nextWarehouse, boughtUnits);
         const due = actuallyConsumed * unitCost;
-        const paid = deductSequentially(payers, due);
-        nextGold += paid;
+        const { shares, total } = buildSequentialShares(payers, due);
+        let paid = 0;
+        if (total > 0 && shares.length > 0) {
+          const tx = transferGold(goldSlice, {
+            from: 'citizens',
+            to: 'treasury',
+            amount: total,
+            citizenShares: shares,
+            kind: 'shop',
+            labelAr: 'مبيعات غذاء للمواطنين',
+          });
+          if (tx.ok) {
+            goldSlice = tx.state;
+            paid = tx.moved;
+          }
+        }
         treasuryFoodGain += paid;
         stats.foodRevenue += paid;
         totalCitizenSpent += paid;
@@ -333,10 +375,25 @@ export function runCitizenSpending(
         stats.unmetFood += householdSize;
       }
     } else {
-      // Imports: cost * 1.5 rounded; gold leaves kingdom (importSink); no warehouse/treasury change
+      // Imports: cost * 1.5 rounded; routed from citizens -> palace via transferGold
       const fullHouseholdCost = Math.round(householdSize * unitCost * 1.5);
       if (totalPayerWealth >= fullHouseholdCost) {
-        const paid = deductSequentially(payers, fullHouseholdCost);
+        const { shares, total } = buildSequentialShares(payers, fullHouseholdCost);
+        let paid = 0;
+        if (total > 0 && shares.length > 0) {
+          const tx = transferGold(goldSlice, {
+            from: 'citizens',
+            to: 'palace',
+            amount: total,
+            citizenShares: shares,
+            kind: 'shop',
+            labelAr: 'استيراد غذاء للمواطنين',
+          });
+          if (tx.ok) {
+            goldSlice = tx.state;
+            paid = tx.moved;
+          }
+        }
         stats.importSink += paid;
         totalCitizenSpent += paid;
         importedFoodUnits += householdSize;
@@ -347,7 +404,25 @@ export function runCitizenSpending(
           Math.floor(totalPayerWealth / importUnitCost)
         );
         if (boughtUnits > 0) {
-          const paid = deductSequentially(payers, boughtUnits * importUnitCost);
+          const { shares, total } = buildSequentialShares(
+            payers,
+            boughtUnits * importUnitCost
+          );
+          let paid = 0;
+          if (total > 0 && shares.length > 0) {
+            const tx = transferGold(goldSlice, {
+              from: 'citizens',
+              to: 'palace',
+              amount: total,
+              citizenShares: shares,
+              kind: 'shop',
+              labelAr: 'استيراد غذاء للمواطنين',
+            });
+            if (tx.ok) {
+              goldSlice = tx.state;
+              paid = tx.moved;
+            }
+          }
           stats.importSink += paid;
           totalCitizenSpent += paid;
           importedFoodUnits += boughtUnits;
@@ -371,41 +446,82 @@ export function runCitizenSpending(
   };
 
   const applyLeisureSpend = (
-    citizen: Citizen,
+    citizenId: number,
     venue: StaffedVenueSlot,
     price: number
   ): boolean => {
+    const citizen = getCitizens().find((c) => c.id === citizenId);
+    if (!citizen) return false;
     const spend = Math.min(citizen.wealth, price);
     if (spend < price || spend <= 0) return false;
 
-    citizen.wealth = Math.max(0, citizen.wealth - spend);
-    venue.remainingCap -= 1;
-    totalCitizenSpent += spend;
-
     const ownerShare = Math.floor(spend * 0.7);
     const sinkShare = spend - ownerShare;
-    stats.leisureSink += sinkShare;
+    const ownerExists =
+      venue.ownerId !== null && getCitizens().some((c) => c.id === venue.ownerId);
 
-    if (venue.ownerId !== null) {
-      const owner = citizenById.get(venue.ownerId);
-      if (owner) {
-        owner.wealth += ownerShare;
+    // 1. Transfer 30% leisure sink: citizens -> palace via transferGold
+    let nextSlice = goldSlice;
+    if (sinkShare > 0) {
+      const txSink = transferGold(nextSlice, {
+        from: 'citizens',
+        to: 'palace',
+        citizenId,
+        amount: sinkShare,
+        kind: 'shop',
+        labelAr: 'رسوم إنفاق ترفيهي',
+        exact: true,
+      });
+      if (!txSink.ok) return false;
+      nextSlice = txSink.state;
+    }
+
+    // 2. Transfer 70% venue revenue: intra-citizens (private owner) or citizens -> treasury (royal)
+    if (ownerShare > 0) {
+      if (ownerExists && venue.ownerId !== null) {
+        if (venue.ownerId !== citizenId) {
+          // Intra-account transfer within 'citizens' (total citizenWealth unchanged)
+          nextSlice = {
+            ...nextSlice,
+            citizens: (nextSlice.citizens ?? []).map((c) => {
+              if (c.id === citizenId) return { ...c, wealth: Math.max(0, c.wealth - ownerShare) };
+              if (c.id === venue.ownerId) return { ...c, wealth: c.wealth + ownerShare };
+              return c;
+            }),
+          };
+        }
         privateOwnerGains += ownerShare;
       } else {
-        nextGold += ownerShare;
+        const txRev = transferGold(nextSlice, {
+          from: 'citizens',
+          to: 'treasury',
+          citizenId,
+          amount: ownerShare,
+          kind: 'shop',
+          labelAr: 'إنفاق المواطنين: مطاعم وترفيه وفنادق',
+          exact: true,
+        });
+        if (!txRev.ok) return false;
+        nextSlice = txRev.state;
         treasuryLeisureGain += ownerShare;
         stats.leisureRevenue += ownerShare;
       }
-    } else {
-      nextGold += ownerShare;
-      treasuryLeisureGain += ownerShare;
-      stats.leisureRevenue += ownerShare;
     }
+
+    goldSlice = nextSlice;
+    venue.remainingCap -= 1;
+    totalCitizenSpent += spend;
+    stats.leisureSink += sinkShare;
     return true;
   };
 
-  const sortedCitizens = [...nextCitizens].sort((a, b) => a.id - b.id);
-  for (const citizen of sortedCitizens) {
+  const sortedCitizenIds = getCitizens()
+    .map((c) => c.id)
+    .sort((a, b) => a - b);
+
+  for (const cid of sortedCitizenIds) {
+    const citizen = getCitizens().find((c) => c.id === cid);
+    if (!citizen) continue;
     if (ageYears(citizen, currentMonth) < 15) continue;
 
     // Element 2.4: intelligence >= 65 skips luxury (theater/hotel) while saving toward land
@@ -421,17 +537,17 @@ export function runCitizenSpending(
       if (citizen.attrs.social >= 40) {
         const rest = pickAvailableVenue('restaurant');
         if (rest) {
-          spent = applyLeisureSpend(citizen, rest, 6);
+          spent = applyLeisureSpend(citizen.id, rest, 6);
         } else {
           const cafe = pickAvailableVenue('cafe');
           if (cafe) {
-            spent = applyLeisureSpend(citizen, cafe, 4);
+            spent = applyLeisureSpend(citizen.id, cafe, 4);
           }
         }
       } else {
         const cafe = pickAvailableVenue('cafe');
         if (cafe) {
-          spent = applyLeisureSpend(citizen, cafe, 4);
+          spent = applyLeisureSpend(citizen.id, cafe, 4);
         }
       }
     }
@@ -440,7 +556,7 @@ export function runCitizenSpending(
     if (!spent && !isSmartSaver && citizen.wealth >= 20) {
       const theater = pickAvailableVenue('theater');
       if (theater) {
-        spent = applyLeisureSpend(citizen, theater, 3);
+        spent = applyLeisureSpend(citizen.id, theater, 3);
       }
     }
 
@@ -450,7 +566,7 @@ export function runCitizenSpending(
       if (hotel) {
         for (let attempt = 0; attempt < leisureAttempts; attempt++) {
           if (rng() < 0.05) {
-            spent = applyLeisureSpend(citizen, hotel, 15);
+            spent = applyLeisureSpend(citizen.id, hotel, 15);
             if (spent) break;
           }
         }
@@ -464,26 +580,27 @@ export function runCitizenSpending(
     ledgerItems.push({
       kind: 'shop',
       amount: treasuryFoodGain,
-      labelAr: 'مبيعات غذاء للمواطنين',
+      labelAr: formatTransferLabelAr('citizens', 'treasury', 'مبيعات غذاء للمواطنين'),
     });
   }
   if (treasuryLeisureGain > 0) {
     ledgerItems.push({
       kind: 'shop',
       amount: treasuryLeisureGain,
-      labelAr: 'إنفاق المواطنين: مطاعم وترفيه وفنادق',
+      labelAr: formatTransferLabelAr(
+        'citizens',
+        'treasury',
+        'إنفاق المواطنين: مطاعم وترفيه وفنادق'
+      ),
     });
   }
 
-  // B1: citizen import sink and leisure sink amounts now credit palaceOfPeople.gold instead of vanishing
-  const nextPalaceGold = currentPalaceGold + stats.importSink + stats.leisureSink;
-
   return {
     warehouse: nextWarehouse,
-    gold: nextGold,
-    citizens: nextCitizens,
-    citizenWealth: sumCitizenWealth(nextCitizens),
-    palaceOfPeople: { gold: nextPalaceGold },
+    gold: goldSlice.gold,
+    citizens: getCitizens(),
+    citizenWealth: goldSlice.citizenWealth,
+    palaceOfPeople: goldSlice.palaceOfPeople,
     lastMonthStats: stats,
     lastSpentMonth: currentMonth,
     ledgerItems,

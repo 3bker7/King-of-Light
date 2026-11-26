@@ -2,20 +2,14 @@ import {
   CUBE_DISTANCE_PRICE_STEP,
   CUBE_PRICE_ROUND_STEP,
   CUBE_PURCHASE_BASE_COST,
-  GRAND_MARKET_AURA_RANGE,
-  GRAND_MARKET_SHOP_BONUS,
   GRID_SIZE,
   SEA_ADJACENCY_BONUS_MAX,
   SEA_ADJACENCY_BONUS_STEP,
-  SHOP_FOOD_PRIORITY,
   STARTING_PALACE_COL,
   STARTING_PALACE_ROW,
   THEMES,
-  WAREHOUSE_AURA_RANGE,
-  WAREHOUSE_GOLD_BONUS,
   WORKER_PRIORITY_ORDER,
 } from './constants';
-import { getTotalFood } from './people';
 import {
   PRAYER_BONUS_POOL_MAX,
   PRAYER_EFFICIENCY_BONUS,
@@ -118,37 +112,8 @@ export function getSeaFishOutput(cubes: Cube[], cube: Cube): {
   };
 }
 
-// Logistics & Grand Market auras for Shops and Restaurants
-export function getGoldServiceAuraBonus(
-  cubes: Cube[],
-  cube: Cube,
-  themeId: ThemeId
-): number {
-  let bonus = 0;
-  if (themeId === 'shop' || themeId === 'restaurant') {
-    const hasNearbyWarehouse = cubes.some(
-      (other) =>
-        other.owner === 'player' &&
-        other.themeId === 'warehouse_bldg' &&
-        Math.max(Math.abs(other.row - cube.row), Math.abs(other.col - cube.col)) <=
-          WAREHOUSE_AURA_RANGE
-    );
-    if (hasNearbyWarehouse) bonus += WAREHOUSE_GOLD_BONUS;
-  }
-
-  if (themeId === 'shop') {
-    const hasNearbyGrandMarket = cubes.some(
-      (other) =>
-        other.owner === 'player' &&
-        other.themeId === 'grand_market' &&
-        Math.max(Math.abs(other.row - cube.row), Math.abs(other.col - cube.col)) <=
-          GRAND_MARKET_AURA_RANGE
-    );
-    if (hasNearbyGrandMarket) bonus += GRAND_MARKET_SHOP_BONUS;
-  }
-
-  return bonus;
-}
+// V5 Prompt 3: Per-cycle service gold mints and gold aura multipliers are removed.
+// Income for shops/restaurants/cafes/hotels comes exclusively from citizen spending.
 
 export function checkMaterialCosts(
   warehouse: Warehouse,
@@ -326,15 +291,8 @@ function getShortageForTheme(themeId: ThemeId): ShortageReason {
 
 function hasInputsForTheme(
   themeId: ThemeId,
-  warehouse: Warehouse,
-  population: number
+  warehouse: Warehouse
 ): boolean {
-  if (themeId === 'shop') {
-    return (
-      getTotalFood(warehouse) > population &&
-      SHOP_FOOD_PRIORITY.some((k) => (warehouse[k] ?? 0) >= 1)
-    );
-  }
   const inputs = THEMES[themeId].inputs;
   if (!inputs || inputs.length === 0) return true;
   return inputs.every((inp) => (warehouse[inp.resource] ?? 0) >= inp.amount);
@@ -346,39 +304,23 @@ export function resolveCycleOutput(
   allCubes: Cube[],
   warehouse: Warehouse,
   gold: number,
-  population: number
+  _population: number
 ): {
   gold: number;
   shortage: ShortageReason;
   resourceProduced?: { resource: TradedResourceKey; amount: number } | null;
 } {
   const def = THEMES[themeId];
-  let nextGold = gold;
 
   if (themeId === 'sea') {
     const seaOut = getSeaFishOutput(allCubes, cube);
     warehouse.fish += seaOut.amount;
     return {
-      gold: nextGold,
+      gold,
       shortage: null,
       resourceProduced:
         seaOut.amount > 0 ? { resource: 'fish', amount: seaOut.amount } : null,
     };
-  }
-
-  if (themeId === 'shop') {
-    const totalFood = getTotalFood(warehouse);
-    if (totalFood > population) {
-      const targetFood = SHOP_FOOD_PRIORITY.find((key) => (warehouse[key] ?? 0) >= 1);
-      if (targetFood) {
-        warehouse[targetFood] = Math.max(0, warehouse[targetFood] - 1);
-        const auraBonus = getGoldServiceAuraBonus(allCubes, cube, 'shop');
-        const gain = Math.round((def.goldPerCycle ?? 4) * (1 + auraBonus));
-        nextGold += gain;
-        return { gold: nextGold, shortage: null, resourceProduced: null };
-      }
-    }
-    return { gold: nextGold, shortage: 'no_surplus_food', resourceProduced: null };
   }
 
   // Check required inputs
@@ -386,7 +328,7 @@ export function resolveCycleOutput(
     const canPay = def.inputs.every((inp) => (warehouse[inp.resource] ?? 0) >= inp.amount);
     if (!canPay) {
       return {
-        gold: nextGold,
+        gold,
         shortage: getShortageForTheme(themeId),
         resourceProduced: null,
       };
@@ -407,22 +349,13 @@ export function resolveCycleOutput(
     }
   }
 
-  if (def.goldPerCycle) {
-    const auraBonus = getGoldServiceAuraBonus(allCubes, cube, themeId);
-    const gain = Math.round(def.goldPerCycle * (1 + auraBonus));
-    nextGold += gain;
-  }
-
-  return { gold: nextGold, shortage: null, resourceProduced };
+  return { gold, shortage: null, resourceProduced };
 }
 
 export interface ProductionTickResult {
   cubes: Cube[];
   warehouse: Warehouse;
   gold: number;
-  royalShopGoldDelta: number;
-  businessTaxDelta: number;
-  privateOwnerCredits: Record<number, number>;
   prayerBonusPool: Record<number, number>;
 }
 
@@ -437,10 +370,6 @@ export function advanceProductionTick(
 ): ProductionTickResult {
   const staffing = computeStaffing(cubes, population, citizens);
   const nextWarehouse: Warehouse = { ...warehouse };
-  let nextGold = gold;
-  let royalShopGoldDelta = 0;
-  let businessTaxDelta = 0;
-  const privateOwnerCredits: Record<number, number> = {};
   const nextPrayerBonusPool: Record<number, number> = prayerBonusPool
     ? { ...prayerBonusPool }
     : {};
@@ -451,7 +380,7 @@ export function advanceProductionTick(
     citizens.length > 0;
 
   // V5 Prompt 2 Element 3 (Single buff application site): +28% efficiency on resource outputs ONLY
-  // Never applies to goldPerCycle or shop gold. Accumulates fractional remainder per cube.
+  // Never touches gold. Accumulates fractional remainder per cube.
   const applyPrayerResourceBonus = (
     cubeId: number,
     slot: SlotIndex,
@@ -503,24 +432,6 @@ export function advanceProductionTick(
     }
   };
 
-  const applyCycleGold = (cube: Cube, gain: number) => {
-    if (gain <= 0) return;
-    if (typeof cube.privateOwnerId === 'number') {
-      // Element 4.6: Private business revenue splits 90% owner (floor) / 10% treasury tax
-      const ownerShare = Math.floor(gain * 0.9);
-      const tax = gain - ownerShare;
-      nextGold += tax;
-      businessTaxDelta += tax;
-      if (ownerShare > 0) {
-        privateOwnerCredits[cube.privateOwnerId] =
-          (privateOwnerCredits[cube.privateOwnerId] ?? 0) + ownerShare;
-      }
-    } else {
-      nextGold += gain;
-      royalShopGoldDelta += gain;
-    }
-  };
-
   const nextCubes = cubes.map((cube) => {
     if (cube.owner !== 'player') return cube;
     if (!cube.themeId && !cube.secondThemeId) return cube;
@@ -549,9 +460,8 @@ export function advanceProductionTick(
               population
             );
             applyPrayerResourceBonus(cube.id, 0, res.resourceProduced);
-            applyCycleGold(cube, res.gold);
             shortage = res.shortage;
-          } else if (shortage && hasInputsForTheme(cube.themeId, nextWarehouse, population)) {
+          } else if (shortage && hasInputsForTheme(cube.themeId, nextWarehouse)) {
             shortage = null;
           }
         }
@@ -576,11 +486,10 @@ export function advanceProductionTick(
               population
             );
             applyPrayerResourceBonus(cube.id, 1, res.resourceProduced);
-            applyCycleGold(cube, res.gold);
             secondShortage = res.shortage;
           } else if (
             secondShortage &&
-            hasInputsForTheme(cube.secondThemeId, nextWarehouse, population)
+            hasInputsForTheme(cube.secondThemeId, nextWarehouse)
           ) {
             secondShortage = null;
           }
@@ -601,10 +510,7 @@ export function advanceProductionTick(
   return {
     cubes: nextCubes,
     warehouse: nextWarehouse,
-    gold: nextGold,
-    royalShopGoldDelta,
-    businessTaxDelta,
-    privateOwnerCredits,
+    gold,
     prayerBonusPool: nextPrayerBonusPool,
   };
 }

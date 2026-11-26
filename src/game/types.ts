@@ -147,7 +147,6 @@ export interface ThemeDefinition {
   outputResource?: TradedResourceKey;
   outputAmount?: number;
   inputs?: ThemeInputSpec[];
-  goldPerCycle?: number;
   workers: number;
   shelters?: number;
   unlockLevel: 1 | 2;

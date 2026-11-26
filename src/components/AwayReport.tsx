@@ -48,16 +48,18 @@ export function AwayReport({ report, onClose }: AwayReportProps) {
         </div>
 
         <div className="space-y-3 text-xs">
-          {/* Gold earned by shops */}
-          <div className="flex items-center justify-between p-2.5 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC]">
-            <div className="flex items-center gap-2 font-bold text-[#2B2118]">
-              <Coins className="w-4 h-4 text-[#C9962E]" />
-              <span>{STRINGS.modals.awayShopGold}</span>
+          {/* Legacy shop gold row (only shown if non-zero) */}
+          {report.goldEarnedByShops > 0 && (
+            <div className="flex items-center justify-between p-2.5 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC]">
+              <div className="flex items-center gap-2 font-bold text-[#2B2118]">
+                <Coins className="w-4 h-4 text-[#C9962E]" />
+                <span>{STRINGS.modals.awayShopGold}</span>
+              </div>
+              <span className="text-sm font-extrabold text-[#8A5F12] tabular-nums-latin">
+                +{report.goldEarnedByShops}
+              </span>
             </div>
-            <span className="text-sm font-extrabold text-[#8A5F12] tabular-nums-latin">
-              +{report.goldEarnedByShops}
-            </span>
-          </div>
+          )}
 
           {/* Offline monthly payrolls paid */}
           {report.payrollPaid > 0 && (

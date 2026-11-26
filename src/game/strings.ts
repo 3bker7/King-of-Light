@@ -87,11 +87,11 @@ export const STRINGS = {
     },
     restaurant: {
       name: 'مطعم',
-      summary: 'يحوّل 1 خبز + 1 لحم إلى 14 ذهب كل 120 ثانية ويمنح ترفيهاً.',
+      summary: 'يقدّم الوجبات للمواطنين ويمنح ترفيهاً (+15) — الدخل من مشتريات المواطنين.',
     },
     cafe: {
       name: 'مقهى',
-      summary: 'يحوّل 1 مياه إلى 6 ذهب كل 120 ثانية ويمنح ترفيهاً.',
+      summary: 'يقدّم المشروبات للمواطنين ويمنح ترفيهاً (+10) — الدخل من مشتريات المواطنين.',
     },
     forest: {
       name: 'غابة أخشاب',
@@ -127,7 +127,7 @@ export const STRINGS = {
     },
     warehouse_bldg: {
       name: 'مخزن',
-      summary: 'يرفع دخل المحلات والمطاعم ضمن مسافة مكعبين بنسبة +25%.',
+      summary: 'مركز لوجستي وتجاري يدعم تخزين وإمداد الأحياء المجاورة.',
     },
     workshop: {
       name: 'ورشة',
@@ -139,11 +139,11 @@ export const STRINGS = {
     },
     shop: {
       name: 'محل تجاري',
-      summary: 'يحوّل 1 وحدة طعام فائض إلى 4 ذهب كل 60 ثانية.',
+      summary: 'يبيع السلع للمواطنين ويمنح ترفيهاً (+15) — الدخل من مشتريات المواطنين.',
     },
     grand_market: {
       name: 'سوق المدينة',
-      summary: 'يرفع أسعار البيع +10% للمملكة ودخل المحلات ضمن 3 مكعبات +50%.',
+      summary: 'يرفع أسعار البيع في البورصة بنسبة +10% للمملكة ويمنح ترفيهاً (+15).',
     },
     trade_office: {
       name: 'مكتب تجارة',
@@ -151,7 +151,7 @@ export const STRINGS = {
     },
     hotel: {
       name: 'فندق',
-      summary: 'يستقبل الضيوف وينتج 9 ذهب كل 90 ثانية ويحتاج 3 عمال.',
+      summary: 'يستقبل المواطنين الأثرياء (الدخل من مشتريات المواطنين) — نظام النزلاء الكامل قادم.',
     },
     mosque: {
       name: 'مسجد',
@@ -228,15 +228,12 @@ export const STRINGS = {
     secondsRemaining: (s: number) => `${s} ثانية متبقية`,
     outputPerCycle: (amount: number, resourceName: string) =>
       `ينتج ${amount} ${resourceName} في كل دورة`,
-    goldOutputPerCycle: (gold: number) => `ينتج ${gold} ذهب في كل دورة`,
-    shopOutputPerCycle: (gold: number) => `يحوّل 1 طعام فائض إلى ${gold} ذهب`,
     houseCapacityLabel: (cap: number) => `يؤوي ${cap} من السكان`,
     seaAdjacencyBonus: (pct: number, neighbors: number) =>
       neighbors > 0
         ? `مكافأة تجاور البحار: +${pct}% (${neighbors} مجاور)`
         : 'ضع بحراً مجاوراً لزيادة إنتاج السمك +25% لكل بحر.',
     seaEntertainmentNote: 'يمنح +25 ترفيهاً عند مجاورته لبيت.',
-    logisticsBonusNote: (pct: number) => `مكافأة اللوجستيات/السوق: +${pct}% ذهب`,
     unstaffedBadge: 'لا يوجد عمال',
     unstaffedDetail: 'الإنتاج متوقف لعدم توفر عدد كافٍ من السكان للعمل.',
     shortages: {

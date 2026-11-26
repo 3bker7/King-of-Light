@@ -64,6 +64,12 @@ import {
   getEffectiveBuyPrice,
   rolloverBoursePrices,
 } from './economy';
+import {
+  appendGoldLedgerEntry,
+  createOpeningEndowmentLedger,
+  syncGoldLedgerCounter,
+  transferGold,
+} from './goldLedger';
 import { runMonthlyProcessor } from './monthlyProcessor';
 import {
   computeNeedsAndSatisfaction,
@@ -177,18 +183,7 @@ function appendLedger(
   amount: number,
   labelAr: string
 ): LedgerEntry[] {
-  ledgerCounter += 1;
-  const entry: LedgerEntry = {
-    id: `led-${day}-${ledgerCounter}`,
-    day,
-    kind,
-    amount,
-    labelAr,
-  };
-  const next = [...existing, entry];
-  return next.length > MAX_LEDGER_ENTRIES
-    ? next.slice(next.length - MAX_LEDGER_ENTRIES)
-    : next;
+  return appendGoldLedgerEntry(existing, day, kind, amount, labelAr);
 }
 
 function applyArrearsCap(satisfaction: number, arrears: number): number {
@@ -371,7 +366,12 @@ export function createFreshGameState(now = Date.now()): GameState {
     lastPayroll: null,
     dailyShopGold: 0,
     inflationIndex: 100,
-    ledger: [],
+    ledger: createOpeningEndowmentLedger({
+      treasuryGold: STARTING_GOLD,
+      palaceGold: PALACE_START_GOLD,
+      bankGold: BANK_START_GOLD,
+      citizenGold: sumCitizenWealth(initialPop.citizens),
+    }),
     lastInflationWarnMonth: 0,
     citizens: initialPop.citizens,
     nextCitizenId: initialPop.nextCitizenId,
@@ -544,6 +544,8 @@ export function hydrateGameState(saved: PersistedSaveData): GameState {
     seenLedgerIds.add(id);
     return id === entry.id ? entry : { ...entry, id };
   });
+
+  syncGoldLedgerCounter(savedLedger);
 
   const nextCitizenId = Math.max(
     sanitized.nextCitizenId,
@@ -728,9 +730,8 @@ function isObjectiveSatisfied(state: GameState, objectiveId: string): boolean {
 }
 
 function evaluateObjectivesAndProgression(state: GameState): GameState {
-  let gold = state.gold;
+  let workingState = state;
   let warehouse = state.warehouse;
-  let ledger = state.ledger;
   let level = state.level;
   let level2UnlockedNotice = state.level2UnlockedNotice;
   let level2CompletedNotice = state.level2CompletedNotice;
@@ -747,24 +748,26 @@ function evaluateObjectivesAndProgression(state: GameState): GameState {
     if (obj.level === 1 && !prevLevel1Completed) {
       return obj;
     }
-    if (!isObjectiveSatisfied(state, obj.id)) {
+    if (!isObjectiveSatisfied(workingState, obj.id)) {
       if (obj.level === 1) prevLevel1Completed = false;
       return obj;
     }
 
-    gold += obj.rewardGold;
-    if (obj.rewardGold > 0) {
-      ledger = appendLedger(
-        ledger,
-        state.day,
-        'objective',
-        obj.rewardGold,
-        'مكافأة هدف'
-      );
-    }
     const label = STRINGS.objectives.items[obj.id] ?? obj.id;
+    let grantPaid = 0;
+    if (obj.rewardGold > 0) {
+      const tx = transferGold(workingState, {
+        from: 'palace',
+        to: 'treasury',
+        amount: obj.rewardGold,
+        kind: 'objective',
+        labelAr: `منحة قصر الشعب — ${label}`,
+      });
+      workingState = tx.state;
+      grantPaid = tx.moved;
+    }
     newToasts.push(
-      createToast(STRINGS.toasts.objectiveCompleted(label, obj.rewardGold), 'success')
+      createToast(STRINGS.toasts.objectiveCompleted(label, grantPaid), 'success')
     );
     audioCounter += 1;
     pendingAudioCue = { id: audioCounter, cue: 'reward' };
@@ -808,16 +811,14 @@ function evaluateObjectivesAndProgression(state: GameState): GameState {
   }
 
   return {
-    ...state,
-    gold,
+    ...workingState,
     warehouse,
-    ledger,
     level,
     objectives: nextObjectives,
     level2UnlockedNotice,
     level2CompletedNotice,
     level2CompletedShown,
-    toasts: appendToasts(state.toasts, newToasts),
+    toasts: appendToasts(workingState.toasts, newToasts),
     pendingAudioCue,
   };
 }
@@ -971,9 +972,9 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
 
       let nextCubes = prod.cubes;
       let nextWarehouse = prod.warehouse;
-      let nextGold = prod.gold;
-      let nextDailyShopGold = state.dailyShopGold + prod.royalShopGoldDelta;
-      let nextMonthlyBusinessTax = state.monthlyBusinessTax + prod.businessTaxDelta;
+      let nextGold = state.gold;
+      let nextDailyShopGold = 0;
+      let nextMonthlyBusinessTax = state.monthlyBusinessTax;
       let nextPopulation = state.population;
       let nextReputation = state.reputation;
       let nextHungerFlag = state.hungerFlag;
@@ -1033,16 +1034,6 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
       const joinedVillagesThisTick: Array<{ id: number; name: string }> = [];
       const newToasts: ToastItem[] = [];
       let pendingAudioCue = state.pendingAudioCue;
-
-      // Credit 90% private-business cycle revenue directly to owning citizens
-      const creditKeys = Object.keys(prod.privateOwnerCredits);
-      if (creditKeys.length > 0) {
-        nextCitizens = nextCitizens.map((c) => {
-          const bonus = prod.privateOwnerCredits[c.id];
-          return bonus ? { ...c, wealth: c.wealth + bonus } : c;
-        });
-        nextCitizenWealth = sumCitizenWealth(nextCitizens);
-      }
 
       // V5 Prompt 2 Element 2 (Single prayer trigger site): clock advance -> prayer trigger -> day/month rollover
       const dayForPrayer = dayWrapped ? state.day + 1 : state.day;
@@ -1131,18 +1122,7 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
       }
 
       if (dayWrapped) {
-        // Element 3.5: Flush accumulated royal shop/service gold into treasury ledger
-        if (nextDailyShopGold > 0) {
-          nextLedger = appendLedger(
-            nextLedger,
-            state.day,
-            'shop',
-            nextDailyShopGold,
-            'دخل المحلات والخدمات'
-          );
-          nextDailyShopGold = 0;
-        }
-
+        nextDailyShopGold = 0;
         nextDay += 1;
 
         const dayTaxMoodDelta = computeTaxMoodDelta(
@@ -1178,6 +1158,29 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
           nextCitizenId = rec.nextCitizenId;
           nextCitizenWealth = rec.citizenWealth;
           nextPoliceRecords = rec.policeRecords;
+          if (rec.localEmigratedWealth > 0) {
+            const emigTx = transferGold(
+              {
+                gold: nextGold,
+                citizenWealth: nextCitizenWealth + rec.localEmigratedWealth,
+                palaceOfPeople: nextPalaceOfPeople,
+                peoplesBank: nextPeoplesBank,
+                ledger: nextLedger,
+                day: nextDay,
+              },
+              {
+                from: 'citizens',
+                to: 'palace',
+                amount: rec.localEmigratedWealth,
+                kind: 'gift',
+                labelAr: 'تصفية تركة مهاجر',
+                exact: true,
+              }
+            );
+            if (emigTx.ok) {
+              nextPalaceOfPeople = emigTx.state.palaceOfPeople;
+            }
+          }
 
           const emig = cleanupEmigratedPrivateOwners({
             cubes: nextCubes,
@@ -1618,25 +1621,34 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         computeTaxMoodDelta(state.taxPolicy, state.citizenWealth, state.population)
       );
 
-      const nextLedger =
-        theme.cost > 0
-          ? appendLedger(
-              state.ledger,
-              state.day,
-              'build',
-              -theme.cost,
-              `بناء ${STRINGS.themes[action.themeId].name}`
-            )
-          : state.ledger;
+      let baseState: GameState = state;
+      if (theme.cost > 0) {
+        const tx = transferGold(state, {
+          from: 'treasury',
+          to: 'palace',
+          amount: theme.cost,
+          kind: 'build',
+          labelAr: `بناء ${STRINGS.themes[action.themeId].name}`,
+          exact: true,
+        });
+        if (!tx.ok) {
+          return {
+            ...state,
+            toasts: appendToasts(state.toasts, [
+              createToast(STRINGS.toasts.notEnoughGold, 'warning'),
+            ]),
+            pendingAudioCue: makeCue('error'),
+          };
+        }
+        baseState = tx.state;
+      }
 
       const updated: GameState = {
-        ...state,
+        ...baseState,
         cubes: nextCubes,
         warehouse: nextWarehouse,
-        gold: Math.max(0, state.gold - theme.cost),
         satisfaction: applyArrearsCap(evalNeeds.satisfaction, state.arrears),
         needs: evalNeeds.needs,
-        ledger: nextLedger,
         pendingAudioCue: makeCue('build'),
       };
 
@@ -1716,23 +1728,31 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         };
       }
 
+      const tx = transferGold(state, {
+        from: 'treasury',
+        to: 'palace',
+        amount: price,
+        kind: 'land',
+        labelAr: 'شراء أرض',
+        exact: true,
+      });
+      if (!tx.ok) {
+        return {
+          ...state,
+          toasts: appendToasts(state.toasts, [
+            createToast(STRINGS.toasts.notEnoughGold, 'warning'),
+          ]),
+          pendingAudioCue: makeCue('error'),
+        };
+      }
+
       const nextCubes = state.cubes.map((c) =>
         c.id === action.cubeId ? { ...c, owner: 'player' as const } : c
       );
 
-      const nextLedger = appendLedger(
-        state.ledger,
-        state.day,
-        'land',
-        -price,
-        'شراء أرض'
-      );
-
       const updated: GameState = {
-        ...state,
+        ...tx.state,
         cubes: nextCubes,
-        gold: Math.max(0, state.gold - price),
-        ledger: nextLedger,
         toasts: appendToasts(state.toasts, [
           createToast(STRINGS.toasts.cubePurchased, 'success'),
         ]),
@@ -1754,20 +1774,46 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         action.resource,
         action.side,
         action.quantity,
-        action.maxQuantityCap
+        action.maxQuantityCap,
+        state.palaceOfPeople.gold
       );
+
+      const partialNotice = result.palaceLimited
+        ? `باع ${result.tradedQty} من ${result.requestedQty} — صندوق قصر الشعب لا يملك أكثر من ذلك`
+        : null;
+
       if (result.tradedQty <= 0) {
         return {
           ...state,
+          toasts: partialNotice
+            ? appendToasts(state.toasts, [createToast(partialNotice, 'warning')])
+            : state.toasts,
           pendingAudioCue: makeCue('error'),
         };
       }
 
-      const goldDelta = result.gold - state.gold;
-      const nextLedger =
-        goldDelta !== 0
-          ? appendLedger(state.ledger, state.day, 'trade', goldDelta, 'بورصة')
-          : state.ledger;
+      let afterTransfer: GameState = state;
+      if (result.totalGoldMoved > 0) {
+        const resName = STRINGS.resources[action.resource] ?? action.resource;
+        const tx = transferGold(state, {
+          from: action.side === 'buy' ? 'treasury' : 'palace',
+          to: action.side === 'buy' ? 'palace' : 'treasury',
+          amount: result.totalGoldMoved,
+          kind: 'trade',
+          labelAr:
+            action.side === 'buy'
+              ? `بورصة: شراء ${result.tradedQty} ${resName}`
+              : `بورصة: بيع ${result.tradedQty} ${resName}`,
+          exact: true,
+        });
+        if (!tx.ok) {
+          return {
+            ...state,
+            pendingAudioCue: makeCue('error'),
+          };
+        }
+        afterTransfer = tx.state;
+      }
 
       const evalNeeds = computeNeedsAndSatisfaction(
         state.cubes,
@@ -1778,14 +1824,15 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
       );
 
       const updated: GameState = {
-        ...state,
-        gold: result.gold,
+        ...afterTransfer,
         warehouse: result.warehouse,
         dailyBought: result.dailyBought,
         dailySold: result.dailySold,
         satisfaction: applyArrearsCap(evalNeeds.satisfaction, state.arrears),
         needs: evalNeeds.needs,
-        ledger: nextLedger,
+        toasts: partialNotice
+          ? appendToasts(afterTransfer.toasts, [createToast(partialNotice, 'warning')])
+          : afterTransfer.toasts,
         pendingAudioCue: makeCue('trade'),
       };
 
@@ -1807,7 +1854,15 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
       }
 
       if (total <= 0) return state;
-      if (state.gold < total) {
+      const tx = transferGold(state, {
+        from: 'treasury',
+        to: 'palace',
+        amount: total,
+        kind: 'materials',
+        labelAr: 'شراء خامات',
+        exact: true,
+      });
+      if (!tx.ok) {
         return {
           ...state,
           toasts: appendToasts(state.toasts, [
@@ -1824,14 +1879,6 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         nextBought[res] = (nextBought[res] ?? 0) + qty;
       }
 
-      const nextLedger = appendLedger(
-        state.ledger,
-        state.day,
-        'materials',
-        -total,
-        'شراء خامات'
-      );
-
       const evalNeeds = computeNeedsAndSatisfaction(
         state.cubes,
         nextWarehouse,
@@ -1841,13 +1888,11 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
       );
 
       const updated: GameState = {
-        ...state,
-        gold: Math.max(0, state.gold - total),
+        ...tx.state,
         warehouse: nextWarehouse,
         dailyBought: nextBought,
         satisfaction: applyArrearsCap(evalNeeds.satisfaction, state.arrears),
         needs: evalNeeds.needs,
-        ledger: nextLedger,
         pendingAudioCue: makeCue('trade'),
       };
 

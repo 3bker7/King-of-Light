@@ -12,6 +12,12 @@ import {
   measureDecreeActuals,
   trimDecrees,
 } from './decrees';
+import {
+  formatTransferLabelAr,
+  transferGold,
+  type CitizenGoldShare,
+  type GoldStateSlice,
+} from './goldLedger';
 import { runHousingOffice } from './housingOffice';
 import { applyMonthlyInstitutions } from './institutions';
 import { distributePayrollToCitizens, runLaborMatching } from './laborOffice';
@@ -200,6 +206,16 @@ export function runMonthlyProcessor(
   let cubes = input.cubes.map((c) => ({ ...c }));
   let warehouse: Warehouse = { ...input.warehouse };
   let gold = Math.max(0, Math.floor(input.gold));
+  let palaceOfPeople: PalaceOfPeople = {
+    gold: Math.max(0, Math.floor(input.palaceOfPeople?.gold ?? 0)),
+  };
+  const zeroBank: PeoplesBank = {
+    gold: 0,
+    portfolio: {},
+    totalTrades: 0,
+    lastTradeMonth: null,
+    lastTradeAr: null,
+  };
   let policeRecords = input.policeRecords;
   let officeFaxes = input.officeFaxes;
   let nextCitizenId = input.nextCitizenId;
@@ -267,6 +283,29 @@ export function runMonthlyProcessor(
   nextCitizenId = recRes.nextCitizenId;
   citizenWealth = recRes.citizenWealth;
   policeRecords = recRes.policeRecords;
+  if (recRes.localEmigratedWealth > 0) {
+    const emigTx = transferGold(
+      {
+        gold,
+        citizenWealth: citizenWealth + recRes.localEmigratedWealth,
+        palaceOfPeople,
+        peoplesBank: zeroBank,
+        ledger: [],
+        day: input.day,
+      },
+      {
+        from: 'citizens',
+        to: 'palace',
+        amount: recRes.localEmigratedWealth,
+        kind: 'gift',
+        labelAr: 'تصفية تركة مهاجر',
+        exact: true,
+      }
+    );
+    if (emigTx.ok) {
+      palaceOfPeople = emigTx.state.palaceOfPeople;
+    }
+  }
 
   const emigCleanup = cleanupEmigratedPrivateOwners({
     cubes,
@@ -291,28 +330,98 @@ export function runMonthlyProcessor(
   privateAds = prePaySync.privateAds;
   citizens = prePaySync.citizens;
 
-  // (g1) Crown Payroll (CROWN slots only) with Prompt 6 tax/grant transform
+  // (g1) Crown Payroll (CROWN slots only) with Prompt 6 tax/grant transform — settled via transferGold
   const payroll = computeMonthlyPayroll(cubes, input.population);
   const owed = Math.max(0, input.arrears) + payroll.due;
   const paid = Math.min(gold, owed);
-  gold = Math.max(0, gold - paid);
   const nextArrears = Math.max(0, owed - paid);
+  const availableCrownGrantGold = Math.max(0, gold - paid);
 
+  const prevWealthById = new Map<number, number>();
+  for (const c of citizens) {
+    prevWealthById.set(c.id, c.wealth);
+  }
   const distRes = distributePayrollToCitizens(
     citizens,
     cubes,
     input.population,
     paid,
     taxPolicy,
-    gold
+    availableCrownGrantGold
   );
-  citizens = distRes.citizens;
-  gold = Math.max(0, gold + distRes.taxWithheld - distRes.grantsPaid);
-  citizenWealth = sumCitizenWealth(citizens);
 
-  pushLedger('payroll', -paid, 'رواتب الشهر');
+  const crownShares: CitizenGoldShare[] = [];
+  for (const c of distRes.citizens) {
+    const delta = c.wealth - (prevWealthById.get(c.id) ?? 0);
+    if (delta > 0) {
+      crownShares.push({ citizenId: c.id, amount: delta });
+    }
+  }
 
-  // (g2) Private Payroll (owners pay exact gross w; tax/grant transform redistributes worker/treasury)
+  if (distRes.distributed > 0 && crownShares.length > 0) {
+    const crownSlice: GoldStateSlice = {
+      gold,
+      citizens,
+      citizenWealth: sumCitizenWealth(citizens),
+      palaceOfPeople,
+      peoplesBank: zeroBank,
+      ledger: [],
+      day: input.day,
+    };
+    const txCrown = transferGold(crownSlice, {
+      from: 'treasury',
+      to: 'citizens',
+      amount: distRes.distributed,
+      citizenShares: crownShares,
+      kind: 'payroll',
+      labelAr: 'رواتب الشهر',
+      exact: true,
+    });
+    if (txCrown.ok) {
+      gold = txCrown.state.gold;
+      citizens = txCrown.state.citizens ?? distRes.citizens;
+      citizenWealth = txCrown.state.citizenWealth;
+    }
+  } else if (paid > 0) {
+    // Unheld crown slots (temporary labor): settle via transferGold treasury -> palace (no burn)
+    const txUnheld = transferGold(
+      {
+        gold,
+        citizenWealth,
+        palaceOfPeople,
+        peoplesBank: zeroBank,
+        ledger: [],
+        day: input.day,
+      },
+      {
+        from: 'treasury',
+        to: 'palace',
+        amount: paid,
+        kind: 'payroll',
+        labelAr: 'رواتب عمالة مؤقتة',
+        exact: true,
+      }
+    );
+    if (txUnheld.ok) {
+      gold = txUnheld.state.gold;
+      palaceOfPeople = txUnheld.state.palaceOfPeople;
+    }
+  }
+
+  if (paid > 0) {
+    pushLedger(
+      'payroll',
+      -paid,
+      formatTransferLabelAr(
+        'treasury',
+        distRes.distributed > 0 ? 'citizens' : 'palace',
+        'رواتب الشهر'
+      )
+    );
+  }
+
+  // (g2) Private Payroll (owners pay exact gross w; tax/grant transform settled via transferGold)
+  const prePrivateCitizenWealth = sumCitizenWealth(citizens);
   const privPayRes = runPrivatePayroll({
     citizens,
     privateAds,
@@ -322,19 +431,57 @@ export function runMonthlyProcessor(
   });
   citizens = privPayRes.citizens;
   privateAds = privPayRes.privateAds;
-  gold = Math.max(0, gold + privPayRes.taxWithheld - privPayRes.grantsPaid);
+  let privSlice: GoldStateSlice = {
+    gold,
+    citizenWealth: prePrivateCitizenWealth,
+    palaceOfPeople,
+    peoplesBank: zeroBank,
+    ledger: [],
+    day: input.day,
+  };
+  if (privPayRes.taxWithheld > 0) {
+    const txTax = transferGold(privSlice, {
+      from: 'citizens',
+      to: 'treasury',
+      amount: privPayRes.taxWithheld,
+      kind: 'payroll',
+      labelAr: 'ضرائب مرتبات خاصة محتجزة',
+      exact: true,
+    });
+    if (txTax.ok) privSlice = txTax.state;
+  }
+  if (privPayRes.grantsPaid > 0) {
+    const txGrant = transferGold(privSlice, {
+      from: 'treasury',
+      to: 'citizens',
+      amount: privPayRes.grantsPaid,
+      kind: 'payroll',
+      labelAr: 'منح ملكية على المرتبات الخاصة',
+      exact: true,
+    });
+    if (txGrant.ok) privSlice = txGrant.state;
+  }
+  gold = privSlice.gold;
   citizenWealth = sumCitizenWealth(citizens);
 
   const totalTaxWithheld = distRes.taxWithheld + privPayRes.taxWithheld;
   const totalGrantsPaid = distRes.grantsPaid + privPayRes.grantsPaid;
   if (totalTaxWithheld > 0) {
-    pushLedger('payroll', totalTaxWithheld, 'ضرائب مرتبات محتجزة');
+    pushLedger(
+      'payroll',
+      totalTaxWithheld,
+      formatTransferLabelAr('citizens', 'treasury', 'ضرائب مرتبات محتجزة')
+    );
   }
   if (totalGrantsPaid > 0) {
-    pushLedger('payroll', -totalGrantsPaid, 'منح ملكية على المرتبات');
+    pushLedger(
+      'payroll',
+      -totalGrantsPaid,
+      formatTransferLabelAr('treasury', 'citizens', 'منح ملكية على المرتبات')
+    );
   }
 
-  // (h) Flush accumulated monthly business tax (already in gold; emit single monthly ledger row)
+  // (h) Flush accumulated monthly business tax (legacy field, zero after V5 Prompt 3)
   const businessTaxCollected = Math.max(
     0,
     Math.floor(input.monthlyBusinessTax)
@@ -354,7 +501,7 @@ export function runMonthlyProcessor(
     citizens,
     totalMonths: nextTotalMonths,
     lastSpentMonth: input.lastSpentMonth,
-    palaceOfPeople: input.palaceOfPeople,
+    palaceOfPeople,
     staffedSlots: staffingForSpending.staffedSlots,
     rng: input.rng,
   });
@@ -362,7 +509,7 @@ export function runMonthlyProcessor(
   gold = spendRes.gold;
   citizens = spendRes.citizens;
   citizenWealth = spendRes.citizenWealth;
-  let palaceOfPeople = spendRes.palaceOfPeople;
+  palaceOfPeople = spendRes.palaceOfPeople;
   const nextLastSpentMonth = spendRes.lastSpentMonth;
   for (const item of spendRes.ledgerItems) {
     pushLedger(item.kind, item.amount, item.labelAr);
@@ -375,6 +522,7 @@ export function runMonthlyProcessor(
     warehouse,
     prices: input.prices,
     gold,
+    palaceOfPeople,
     now: input.now,
   });
   cubes = constructRes.cubes;
@@ -382,6 +530,7 @@ export function runMonthlyProcessor(
   warehouse = constructRes.warehouse;
   gold = constructRes.gold;
   citizenWealth = constructRes.citizenWealth;
+  palaceOfPeople = constructRes.palaceOfPeople;
   for (const item of constructRes.ledgerItems) {
     pushLedger(item.kind, item.amount, item.labelAr);
   }

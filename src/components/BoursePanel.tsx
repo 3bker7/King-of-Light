@@ -3,6 +3,7 @@ import {
   ArrowUpRight,
   Gauge,
   Globe,
+  Landmark,
   Minus,
   Newspaper,
 } from 'lucide-react';
@@ -66,6 +67,12 @@ export function BoursePanel({
           <p className="text-[11px] leading-relaxed text-[#6F5C43]">
             {STRINGS.bourse.subtitle}
           </p>
+          <p className="inline-flex items-center gap-1.5 text-[11px] font-extrabold text-[#2B2118] bg-[#F4E7C8] border border-[#D8BE86] rounded-lg px-2 py-0.5 tabular-nums-latin">
+            <Landmark className="w-3.5 h-3.5 text-[#8A5F12] shrink-0" />
+            <span>
+              صندوق قصر الشعب: {state.palaceOfPeople.gold} ذهب — مشتري وبائع السوق
+            </span>
+          </p>
           {isWorldBourse && (
             <p className="text-[10px] font-bold text-[#14524A] tabular-nums-latin">
               حد التداول اليومي لكل مورد: {ONLINE_BOURSE_DAILY_KINGDOM_CAP} وحدة في يوم العالم
@@ -118,6 +125,11 @@ export function BoursePanel({
           const maxBuy = Math.min(rawMaxBuy, remainingCap);
           const maxSell = Math.min(stock, remainingCap);
           const canSellAny = maxSell > 0 && sellPrice > 0;
+          const palaceMaxSell =
+            sellPrice > 0
+              ? Math.floor(Math.max(0, state.palaceOfPeople.gold) / sellPrice)
+              : 0;
+          const palaceLimitsSell = canSellAny && palaceMaxSell < maxSell;
 
           return (
             <div
@@ -226,6 +238,13 @@ export function BoursePanel({
                   {STRINGS.bourse.maxLabel}
                 </button>
               </div>
+              {palaceLimitsSell && (
+                <p className="text-[10px] font-bold text-[#8A5F12] tabular-nums-latin">
+                  {palaceMaxSell === 0
+                    ? 'صندوق قصر الشعب لا يكفي لشراء وحدة حالياً'
+                    : `صندوق قصر الشعب يكفي لشراء ${palaceMaxSell} وحدة حالياً`}
+                </p>
+              )}
             </div>
           );
         })}

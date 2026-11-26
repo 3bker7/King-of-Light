@@ -14,7 +14,6 @@ import {
   SAVE_VERSION,
   SEEDED_ROCKY_COORDS,
   SEEDED_VILLAGE_COORDS,
-  SHOP_FOOD_PRIORITY,
   THEMES,
   TOTAL_CUBES,
   TRADED_RESOURCES,
@@ -48,14 +47,14 @@ import {
 } from './citizens';
 import { sanitizeDecreesOnHydrate } from './decrees';
 import { computeInflationIndex, rolloverBoursePrices } from './economy';
+import { transferGold } from './goldLedger';
 import { runMonthlyProcessor } from './monthlyProcessor';
-import { computeNeedsAndSatisfaction, getTotalFood, processDayRolloverPeople } from './people';
+import { computeNeedsAndSatisfaction, processDayRolloverPeople } from './people';
 import { cleanupEmigratedPrivateOwners, syncPrivateAds } from './privateJobs';
 import { sanitizePrivateLandOnHydrate } from './privateLand';
 import {
   computeStaffing,
   findPalaceCube,
-  getGoldServiceAuraBonus,
   getSeaFishOutput,
   isAdjacentToOwned,
   makeSlotKey,
@@ -482,36 +481,7 @@ export function simulateOfflineProgress(
 
   const pricesBeforeAway = { ...nextPrices };
   const resourcesProduced: Partial<Record<TradedResourceKey, number>> = {};
-  let goldEarnedByShops = 0;
-
-  // Map citizens by id for private offline revenue credits
-  const citizenById = new Map<number, (typeof nextCitizens)[number]>();
-  for (const c of nextCitizens) {
-    citizenById.set(c.id, c);
-  }
-
-  // Helper: route offline goldPerCycle to royal treasury OR 90/10 private owner + businessTax
-  const creditServiceGold = (cube: Cube, cycles: number, perCycleGold: number) => {
-    if (cycles <= 0 || perCycleGold <= 0) return;
-    if (typeof cube.privateOwnerId === 'number') {
-      const owner = citizenById.get(cube.privateOwnerId);
-      const ownerPerCycle = Math.floor(perCycleGold * 0.9);
-      const taxPerCycle = perCycleGold - ownerPerCycle;
-      const totalOwner = cycles * ownerPerCycle;
-      const totalTax = cycles * taxPerCycle;
-      if (owner && totalOwner > 0) {
-        owner.wealth += totalOwner;
-      }
-      if (totalTax > 0) {
-        nextGold += totalTax;
-        nextMonthlyBusinessTax += totalTax;
-      }
-    } else {
-      const gain = cycles * perCycleGold;
-      nextGold += gain;
-      goldEarnedByShops += gain;
-    }
-  };
+  const goldEarnedByShops = 0;
 
   // Element 6.2: Pass nextCitizens so unfilled private businesses produce 0 offline
   const staffing = computeStaffing(nextCubes, nextPopulation, nextCitizens);
@@ -567,23 +537,15 @@ export function simulateOfflineProgress(
       const perCycle = getSeaFishOutput(nextCubes, t.cube).amount;
       addProduced('fish', t.cycles * perCycle);
       setSlotProgress(t, null);
-    } else if (
-      t.themeId !== 'shop' &&
-      (!def.inputs || def.inputs.length === 0)
-    ) {
+    } else if (!def.inputs || def.inputs.length === 0) {
       if (def.outputResource && def.outputAmount) {
         addProduced(def.outputResource, t.cycles * def.outputAmount);
-      }
-      if (def.goldPerCycle && t.cycles > 0) {
-        const auraBonus = getGoldServiceAuraBonus(nextCubes, t.cube, t.themeId);
-        const perCycleGold = Math.round(def.goldPerCycle * (1 + auraBonus));
-        creditServiceGold(t.cube, t.cycles, perCycleGold);
       }
       setSlotProgress(t, null);
     }
   }
 
-  // Phase 2: input-consuming producers (farms, pastures, bakeries, workshops, jewelers, cafes, restaurants)
+  // Phase 2: input-consuming resource producers (farms, pastures, bakeries, workshops, jewelers)
   const orderedConsumers: ThemeId[] = [
     'wheat_farm',
     'farm',
@@ -591,8 +553,6 @@ export function simulateOfflineProgress(
     'bakery',
     'workshop',
     'jeweler',
-    'cafe',
-    'restaurant',
   ];
 
   for (const targetTheme of orderedConsumers) {
@@ -616,44 +576,20 @@ export function simulateOfflineProgress(
       if (def.outputResource && def.outputAmount) {
         addProduced(def.outputResource, affordable * def.outputAmount);
       }
-      if (def.goldPerCycle && affordable > 0) {
-        const auraBonus = getGoldServiceAuraBonus(nextCubes, t.cube, t.themeId);
-        const perCycleGold = Math.round(def.goldPerCycle * (1 + auraBonus));
-        creditServiceGold(t.cube, affordable, perCycleGold);
-      }
       const shortage: Cube['shortage'] =
         affordable < t.cycles
           ? t.themeId === 'pasture'
             ? 'no_crops'
             : t.themeId === 'bakery'
               ? 'no_wheat'
-              : t.themeId === 'restaurant'
-                ? 'no_bread_meat'
-                : t.themeId === 'workshop'
-                  ? 'no_iron_wood'
-                  : t.themeId === 'jeweler'
-                    ? 'no_gold_gem'
-                    : 'no_water'
+              : t.themeId === 'workshop'
+                ? 'no_iron_wood'
+                : t.themeId === 'jeweler'
+                  ? 'no_gold_gem'
+                  : 'no_water'
           : null;
       setSlotProgress(t, shortage);
     }
-  }
-
-  // Phase 3: shops converting surplus food
-  for (const t of tasks) {
-    if (t.themeId !== 'shop') continue;
-    const auraBonus = getGoldServiceAuraBonus(nextCubes, t.cube, 'shop');
-    const goldPer = Math.round((THEMES.shop.goldPerCycle ?? 4) * (1 + auraBonus));
-    let executed = 0;
-    for (let i = 0; i < t.cycles; i++) {
-      if (getTotalFood(nextWarehouse) <= nextPopulation) break;
-      const targetFood = SHOP_FOOD_PRIORITY.find((k) => (nextWarehouse[k] ?? 0) >= 1);
-      if (!targetFood) break;
-      nextWarehouse[targetFood] = Math.max(0, nextWarehouse[targetFood] - 1);
-      creditServiceGold(t.cube, 1, goldPer);
-      executed += 1;
-    }
-    setSlotProgress(t, executed < t.cycles ? 'no_surplus_food' : null);
   }
 
   nextCitizenWealth = sumCitizenWealth(nextCitizens);
@@ -790,6 +726,29 @@ export function simulateOfflineProgress(
     nextCitizenId = rec.nextCitizenId;
     nextCitizenWealth = rec.citizenWealth;
     nextPoliceRecords = rec.policeRecords;
+    if (rec.localEmigratedWealth > 0) {
+      const emigTx = transferGold(
+        {
+          gold: nextGold,
+          citizenWealth: nextCitizenWealth + rec.localEmigratedWealth,
+          palaceOfPeople: nextPalaceOfPeople,
+          peoplesBank: nextPeoplesBank,
+          ledger: nextLedger,
+          day: nextDay,
+        },
+        {
+          from: 'citizens',
+          to: 'palace',
+          amount: rec.localEmigratedWealth,
+          kind: 'gift',
+          labelAr: 'تصفية تركة مهاجر',
+          exact: true,
+        }
+      );
+      if (emigTx.ok) {
+        nextPalaceOfPeople = emigTx.state.palaceOfPeople;
+      }
+    }
     births += rec.birthsCount;
     cvsFiled += rec.cvsFiledCount;
 
@@ -967,16 +926,6 @@ export function simulateOfflineProgress(
     if (nextOfficeFaxes.length > 30) {
       nextOfficeFaxes = nextOfficeFaxes.slice(nextOfficeFaxes.length - 30);
     }
-  }
-
-  if (goldEarnedByShops > 0) {
-    nextLedger.push({
-      id: `offline-shop-${nextDay}`,
-      day: nextDay,
-      kind: 'shop',
-      amount: goldEarnedByShops,
-      labelAr: 'دخل المحلات والخدمات',
-    });
   }
 
   const trimmedLedger =
