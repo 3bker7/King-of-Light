@@ -183,6 +183,12 @@ export function runCitizenSpending(
   const currentMonth = Math.max(0, Math.trunc(input.totalMonths));
 
   const currentPalaceGold = Math.max(0, Math.floor(input.palaceOfPeople?.gold ?? 0));
+  const currentHeldEstates = Math.max(0, Math.floor(input.palaceOfPeople?.heldEstates ?? 0));
+  const basePalace: PalaceOfPeople = {
+    ...(input.palaceOfPeople ?? { gold: currentPalaceGold, heldEstates: currentHeldEstates }),
+    gold: currentPalaceGold,
+    heldEstates: currentHeldEstates,
+  };
 
   // Hardening 2: Idempotent per month — never double-charge the same month
   if (input.lastSpentMonth >= currentMonth) {
@@ -191,7 +197,7 @@ export function runCitizenSpending(
       gold: input.gold,
       citizens: input.citizens,
       citizenWealth: sumCitizenWealth(input.citizens),
-      palaceOfPeople: { gold: currentPalaceGold },
+      palaceOfPeople: basePalace,
       lastMonthStats: createZeroLastMonthStats(),
       lastSpentMonth: input.lastSpentMonth,
       ledgerItems: [],
@@ -217,7 +223,7 @@ export function runCitizenSpending(
     gold: Math.max(0, Math.floor(input.gold)),
     citizens: initialCitizens,
     citizenWealth: sumCitizenWealth(initialCitizens),
-    palaceOfPeople: { gold: currentPalaceGold },
+    palaceOfPeople: basePalace,
     peoplesBank: {
       gold: 0,
       portfolio: {},

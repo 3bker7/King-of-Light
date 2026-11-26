@@ -35,9 +35,13 @@ export function canMarry(
   a: Citizen | undefined,
   b: Citizen | undefined,
   citizens: Citizen[],
-  totalMonths: number
+  totalMonths: number,
+  excludedCitizenIds?: ReadonlySet<number>
 ): { ok: boolean; reason?: string } {
   if (!a || !b) return { ok: false, reason: 'missing_citizen' };
+  if (excludedCitizenIds && (excludedCitizenIds.has(a.id) || excludedCitizenIds.has(b.id))) {
+    return { ok: false, reason: 'bereaved_this_month' };
+  }
   if (a.id === b.id) return { ok: false, reason: 'same_person' };
   if (a.gender === b.gender) return { ok: false, reason: 'same_gender' };
   if (areCloseRelatives(a, b)) return { ok: false, reason: 'close_relative' };
@@ -231,7 +235,8 @@ export interface MarriageOfficeResult {
 export function runMarriageOffice(
   citizens: Citizen[],
   totalMonths: number,
-  policeRecords: PoliceRecord[]
+  policeRecords: PoliceRecord[],
+  excludedCitizenIds?: ReadonlySet<number>
 ): MarriageOfficeResult {
   let currentCitizens = citizens;
   let currentRecords = policeRecords;
@@ -240,6 +245,7 @@ export function runMarriageOffice(
     (c) =>
       c.gender === 'm' &&
       c.spouseId === null &&
+      !(excludedCitizenIds?.has(c.id)) &&
       ageYears(c, totalMonths) >= 15 &&
       (c.jobCubeId !== null || c.cvFiled)
   );
@@ -247,6 +253,7 @@ export function runMarriageOffice(
     (c) =>
       c.gender === 'f' &&
       c.spouseId === null &&
+      !(excludedCitizenIds?.has(c.id)) &&
       ageYears(c, totalMonths) >= 15 &&
       (c.jobCubeId !== null || c.cvFiled)
   );
@@ -264,7 +271,7 @@ export function runMarriageOffice(
   for (const m of males) {
     const mAge = ageYears(m, totalMonths);
     for (const f of females) {
-      if (!canMarry(m, f, currentCitizens, totalMonths).ok) continue;
+      if (!canMarry(m, f, currentCitizens, totalMonths, excludedCitizenIds).ok) continue;
       const fAge = ageYears(f, totalMonths);
       candidates.push({
         maleId: m.id,

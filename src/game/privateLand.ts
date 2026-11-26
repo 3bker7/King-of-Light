@@ -131,7 +131,9 @@ export function processPrivateConstruction(input: {
     })),
     citizenWealth: sumCitizenWealth(input.citizens),
     palaceOfPeople: {
+      ...(input.palaceOfPeople ?? { gold: 0, heldEstates: 0 }),
       gold: Math.max(0, Math.floor(input.palaceOfPeople?.gold ?? 0)),
+      heldEstates: Math.max(0, Math.floor(input.palaceOfPeople?.heldEstates ?? 0)),
     },
     peoplesBank: {
       gold: 0,
@@ -552,7 +554,7 @@ export function resolveLandRequest(input: {
     gold: Math.max(0, Math.floor(input.gold)),
     citizens: input.citizens,
     citizenWealth: sumCitizenWealth(input.citizens),
-    palaceOfPeople: { gold: 0 },
+    palaceOfPeople: { gold: 0, heldEstates: 0 },
     peoplesBank: {
       gold: 0,
       portfolio: {},

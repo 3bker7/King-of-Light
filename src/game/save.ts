@@ -49,6 +49,10 @@ import { sanitizeDecreesOnHydrate } from './decrees';
 import { computeInflationIndex, rolloverBoursePrices } from './economy';
 import { transferGold } from './goldLedger';
 import { runMonthlyProcessor } from './monthlyProcessor';
+import {
+  sanitizeEternalRecordOnHydrate,
+  sanitizePalaceOfPeopleOnHydrate,
+} from './mortality';
 import { computeNeedsAndSatisfaction, processDayRolloverPeople } from './people';
 import { cleanupEmigratedPrivateOwners, syncPrivateAds } from './privateJobs';
 import { sanitizePrivateLandOnHydrate } from './privateLand';
@@ -77,6 +81,7 @@ import type {
   AwayReportData,
   BankLoan,
   Cube,
+  DeceasedRecord,
   Decree,
   GameState,
   LastMonthStats,
@@ -161,6 +166,8 @@ export function serializeGameState(state: GameState, now: number): PersistedSave
     prayerLog: state.prayerLog,
     lastPrayerTriggerKey: state.lastPrayerTriggerKey,
     prayerBonusPool: state.prayerBonusPool,
+    eternalRecord: state.eternalRecord,
+    lastDeathMonth: state.lastDeathMonth,
   };
 }
 
@@ -425,9 +432,16 @@ export function simulateOfflineProgress(
       ? Math.max(0, Math.trunc(saved.lastSpentMonth))
       : 0;
 
-  let nextPalaceOfPeople: PalaceOfPeople = saved.palaceOfPeople ?? {
-    gold: PALACE_START_GOLD,
-  };
+  let nextPalaceOfPeople: PalaceOfPeople = sanitizePalaceOfPeopleOnHydrate(
+    saved.palaceOfPeople,
+    PALACE_START_GOLD
+  );
+  let nextEternalRecord = sanitizeEternalRecordOnHydrate(saved.eternalRecord);
+  let nextLastDeathMonth =
+    typeof saved.lastDeathMonth === 'number' &&
+    Number.isFinite(saved.lastDeathMonth)
+      ? Math.trunc(saved.lastDeathMonth)
+      : -1;
   let nextBankTrust =
     typeof saved.bankTrust === 'number'
       ? Math.max(0, Math.min(100, Math.floor(saved.bankTrust)))
@@ -695,7 +709,6 @@ export function simulateOfflineProgress(
   );
   const popFloor = saved.level === 1 ? LEVEL_1_POPULATION_FLOOR : 0;
   nextPopulation = Math.max(popFloor, startPopulation + clampedPopDelta);
-  const finalPopDelta = nextPopulation - startPopulation;
 
   const targetTotalMonths = Math.floor((Math.max(1, nextDay) - 1) / MONTH_DAYS);
   const monthsToRun = Math.min(3, Math.max(0, targetTotalMonths - startTotalMonths));
@@ -769,6 +782,7 @@ export function simulateOfflineProgress(
   // Element 6.1: Run the SAME unified monthly processor for each full month crossed (cap 3).
   // Land requests may generate or expire offline, and are NEVER auto-approved.
   let payrollPaid = 0;
+  const offlineDeaths: DeceasedRecord[] = [];
   for (let m = 0; m < monthsToRun; m++) {
     const monthBoundaryDay = (startTotalMonths + m + 1) * MONTH_DAYS + 1;
     const mp = runMonthlyProcessor({
@@ -806,10 +820,13 @@ export function simulateOfflineProgress(
       hungerFlag: nextHungerFlag,
       skipBriefing: m < monthsToRun - 1,
       isOffline: true,
+      eternalRecord: nextEternalRecord,
+      lastDeathMonth: nextLastDeathMonth,
       day: monthBoundaryDay,
       now,
     });
     nextTotalMonths = mp.totalMonths;
+    nextPopulation = mp.population;
     nextCubes = mp.cubes;
     nextWarehouse = mp.warehouse;
     nextGold = mp.gold;
@@ -838,6 +855,11 @@ export function simulateOfflineProgress(
     nextCamp = mp.camp;
     nextPendingArrivals = mp.pendingArrivals;
     nextProvinceEvents = mp.provinceEvents;
+    nextEternalRecord = mp.eternalRecord;
+    nextLastDeathMonth = mp.lastDeathMonth;
+    if (mp.deaths.length > 0) {
+      offlineDeaths.push(...mp.deaths);
+    }
     if (mp.addedProvinceEvents.length > 0) {
       offlineProvinceEvents.push(...mp.addedProvinceEvents);
     }
@@ -1016,6 +1038,8 @@ export function simulateOfflineProgress(
     camp: nextCamp,
     pendingArrivals: nextPendingArrivals,
     provinceEvents: nextProvinceEvents,
+    eternalRecord: nextEternalRecord,
+    lastDeathMonth: nextLastDeathMonth,
     lastSavedAt: now,
   };
   // H5: Ensure derived `provinces` is NEVER carried through into persisted save data
@@ -1029,7 +1053,7 @@ export function simulateOfflineProgress(
           wasCapped,
           goldEarnedByShops,
           resourcesProduced,
-          populationDelta: finalPopDelta,
+          populationDelta: nextPopulation - startPopulation,
           biggestPriceMove,
           payrollPaid,
           arrearsAdded,
@@ -1044,6 +1068,7 @@ export function simulateOfflineProgress(
           loanDeferredAdded,
           bankTradesCount,
           provinceEvents: offlineProvinceEvents,
+          ...(offlineDeaths.length > 0 ? { deaths: offlineDeaths } : {}),
         }
       : null;
 

@@ -1132,6 +1132,15 @@ export class PeopleAgentsManager {
       );
     }
 
+    // Prune any offscreen prayer timers for citizens no longer alive in the registry
+    if (this.lastCitizens.length > 0 || this.citizenById.size === 0) {
+      for (const cid of this.offscreenPrayerTimers.keys()) {
+        if (!this.citizenById.has(cid)) {
+          this.offscreenPrayerTimers.delete(cid);
+        }
+      }
+    }
+
     // For kingdoms with > MAX_VISIBLE_AGENTS citizens (or visual police offset), track off-screen selected attendees
     // using real street-grid reachability + realistic walk time + 1 game-minute prayer duration (never teleporting)
     const dispatchKey = `${session.id}`;
@@ -1150,7 +1159,8 @@ export class PeopleAgentsManager {
         const mosqueSpot = this.mosqueSpots.get(att.mosqueCubeId);
         if (!mosqueSpot || !this.streetGrid) continue;
         const cit = this.citizenById.get(att.citizenId);
-        const startCubeId = cit?.jobCubeId ?? cit?.homeCubeId ?? this.palaceSpot.cubeId;
+        if (!cit) continue;
+        const startCubeId = cit.jobCubeId ?? cit.homeCubeId ?? this.palaceSpot.cubeId;
         const startCube = this.lastCubes[startCubeId];
         const startPt = startCube
           ? cellToWorldCenter(startCube.row, startCube.col)
@@ -1532,6 +1542,12 @@ export class PeopleAgentsManager {
       for (let i = 0; i < citizens.length; i++) {
         this.citizenById.set(citizens[i].id, citizens[i]);
       }
+      // Immediately drop any offscreen prayer timer for a citizen no longer in the living registry
+      for (const cid of this.offscreenPrayerTimers.keys()) {
+        if (!this.citizenById.has(cid)) {
+          this.offscreenPrayerTimers.delete(cid);
+        }
+      }
     }
     this.houseSpots = [];
     this.breakSpots = [];
@@ -1682,8 +1698,13 @@ export class PeopleAgentsManager {
             approachOffset: this.palaceSpot.approachOffset,
           };
 
-    // Visible agents capped at min(population, 36)
-    const targetCount = Math.min(MAX_VISIBLE_AGENTS, Math.max(0, Math.floor(population)));
+    // Visible agents capped at min(living population, 36); never exceed living registry count
+    const effectivePopulation =
+      citizens !== undefined ? Math.min(population, citizens.length) : population;
+    const targetCount = Math.min(
+      MAX_VISIBLE_AGENTS,
+      Math.max(0, Math.floor(effectivePopulation))
+    );
     const campSet = new Set<number>(camp?.residentIds ?? []);
     const availableCitizens = (citizens ?? []).filter((c) => !campSet.has(c.id));
     const claimedCitizenIds = new Set<number>();
@@ -1817,20 +1838,44 @@ export class PeopleAgentsManager {
     const gridSig = `${seaCoords.length}:${this.houseSpots.length}:${this.freeStreetCenters.length}`;
     const fullSig = `${roleSig}#${gridSig}`;
 
-    if (fullSig !== this.lastRoleSignature || this.agents.length !== targetCount) {
-      this.lastRoleSignature = fullSig;
-
-      // Trim excess agents cleanly if population dropped
-      while (this.agents.length > targetCount) {
-        const removed = this.agents.pop();
-        if (removed) {
-          this.group.remove(removed.group);
-          if (this.selectedAgentId === removed.id) {
+    // Drop any agent whose bound citizen is no longer in the living registry (death / emigration)
+    let droppedDeceased = false;
+    if (citizens !== undefined) {
+      for (let i = this.agents.length - 1; i >= 0; i--) {
+        const a = this.agents[i];
+        if (a.citizenId !== null && !this.citizenById.has(a.citizenId)) {
+          this.group.remove(a.group);
+          if (this.selectedAgentId === a.id) {
             this.selectedAgentId = null;
             this.selectedRingMesh.visible = false;
           }
+          this.agents.splice(i, 1);
+          droppedDeceased = true;
         }
       }
+    }
+
+    if (
+      droppedDeceased ||
+      fullSig !== this.lastRoleSignature ||
+      this.agents.length !== targetCount
+    ) {
+      this.lastRoleSignature = fullSig;
+
+      // Match existing agents stably by citizenId so a death removes ONLY the dead citizen's agent
+      // (preventing surviving agents from swapping IDs or hijacking an open CitizenCard)
+      const existingByCitizenId = new Map<number, LivingAgent>();
+      const existingUnbound: LivingAgent[] = [];
+      for (let i = 0; i < this.agents.length; i++) {
+        const a = this.agents[i];
+        if (a.citizenId !== null) {
+          existingByCitizenId.set(a.citizenId, a);
+        } else {
+          existingUnbound.push(a);
+        }
+      }
+      const nextAgents: LivingAgent[] = [];
+      const consumedAgentIds = new Set<number>();
 
       for (let i = 0; i < targetCount; i++) {
         const spec = desiredSpecs[i];
@@ -1844,8 +1889,22 @@ export class PeopleAgentsManager {
             ? this.houseSpots[i % this.houseSpots.length]
             : fallbackHome);
 
-        const existing = this.agents[i];
+        let existing: LivingAgent | undefined;
+        if (spec.citizen) {
+          existing = existingByCitizenId.get(spec.citizen.id);
+          if (existing) {
+            existingByCitizenId.delete(spec.citizen.id);
+          }
+        } else {
+          const idx = existingUnbound.findIndex((a) => a.role === spec.role);
+          if (idx >= 0) {
+            existing = existingUnbound.splice(idx, 1)[0];
+          } else if (existingUnbound.length > 0) {
+            existing = existingUnbound.shift();
+          }
+        }
         if (existing) {
+          consumedAgentIds.add(existing.id);
           existing.homeSpot = home;
           existing.citizenId = spec.citizen?.id ?? null;
           if (spec.citizen) {
@@ -1935,6 +1994,7 @@ export class PeopleAgentsManager {
               );
             }
           }
+          nextAgents.push(existing);
         } else {
           const id = this.nextAgentId++;
           const isFemale = spec.citizen
@@ -1995,8 +2055,24 @@ export class PeopleAgentsManager {
             prayerReturnTarget: null,
           };
           this.assignNextRoutine(agent);
-          this.agents.push(agent);
+          nextAgents.push(agent);
         }
+      }
+
+      // Remove any remaining old agents that were not reused
+      for (let i = 0; i < this.agents.length; i++) {
+        const old = this.agents[i];
+        if (!consumedAgentIds.has(old.id)) {
+          this.group.remove(old.group);
+          if (this.selectedAgentId === old.id) {
+            this.selectedAgentId = null;
+            this.selectedRingMesh.visible = false;
+          }
+        }
+      }
+      this.agents.length = 0;
+      for (let i = 0; i < nextAgents.length; i++) {
+        this.agents.push(nextAgents[i]);
       }
     } else {
       // Even when roster signature is unchanged, ensure schedule phases stay aligned with latest clock
@@ -2049,8 +2125,18 @@ export class PeopleAgentsManager {
       }
     }
 
-    // 1. Check previously camping citizens who left the camp: if granted a house live, walk them via street A*
+    // 1. Check previously camping citizens who left the camp: if deceased/removed drop immediately; if granted a house live, walk them via street A*
     for (const [citId, agent] of this.campAgents.entries()) {
+      const stillAlive = citizens === undefined || citizenById.has(citId);
+      if (!stillAlive) {
+        this.group.remove(agent.group);
+        if (this.selectedAgentId === agent.agentId) {
+          this.selectedAgentId = null;
+          this.selectedRingMesh.visible = false;
+        }
+        this.campAgents.delete(citId);
+        continue;
+      }
       if (residentSet.has(citId)) continue;
       if (agent.mode === 'WALKING_TO_HOUSE' || agent.mode === 'ENTERING_NEW_HOUSE') {
         continue;
@@ -2109,6 +2195,7 @@ export class PeopleAgentsManager {
         for (let idx = 0; idx < residentIds.length; idx++) {
           const citId = residentIds[idx];
           const cit = citizenById.get(citId);
+          if (citizens !== undefined && !cit) continue;
           const spot = spotOffsets[idx % spotOffsets.length];
           const wx = center.x + spot.dx;
           const wz = center.z + spot.dz;

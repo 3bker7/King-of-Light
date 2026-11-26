@@ -52,6 +52,15 @@ export function CitizenCard({
   onToggleFollow,
   onClose,
 }: CitizenCardProps) {
+  // Never render a card for a citizen who is no longer in the living registry (deceased/emigrated)
+  if (
+    state &&
+    typeof citizen.citizenId === 'number' &&
+    !state.citizens.some((c) => c.id === citizen.citizenId)
+  ) {
+    return null;
+  }
+
   let scheduleLineAr: string | null = null;
   if (citizen.prayerStatus === 'to_prayer') {
     scheduleLineAr = 'في طريقه إلى المسجد للصلاة';

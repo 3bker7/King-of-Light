@@ -72,6 +72,10 @@ import {
 } from './goldLedger';
 import { runMonthlyProcessor } from './monthlyProcessor';
 import {
+  sanitizeEternalRecordOnHydrate,
+  sanitizePalaceOfPeopleOnHydrate,
+} from './mortality';
+import {
   computeNeedsAndSatisfaction,
   getTotalFood,
   processDayRolloverPeople,
@@ -383,7 +387,7 @@ export function createFreshGameState(now = Date.now()): GameState {
     landRequests: [],
     privateAds: [],
     lastSpentMonth: 0,
-    palaceOfPeople: { gold: PALACE_START_GOLD },
+    palaceOfPeople: { gold: PALACE_START_GOLD, heldEstates: 0 },
     bankTrust: TRUST_START,
     bankLoans: [],
     peoplesBank: { gold: BANK_START_GOLD, portfolio: {}, totalTrades: 0, lastTradeMonth: null, lastTradeAr: null },
@@ -406,6 +410,8 @@ export function createFreshGameState(now = Date.now()): GameState {
     prayerBonusPool: {},
     activePrayer: null,
     prayerBanner: null,
+    eternalRecord: [],
+    lastDeathMonth: -1,
   };
 }
 
@@ -643,7 +649,10 @@ export function hydrateGameState(saved: PersistedSaveData): GameState {
       Number.isFinite(saved.lastSpentMonth)
         ? Math.max(0, Math.trunc(saved.lastSpentMonth))
         : 0,
-    palaceOfPeople: saved.palaceOfPeople ?? { gold: PALACE_START_GOLD },
+    palaceOfPeople: sanitizePalaceOfPeopleOnHydrate(
+      saved.palaceOfPeople,
+      PALACE_START_GOLD
+    ),
     bankTrust:
       typeof saved.bankTrust === 'number'
         ? Math.max(0, Math.min(100, Math.floor(saved.bankTrust)))
@@ -695,6 +704,12 @@ export function hydrateGameState(saved: PersistedSaveData): GameState {
     prayerBonusPool: sanitizePrayerBonusPoolOnHydrate(saved.prayerBonusPool),
     activePrayer: null,
     prayerBanner: null,
+    eternalRecord: sanitizeEternalRecordOnHydrate(saved.eternalRecord),
+    lastDeathMonth:
+      typeof saved.lastDeathMonth === 'number' &&
+      Number.isFinite(saved.lastDeathMonth)
+        ? Math.trunc(saved.lastDeathMonth)
+        : -1,
   };
 }
 
@@ -1027,6 +1042,8 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
       const nextPrayerBonusPool = prod.prayerBonusPool;
       let nextActivePrayer = state.activePrayer;
       let nextPrayerBanner = state.prayerBanner;
+      let nextEternalRecord = state.eternalRecord;
+      let nextLastDeathMonth = state.lastDeathMonth ?? -1;
       const tickEmbassyCubeIds =
         state.embassyPlots.length > 0
           ? new Set(state.embassyPlots.map((p) => p.cubeId))
@@ -1276,9 +1293,12 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
             embassyCubeIds: tickEmbassyCubeIds,
             hungerFlag: nextHungerFlag,
             isOffline: false,
+            eternalRecord: nextEternalRecord,
+            lastDeathMonth: nextLastDeathMonth,
             day: nextDay,
           });
           nextTotalMonths = mp.totalMonths;
+          nextPopulation = mp.population;
           nextCubes = mp.cubes;
           nextWarehouse = mp.warehouse;
           nextGold = mp.gold;
@@ -1307,6 +1327,8 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
           nextCamp = mp.camp;
           nextPendingArrivals = mp.pendingArrivals;
           nextProvinceEvents = mp.provinceEvents;
+          nextEternalRecord = mp.eternalRecord;
+          nextLastDeathMonth = mp.lastDeathMonth;
           nextLastImportedFoodUnits = mp.importedFoodUnits;
 
           for (const item of mp.ledgerItems) {
@@ -1510,6 +1532,8 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         prayerBonusPool: nextPrayerBonusPool,
         activePrayer: nextActivePrayer,
         prayerBanner: nextPrayerBanner,
+        eternalRecord: nextEternalRecord,
+        lastDeathMonth: nextLastDeathMonth,
         toasts: appendToasts(state.toasts, newToasts),
         pendingAudioCue,
       };

@@ -186,7 +186,9 @@ export function processBankMonth(
   let cubes = input.cubes.map((c) => ({ ...c }));
   let gold = Math.max(0, Math.floor(input.gold));
   let palaceOfPeople: PalaceOfPeople = {
+    ...input.palaceOfPeople,
     gold: Math.max(0, Math.floor(input.palaceOfPeople.gold)),
+    heldEstates: Math.max(0, Math.floor(input.palaceOfPeople.heldEstates ?? 0)),
   };
   let bankTrust = Math.max(0, Math.min(100, Math.floor(input.bankTrust)));
   let bankLoans: BankLoan[] = input.bankLoans.map((l) => ({ ...l }));

@@ -86,6 +86,7 @@ const OFFICE_LABELS: Record<OfficeFax['office'], string> = {
   housing: 'مكتب الإسكان',
   labor: 'مكتب العمل',
   bank: 'البنك الشرعي',
+  registry: 'السجل المدني',
 };
 
 const FAX_STATUS_META: Record<OfficeFaxStatus, { label: string; cls: string }> = {

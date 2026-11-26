@@ -1,5 +1,6 @@
-import { AlertTriangle, Clock, Coins, Flag, Globe, Landmark, ScrollText, TrendingUp, Users, Wallet } from 'lucide-react';
+import { AlertTriangle, BookOpen, Clock, Coins, Flag, Globe, Landmark, ScrollText, TrendingUp, Users, Wallet } from 'lucide-react';
 import { TRADED_RESOURCES } from '../game/constants';
+import { formatAwayDeathsLineAr } from '../game/mortality';
 import { formatDurationArabic, STRINGS } from '../game/strings';
 import type { AwayReportData } from '../game/types';
 import { ResourceIcon } from './ResourceIcon';
@@ -22,7 +23,7 @@ export function AwayReport({ report, onClose }: AwayReportProps) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
-      <div className="w-full max-w-md parchment-panel border-2 border-[#C9962E] p-5 space-y-4">
+      <div className="w-full max-w-md max-h-[85dvh] overflow-y-auto parchment-scroll parchment-panel border-2 border-[#C9962E] p-5 space-y-4">
         <div className="flex items-center gap-2.5 border-b border-[#E3D3AC] pb-3">
           <div className="w-10 h-10 rounded-xl bg-[#14524A] text-[#F2CA6B] flex items-center justify-center shrink-0">
             <Clock className="w-5 h-5" />
@@ -132,6 +133,16 @@ export function AwayReport({ report, onClose }: AwayReportProps) {
                 : report.populationDelta}
             </span>
           </div>
+
+          {/* V5 Prompt 4 Element 5: Somber, dignified named notice for deaths during absence */}
+          {report.deaths && report.deaths.length > 0 && (
+            <div className="flex items-start gap-2 p-2.5 rounded-xl bg-[#F3ECE0] border border-[#C5B8A2] font-bold text-[#3F352A] leading-relaxed">
+              <BookOpen className="w-4 h-4 text-[#6B5B47] shrink-0 mt-0.5" />
+              <span className="tabular-nums-latin">
+                {formatAwayDeathsLineAr(report.deaths)}
+              </span>
+            </div>
+          )}
 
           {/* Element 8.2: Lifecycle summary when any count is non-zero */}
           {((report.births ?? 0) +

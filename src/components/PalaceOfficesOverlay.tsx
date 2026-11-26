@@ -1,4 +1,5 @@
 import {
+  BookOpen,
   Briefcase,
   FileText,
   Hammer,
@@ -15,9 +16,19 @@ import { ageYears } from '../game/citizens';
 import { getHousingQueue } from '../game/housingOffice';
 import { getActiveCVs } from '../game/laborOffice';
 import { countMarriageEligibleSingles } from '../game/marriageOffice';
+import {
+  DEATH_CAUSE_LABELS_AR,
+  ETERNAL_RECORD_EMPTY_AR,
+  formatEstateHeldLineAr,
+  formatGameMonthAr,
+  getVisibleEternalRecord,
+  MAX_ETERNAL_DISPLAY_ROWS,
+  resolveDeceasedFamilyForCitizen,
+} from '../game/mortality';
 import { STRINGS } from '../game/strings';
 import type {
   CitizenAttrKey,
+  DeceasedRecord,
   GameState,
   PoliceRecordKind,
   ThemeId,
@@ -31,7 +42,8 @@ export type PalaceOfficeTab =
   | 'marriage'
   | 'police'
   | 'travel'
-  | 'citizens';
+  | 'citizens'
+  | 'eternal';
 
 interface PalaceOfficesOverlayProps {
   state: GameState;
@@ -75,6 +87,10 @@ const POLICE_KIND_LABELS: Record<PoliceRecordKind, { label: string; cls: string 
     label: 'بيع أرض',
     cls: 'bg-[#FBF0D2] border-[#C9962E] text-[#7D530D]',
   },
+  death: {
+    label: 'وفاة',
+    cls: 'bg-[#ECE7DD] border-[#B9AE9A] text-[#4F4336]',
+  },
 };
 
 const MAX_CITIZEN_ROWS = 50;
@@ -91,13 +107,29 @@ export function PalaceOfficesOverlay({
   worldKingdoms = [],
   onToggleBorderOpen,
 }: PalaceOfficesOverlayProps) {
-  const { citizens, totalMonths, policeRecords, officeFaxes } = state;
+  const { citizens, totalMonths, policeRecords, officeFaxes, eternalRecord } =
+    state;
 
   const citizenById = useMemo(() => {
     const map = new Map<number, (typeof citizens)[number]>();
     for (const c of citizens) map.set(c.id, c);
     return map;
   }, [citizens]);
+
+  const eternalById = useMemo(() => {
+    const map = new Map<number, DeceasedRecord>();
+    for (const rec of eternalRecord) map.set(rec.citizenId, rec);
+    return map;
+  }, [eternalRecord]);
+
+  const visibleEternal = useMemo(
+    () => getVisibleEternalRecord(eternalRecord, MAX_ETERNAL_DISPLAY_ROWS),
+    [eternalRecord]
+  );
+  const remainingEternalCount = Math.max(
+    0,
+    eternalRecord.length - MAX_ETERNAL_DISPLAY_ROWS
+  );
 
   const activeCvs = useMemo(
     () => getActiveCVs(citizens, totalMonths),
@@ -176,6 +208,7 @@ export function PalaceOfficesOverlay({
     { id: 'police', label: 'الشرطة', icon: Shield },
     { id: 'travel', label: 'مكتب السفر', icon: Plane },
     { id: 'citizens', label: 'سجل المواطنين', icon: Users },
+    { id: 'eternal', label: 'السجل الأبدي', icon: BookOpen },
   ];
 
   return (
@@ -697,6 +730,10 @@ export function PalaceOfficesOverlay({
                       : age >= 60
                         ? 'متقاعد'
                         : 'يبحث عن عمل';
+                  const { deceasedParents, deceasedSpouse } =
+                    resolveDeceasedFamilyForCitizen(c, eternalById, eternalRecord);
+                  const hasDeceasedFamily =
+                    deceasedParents.length > 0 || deceasedSpouse !== null;
                   return (
                     <div
                       key={c.id}
@@ -713,6 +750,24 @@ export function PalaceOfficesOverlay({
                           {statusLabel} · أسرة #{c.householdId}
                           {c.homeCubeId === null ? ' (بلا سكن)' : ''}
                         </div>
+                        {hasDeceasedFamily && (
+                          <div className="text-[10px] font-bold text-[#7A6B58]">
+                            {deceasedParents.length > 0 && (
+                              <span>
+                                الوالدان:{' '}
+                                {deceasedParents
+                                  .map((p) => `${p.name} (متوفى)`)
+                                  .join('، ')}
+                              </span>
+                            )}
+                            {deceasedParents.length > 0 && deceasedSpouse && ' · '}
+                            {deceasedSpouse && (
+                              <span>
+                                زوج سابق: {deceasedSpouse.name} (متوفى)
+                              </span>
+                            )}
+                          </div>
+                        )}
                       </div>
                       <span className="font-extrabold text-[#8A5F12] shrink-0 tabular-nums-latin">
                         {c.wealth} ذهب
@@ -726,6 +781,83 @@ export function PalaceOfficesOverlay({
                   و {remainingCitizensCount} آخرون
                 </p>
               )}
+            </div>
+          )}
+
+          {activeTab === 'eternal' && (
+            <div className="space-y-2.5">
+              {state.palaceOfPeople.heldEstates > 0 && (
+                <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-[#F3ECE0] border border-[#C9BEA9] text-[#3F352A]">
+                  <span className="font-extrabold text-[11px]">
+                    أمانات التركات المحفوظة لدى قصر الشعب
+                  </span>
+                  <span className="font-extrabold text-xs text-[#6F5528] tabular-nums-latin">
+                    {state.palaceOfPeople.heldEstates} ذهب
+                  </span>
+                </div>
+              )}
+
+              <div className="p-2.5 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-extrabold text-[#2B2118]">
+                    السجل الأبدي
+                  </span>
+                  <span className="text-[11px] font-extrabold text-[#5E5142] tabular-nums-latin">
+                    {eternalRecord.length} قيد
+                  </span>
+                </div>
+
+                {visibleEternal.length === 0 ? (
+                  <p className="py-4 text-center text-xs font-bold text-[#7A6B58]">
+                    {ETERNAL_RECORD_EMPTY_AR}
+                  </p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {visibleEternal.map((rec) => {
+                      const lastJobLabel =
+                        rec.lastJobThemeId &&
+                        STRINGS.themes[rec.lastJobThemeId as ThemeId]
+                          ? STRINGS.themes[rec.lastJobThemeId as ThemeId].name
+                          : null;
+                      const estateLine = formatEstateHeldLineAr(rec.estateAmount);
+                      return (
+                        <div
+                          key={`${rec.citizenId}-${rec.deathMonth}`}
+                          className="p-2.5 rounded-lg bg-[#F5EFE2] border border-[#DBD0BC] space-y-1 text-[11px]"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="font-extrabold text-[#2B2118] truncate">
+                              {rec.name}{' '}
+                              <span className="font-bold text-[#6F5C43] tabular-nums-latin">
+                                ({rec.ageAtDeath} سنة)
+                              </span>
+                            </div>
+                            <span className="px-2 py-0.5 rounded border bg-[#ECE7DD] border-[#B9AE9A] text-[#4F4336] text-[10px] font-extrabold shrink-0">
+                              {DEATH_CAUSE_LABELS_AR[rec.cause]}
+                            </span>
+                          </div>
+                          <div className="text-[10px] font-bold text-[#6F5C43] tabular-nums-latin">
+                            الولادة: {formatGameMonthAr(rec.birthMonth)} · الوفاة:{' '}
+                            {formatGameMonthAr(rec.deathMonth)}
+                            {lastJobLabel ? ` · آخر عمل: ${lastJobLabel}` : ''}
+                          </div>
+                          {estateLine && (
+                            <div className="text-[10px] font-extrabold text-[#7D5A1B] tabular-nums-latin">
+                              {estateLine}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {remainingEternalCount > 0 && (
+                  <p className="pt-1 text-center text-[11px] font-extrabold text-[#6F5C43] tabular-nums-latin">
+                    و {remainingEternalCount} آخرون في السجل
+                  </p>
+                )}
+              </div>
             </div>
           )}
         </div>

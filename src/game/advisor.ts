@@ -95,6 +95,9 @@ export function classifyBankFaxKind(
 export function getFaxIssueKey(fax: OfficeFax): string {
   if (fax.office === 'housing') return 'housing:queue';
   if (fax.office === 'labor') return 'labor:cv';
+  if (fax.office === 'registry') {
+    return fax.id.startsWith('fax-orphan-') ? 'registry:orphan' : 'registry:death';
+  }
   if (fax.id.startsWith('fax-bank-offline-')) return 'bank:offline_deferred';
   return `bank:${classifyBankFaxKind(fax)}`;
 }
@@ -275,6 +278,25 @@ export function adviseFax(fax: OfficeFax, state: GameState): FaxAdvice {
       dataAr,
       recommendationAr: 'راجع لوحة البنك وادفع من الخزنة أو اسدد مبكراً جزئياً',
       action: { type: 'open_bank' },
+      resolved: false,
+    };
+  }
+
+  if (fax.office === 'registry') {
+    const totalDeceased = state.eternalRecord.length;
+    const heldEstates = state.palaceOfPeople.heldEstates;
+    if (fax.id.startsWith('fax-orphan-')) {
+      return {
+        dataAr: `بلاغ أسرة يتيمة من السجل المدني · إجمالي السجل الأبدي: ${totalDeceased}`,
+        recommendationAr: 'الأطفال في مسكنهم بأمان — تابع أحوال السجل المدني ورعايتهم',
+        action: { type: 'none' },
+        resolved: false,
+      };
+    }
+    return {
+      dataAr: `إجمالي الوفيات في السجل الأبدي: ${totalDeceased} · تركات محفوظة: ${heldEstates} ذهب`,
+      recommendationAr: 'اطّلع على تبويب السجل الأبدي في مكاتب القصر لحفظ أسماء المتوفين',
+      action: { type: 'none' },
       resolved: false,
     };
   }

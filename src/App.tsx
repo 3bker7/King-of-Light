@@ -801,7 +801,8 @@ export default function App() {
     return () => window.clearTimeout(timeout);
   }, [prayerBannerId]);
 
-  // Live refresh of selected citizen's destination & mood while citizen card is open
+  // Live refresh of selected citizen's destination & mood while citizen card is open;
+  // closes immediately if the citizen dies or leaves the living registry.
   useEffect(() => {
     if (selectedCitizenId === null) {
       setCitizenInfo(null);
@@ -809,7 +810,11 @@ export default function App() {
     }
     const refresh = () => {
       const info = worldRef.current?.getCitizenInfo(selectedCitizenId) ?? null;
-      if (!info) {
+      const isDeceasedOrGone =
+        info !== null &&
+        typeof info.citizenId === 'number' &&
+        !state.citizens.some((c) => c.id === info.citizenId);
+      if (!info || isDeceasedOrGone) {
         setSelectedCitizenId(null);
         setFollowCitizenId(null);
         setCitizenInfo(null);
@@ -820,7 +825,7 @@ export default function App() {
     refresh();
     const timer = window.setInterval(refresh, 350);
     return () => window.clearInterval(timer);
-  }, [selectedCitizenId]);
+  }, [selectedCitizenId, state.citizens]);
 
   // Element 6.1 & 9: Escape closes in strict stack order
   // (advisor -> bank -> palace offices overlay -> citizen card -> cube/kingdom card -> build panel/placement -> objectives -> modals)

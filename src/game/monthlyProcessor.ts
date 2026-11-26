@@ -22,6 +22,7 @@ import { runHousingOffice } from './housingOffice';
 import { applyMonthlyInstitutions } from './institutions';
 import { distributePayrollToCitizens, runLaborMatching } from './laborOffice';
 import { runMarriageOffice } from './marriageOffice';
+import { processDeaths } from './mortality';
 import { computeMonthlyPayroll } from './payroll';
 import { computeNeedsAndSatisfaction } from './people';
 import {
@@ -49,6 +50,7 @@ import type {
   BankLoan,
   Citizen,
   Cube,
+  DeceasedRecord,
   Decree,
   LastMonthStats,
   LandRequest,
@@ -103,6 +105,8 @@ export interface MonthlyProcessorInput {
   hungerFlag?: boolean;
   skipBriefing?: boolean;
   isOffline?: boolean;
+  eternalRecord?: DeceasedRecord[];
+  lastDeathMonth?: number;
   day: number;
   now?: number;
   rng?: () => number;
@@ -110,6 +114,7 @@ export interface MonthlyProcessorInput {
 
 export interface MonthlyProcessorResult {
   totalMonths: number;
+  population: number;
   cubes: Cube[];
   warehouse: Warehouse;
   gold: number;
@@ -139,6 +144,9 @@ export interface MonthlyProcessorResult {
   pendingArrivals: number;
   provinceEvents: ProvinceEvent[];
   addedProvinceEvents: ProvinceEvent[];
+  eternalRecord: DeceasedRecord[];
+  lastDeathMonth: number;
+  deaths: DeceasedRecord[];
   ledgerItems: LedgerEntry[];
   paid: number;
   unheldSlots: number;
@@ -207,7 +215,9 @@ export function runMonthlyProcessor(
   let warehouse: Warehouse = { ...input.warehouse };
   let gold = Math.max(0, Math.floor(input.gold));
   let palaceOfPeople: PalaceOfPeople = {
+    ...(input.palaceOfPeople ?? { gold: 0, heldEstates: 0 }),
     gold: Math.max(0, Math.floor(input.palaceOfPeople?.gold ?? 0)),
+    heldEstates: Math.max(0, Math.floor(input.palaceOfPeople?.heldEstates ?? 0)),
   };
   const zeroBank: PeoplesBank = {
     gold: 0,
@@ -223,6 +233,16 @@ export function runMonthlyProcessor(
   let privateAds = input.privateAds;
   let decrees: Decree[] = Array.isArray(input.decrees) ? [...input.decrees] : [];
 
+  let population = Math.max(0, Math.floor(input.population));
+  let eternalRecord: DeceasedRecord[] = Array.isArray(input.eternalRecord)
+    ? input.eternalRecord
+    : [];
+  let lastDeathMonth =
+    typeof input.lastDeathMonth === 'number' &&
+    Number.isFinite(input.lastDeathMonth)
+      ? Math.trunc(input.lastDeathMonth)
+      : -1;
+
   // (a) Aging & milestones scan
   const agingRes = runAgingAndMilestones(
     input.citizens,
@@ -230,12 +250,47 @@ export function runMonthlyProcessor(
     nextTotalMonths
   );
   let citizens = agingRes.citizens;
+  const citizensBeforeDeaths = citizens;
+
+  // (a2) DEATHS (V5 Prompt 4): immediately after aging and before labor/housing/marriages/payroll
+  const deathRes = processDeaths(
+    {
+      citizens,
+      population,
+      totalMonths: nextTotalMonths,
+      day: input.day,
+      gold,
+      citizenWealth,
+      palaceOfPeople,
+      peoplesBank: zeroBank,
+      ledger: [],
+      policeRecords,
+      officeFaxes: [],
+      eternalRecord,
+      lastDeathMonth,
+    },
+    input.rng
+  );
+  citizens = deathRes.state.citizens;
+  population = deathRes.state.population;
+  citizenWealth = deathRes.state.citizenWealth;
+  palaceOfPeople = deathRes.state.palaceOfPeople;
+  policeRecords = deathRes.state.policeRecords;
+  eternalRecord = deathRes.state.eternalRecord;
+  lastDeathMonth = deathRes.state.lastDeathMonth ?? nextTotalMonths;
+  if (deathRes.newFaxes.length > 0) {
+    officeFaxes = appendOrMergeFaxes(officeFaxes, deathRes.newFaxes, isOffline);
+  }
+  const bereavedSpouseSet =
+    deathRes.bereavedSpouseIds.length > 0
+      ? new Set<number>(deathRes.bereavedSpouseIds)
+      : undefined;
 
   // (b) Crown Labor matching (skips private cubes & private workers)
   const laborRes = runLaborMatching(
     citizens,
     cubes,
-    input.population,
+    population,
     nextTotalMonths
   );
   citizens = laborRes.citizens;
@@ -256,11 +311,12 @@ export function runMonthlyProcessor(
   );
   officeFaxes = appendOrMergeFaxes(officeFaxes, addedHousingFaxes, isOffline);
 
-  // (d) Marriages
+  // (d) Marriages (bereaved spouses from this month excluded until next month)
   const marriageRes = runMarriageOffice(
     citizens,
     nextTotalMonths,
-    policeRecords
+    policeRecords,
+    bereavedSpouseSet
   );
   citizens = marriageRes.citizens;
   policeRecords = marriageRes.policeRecords;
@@ -268,12 +324,11 @@ export function runMonthlyProcessor(
   // (e) School / Clinic / Elder modifiers
   citizens = applyMonthlyInstitutions(citizens, cubes, nextTotalMonths);
 
-  // (f) Reconcile citizens + emigrated private owner cleanup
-  const prevCitizensBeforeReconcile = citizens;
+  // (f) Reconcile citizens + emigrated/deceased private owner cleanup
   const recRes = reconcileCitizens({
     citizens,
     nextCitizenId,
-    population: input.population,
+    population,
     totalMonths: nextTotalMonths,
     citizenWealth,
     policeRecords,
@@ -309,7 +364,7 @@ export function runMonthlyProcessor(
 
   const emigCleanup = cleanupEmigratedPrivateOwners({
     cubes,
-    previousCitizens: prevCitizensBeforeReconcile,
+    previousCitizens: citizensBeforeDeaths,
     citizens,
     privateAds,
     policeRecords,
@@ -331,7 +386,7 @@ export function runMonthlyProcessor(
   citizens = prePaySync.citizens;
 
   // (g1) Crown Payroll (CROWN slots only) with Prompt 6 tax/grant transform — settled via transferGold
-  const payroll = computeMonthlyPayroll(cubes, input.population);
+  const payroll = computeMonthlyPayroll(cubes, population);
   const owed = Math.max(0, input.arrears) + payroll.due;
   const paid = Math.min(gold, owed);
   const nextArrears = Math.max(0, owed - paid);
@@ -344,7 +399,7 @@ export function runMonthlyProcessor(
   const distRes = distributePayrollToCitizens(
     citizens,
     cubes,
-    input.population,
+    population,
     paid,
     taxPolicy,
     availableCrownGrantGold
@@ -491,12 +546,12 @@ export function runMonthlyProcessor(
   }
 
   // (i) Citizen Spending (food -> leisure, idempotent on lastSpentMonth)
-  const staffingForSpending = computeStaffing(cubes, input.population, citizens);
+  const staffingForSpending = computeStaffing(cubes, population, citizens);
   const spendRes = runCitizenSpending({
     cubes,
     warehouse,
     gold,
-    population: input.population,
+    population,
     inflationIndex: input.inflationIndex,
     citizens,
     totalMonths: nextTotalMonths,
@@ -624,12 +679,12 @@ export function runMonthlyProcessor(
   const taxMoodDelta = computeTaxMoodDelta(
     taxPolicy,
     citizenWealth,
-    input.population
+    population
   );
   const boundaryNeeds = computeNeedsAndSatisfaction(
     cubes,
     warehouse,
-    input.population,
+    population,
     Boolean(input.hungerFlag),
     taxMoodDelta
   );
@@ -646,7 +701,7 @@ export function runMonthlyProcessor(
   const nextProvinces = computeProvinces({
     cubes,
     citizens,
-    population: input.population,
+    population,
   });
   const campResult = syncArrivalCamp(
     citizens,
@@ -700,7 +755,7 @@ export function runMonthlyProcessor(
         prices: input.prices,
         gold,
         citizenWealth,
-        population: input.population,
+        population,
         satisfaction: observedSatisfaction,
         provinces: nextProvinces,
         provinceEvents: nextProvinceEvents,
@@ -727,6 +782,7 @@ export function runMonthlyProcessor(
 
   return {
     totalMonths: nextTotalMonths,
+    population,
     cubes,
     warehouse,
     gold,
@@ -756,6 +812,9 @@ export function runMonthlyProcessor(
     pendingArrivals: nextPendingArrivals,
     provinceEvents: nextProvinceEvents,
     addedProvinceEvents,
+    eternalRecord,
+    lastDeathMonth,
+    deaths: deathRes.deaths,
     ledgerItems,
     paid,
     unheldSlots: distRes.unheldSlots,
@@ -768,7 +827,7 @@ export function runMonthlyProcessor(
       cvsFiled: agingRes.cvsFiled + recRes.cvsFiledCount,
       marriages: marriageRes.marriagesCount,
       housingGranted: housingRes.housingGranted,
-      faxesSent: housingRes.faxesSent,
+      faxesSent: housingRes.faxesSent + deathRes.newFaxes.length,
       privateBuilt: constructRes.builtCount,
       privateReverted: constructRes.revertedCount + emigCleanup.revertedPlots,
       landRequestsGenerated: landReqRes.generated ? 1 : 0,

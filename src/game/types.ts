@@ -249,7 +249,7 @@ export type OfficeFaxStatus = 'unread' | 'read' | 'acted' | 'dismissed';
 export interface OfficeFax {
   id: string;
   month: number;
-  office: 'housing' | 'labor' | 'bank';
+  office: 'housing' | 'labor' | 'bank' | 'registry';
   textAr: string;
   actionThemeId?: ThemeId;
   status: OfficeFaxStatus;
@@ -288,7 +288,8 @@ export type PoliceRecordKind =
   | 'marriage'
   | 'housing'
   | 'dissolution'
-  | 'land_sale';
+  | 'land_sale'
+  | 'death';
 
 export interface PoliceRecord {
   id: string;
@@ -296,6 +297,26 @@ export interface PoliceRecord {
   kind: PoliceRecordKind;
   textAr: string;
   citizenIds: number[];
+}
+
+export type DeceasedCause = 'old_age' | 'health';
+
+export interface DeceasedRecord {
+  readonly citizenId: number;
+  readonly name: string;
+  readonly gender: 'm' | 'f';
+  readonly birthMonth: number;
+  readonly deathMonth: number;
+  readonly ageAtDeath: number;
+  readonly cause: DeceasedCause;
+  readonly lastJobThemeId: string | null;
+  readonly homeCubeId: number | null;
+  readonly spouseId: number | null;
+  readonly parentIds: readonly number[];
+  readonly childrenCount: number;
+  readonly monthsWorked: number;
+  readonly estateAmount: number;
+  readonly wasMarried: boolean;
 }
 
 export interface LastMonthStats {
@@ -413,6 +434,8 @@ export interface AwayReportData {
   provinceEvents?: ProvinceEvent[];
   // Prompt 8 Online away-report world settlements
   worldSummary?: WorldAwaySummary;
+  // V5 Prompt 4 Mortality offline deaths
+  deaths?: DeceasedRecord[];
 }
 
 export interface EmbassyPlotMarker {
@@ -479,6 +502,7 @@ export interface ArrivalCamp {
 
 export interface PalaceOfPeople {
   gold: number;
+  heldEstates: number;
   totalSinksCollected?: number;
 }
 
@@ -608,6 +632,9 @@ export interface GameState {
   // Transient live-only prayer state (never persisted; never triggered offline)
   activePrayer: ActivePrayerSession | null;
   prayerBanner: PrayerBannerEvent | null;
+  // V5 Prompt 4 Mortality & Eternal Record (hydrate default [], cap 1000)
+  eternalRecord: DeceasedRecord[];
+  lastDeathMonth?: number;
 }
 
 export interface PersistedSaveData {
@@ -680,6 +707,9 @@ export interface PersistedSaveData {
   prayerLog?: PrayerLogEntry[];
   lastPrayerTriggerKey?: string | null;
   prayerBonusPool?: Record<number, number>;
+  // V5 Prompt 4 optional persisted eternal record
+  eternalRecord?: DeceasedRecord[];
+  lastDeathMonth?: number;
 }
 
 export interface StaffingStatus {
