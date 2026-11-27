@@ -4,6 +4,7 @@ import {
   createPoliceRecord,
   getNextHouseholdId,
 } from './citizens';
+import { addCitizenMemory } from './personality';
 import type { Citizen, PoliceRecord } from './types';
 
 export const MAX_MARRIAGES_PER_MONTH = 3;
@@ -101,6 +102,7 @@ export function marryCitizens(
   const next: Citizen[] = citizens.map((c) => ({
     ...c,
     attrs: { ...c.attrs },
+    memories: Array.isArray(c.memories) ? [...c.memories] : [],
     parentIds: c.parentIds
       ? ([c.parentIds[0], c.parentIds[1]] as [number, number])
       : null,
@@ -194,6 +196,18 @@ export function marryCitizens(
 
   const husband = a.gender === 'm' ? a : b;
   const wife = a.gender === 'f' ? a : b;
+
+  // V5 Prompt 5 Element 2: Both spouses record 'married' memory
+  const marriedMemory = {
+    month: totalMonths,
+    kind: 'married' as const,
+    cubeId: targetHomeCubeId,
+    amount: null,
+  };
+  const aIdx = next.findIndex((c) => c.id === a.id);
+  if (aIdx >= 0) next[aIdx] = addCitizenMemory(next[aIdx], marriedMemory);
+  const bIdx = next.findIndex((c) => c.id === b.id);
+  if (bIdx >= 0) next[bIdx] = addCitizenMemory(next[bIdx], marriedMemory);
 
   const nextRecords: PoliceRecord[] = [
     ...policeRecords,

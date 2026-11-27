@@ -5,6 +5,7 @@ import {
   getNextHouseholdId,
   getOwnedHouseUnits,
 } from './citizens';
+import { addCitizenMemory } from './personality';
 import type { Citizen, Cube, OfficeFax, PoliceRecord } from './types';
 
 export interface HousingQueueItem {
@@ -140,6 +141,7 @@ export function runHousingOffice(
   const next: Citizen[] = citizens.map((c) => ({
     ...c,
     attrs: { ...c.attrs },
+    memories: Array.isArray(c.memories) ? [...c.memories] : [],
     parentIds: c.parentIds
       ? ([c.parentIds[0], c.parentIds[1]] as [number, number])
       : null,
@@ -242,6 +244,20 @@ export function runHousingOffice(
         other.householdId = newHhId;
         other.homeCubeId = freeCubeId;
       }
+    }
+
+    // V5 Prompt 5 Element 2: Record 'got_housing' memory on granted citizen (and spouse if married couple)
+    const housingMem = {
+      month: totalMonths,
+      kind: 'got_housing' as const,
+      cubeId: freeCubeId,
+      amount: null,
+    };
+    const appIdx = next.findIndex((c) => c.id === applicant.id);
+    if (appIdx >= 0) next[appIdx] = addCitizenMemory(next[appIdx], housingMem);
+    if (spouse) {
+      const spIdx = next.findIndex((c) => c.id === spouse.id);
+      if (spIdx >= 0) next[spIdx] = addCitizenMemory(next[spIdx], housingMem);
     }
 
     housingGranted += 1;

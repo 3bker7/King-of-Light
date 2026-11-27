@@ -9,6 +9,7 @@ import { ageYears } from '../game/citizens';
 import { CLOCK_CONSTANTS } from '../game/clock';
 import { THEMES } from '../game/constants';
 import { FEMALE_NAMES, MALE_NAMES } from '../game/names';
+import { generateTraits } from '../game/personality';
 import { findPalaceCube, makeSlotKey } from '../game/production';
 import {
   getCitizenShift,
@@ -255,6 +256,79 @@ export const THEME_ARRIVED_TEXT: Record<ThemeId, string> = {
   school: 'يعلّم التلاميذ عند مدخل المدرسة',
 };
 
+// V5 Prompt 5 Element 5: Deterministic truthful Arabic speech variety (3 variants per state)
+export const WORKING_FALLBACK_VARIANTS: readonly [string, string, string] = [
+  'منهمك في عمله',
+  'يؤدي عمله الآن',
+  'يعمل بنشاط في موقعه',
+];
+
+export const GOING_HOME_VARIANTS: readonly [string, string, string] = [
+  THEME_GOING_TEXT.house,
+  'عائد إلى بيته الآن',
+  'متجه إلى منزله للراحة',
+];
+
+/**
+ * Deterministic 32-bit hash selector for daily speech phrasing:
+ * stable for the same (citizenId, gameDay) all day; varies across days and citizens.
+ */
+export function pickSpeechVariantIndex(
+  citizenId: number,
+  gameDay: number,
+  count = 3
+): number {
+  const safeCount = Math.max(1, Math.trunc(count));
+  const safeId = Number.isFinite(citizenId) ? Math.trunc(citizenId) : 0;
+  const safeDay = Number.isFinite(gameDay) ? Math.trunc(gameDay) : 1;
+  let h = (Math.imul(safeId, 37) + Math.imul(safeDay, 17)) ^ 0x9e3779b9;
+  h = Math.imul(h ^ (h >>> 16), 0x85ebca6b);
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+  return ((h ^ (h >>> 16)) >>> 0) % safeCount;
+}
+
+/**
+ * Returns the 3 truthful Arabic variants for walking to a specific workplace theme.
+ */
+export function getGoingToWorkVariants(
+  workTheme: ThemeId
+): readonly [string, string, string] {
+  const base = THEME_GOING_TEXT[workTheme];
+  const place =
+    workTheme === 'hotel'
+      ? 'الفندق'
+      : base.replace(/^في طريقه إلى\s+/, '');
+  return [
+    base,
+    `متجه إلى ${place} لبدء عمله`,
+    `يغادر نحو ${place} للعمل`,
+  ];
+}
+
+/**
+ * Pure truthful speech formatter for TO_WORK, WORKING (fallback only when no per-theme line exists), and TO_HOME.
+ */
+export function formatAgentSpeechVariant(
+  kind: 'to_work' | 'working' | 'to_home',
+  citizenId: number,
+  gameDay: number,
+  workTheme?: ThemeId | null
+): string {
+  const idx = pickSpeechVariantIndex(citizenId, gameDay, 3);
+  if (kind === 'to_home') {
+    return GOING_HOME_VARIANTS[idx];
+  }
+  if (kind === 'to_work') {
+    const theme: ThemeId = workTheme ?? 'palace';
+    return getGoingToWorkVariants(theme)[idx];
+  }
+  // WORKING: per-theme THEME_ARRIVED_TEXT remains authoritative whenever present
+  if (workTheme && THEME_ARRIVED_TEXT[workTheme]) {
+    return THEME_ARRIVED_TEXT[workTheme];
+  }
+  return WORKING_FALLBACK_VARIANTS[idx];
+}
+
 const BREAK_ARRIVED_TEXT: Record<BreakThemeId, string> = {
   mosque: 'يصلّي ويطمئن عند ساحة المسجد',
   restaurant: 'يتناول وجبة عند مدخل المطعم',
@@ -423,6 +497,7 @@ export class PeopleAgentsManager {
   // V5 Prompt 1 Element S1: Living Clock + Registry Citizen schedule wiring
   private clockSecondsOfDay: number = CLOCK_CONSTANTS.DEFAULT_START_SECONDS_OF_DAY;
   private totalMonths = 0;
+  private gameDay = 1;
   private lastPopulation = 0;
   private lastStaffedSlots: Set<string> = new Set();
   private lastCitizens: Citizen[] = [];
@@ -900,11 +975,12 @@ export class PeopleAgentsManager {
       // Visual-only fallback for palace guards (no police_post slot in build) or shoreline fishers
       const synthAge =
         agent.role === 'child' ? 9 : agent.role === 'elder' ? 62 : 28;
+      const synthBirthMonth = this.totalMonths - synthAge;
       citizen = {
         id: agent.id,
         name: agent.name,
         gender: agent.isFemale ? 'f' : 'm',
-        birthMonth: this.totalMonths - synthAge,
+        birthMonth: synthBirthMonth,
         householdId: 0,
         homeCubeId: agent.homeSpot.cubeId,
         spouseId: null,
@@ -925,6 +1001,9 @@ export class PeopleAgentsManager {
           health: 50,
           intelligence: 50,
         },
+        traits: generateTraits(agent.id, synthBirthMonth),
+        memories: [],
+        opinionOfKing: 0,
         cvFiled: false,
         housingRequestMonth: null,
       };
@@ -1523,7 +1602,8 @@ export class PeopleAgentsManager {
     citizens?: Citizen[],
     clockSecondsOfDay?: number,
     totalMonths?: number,
-    activePrayer?: ActivePrayerSession | null
+    activePrayer?: ActivePrayerSession | null,
+    gameDay?: number
   ): void {
     this.lastCubes = cubes;
     this.lastPopulation = population;
@@ -1535,6 +1615,9 @@ export class PeopleAgentsManager {
     }
     if (typeof totalMonths === 'number' && Number.isFinite(totalMonths)) {
       this.totalMonths = totalMonths;
+    }
+    if (typeof gameDay === 'number' && Number.isFinite(gameDay)) {
+      this.gameDay = Math.max(1, Math.trunc(gameDay));
     }
     this.lastCitizens = citizens ?? [];
     this.citizenById.clear();
@@ -2366,16 +2449,30 @@ export class PeopleAgentsManager {
           destinationAr =
             a.role === 'police'
               ? THEME_GOING_TEXT.palace
-              : THEME_GOING_TEXT.house;
+              : formatAgentSpeechVariant(
+                  'to_home',
+                  a.citizenId ?? a.id,
+                  this.gameDay
+                );
           break;
         case 'TO_WORK': {
           const workTheme: ThemeId = a.targetThemeId ?? a.workSpot?.themeId ?? 'palace';
-          destinationAr = THEME_GOING_TEXT[workTheme];
+          destinationAr = formatAgentSpeechVariant(
+            'to_work',
+            a.citizenId ?? a.id,
+            this.gameDay,
+            workTheme
+          );
           break;
         }
         case 'WORKING': {
           const workTheme: ThemeId = a.targetThemeId ?? a.workSpot?.themeId ?? 'palace';
-          destinationAr = THEME_ARRIVED_TEXT[workTheme];
+          destinationAr = formatAgentSpeechVariant(
+            'working',
+            a.citizenId ?? a.id,
+            this.gameDay,
+            workTheme
+          );
           break;
         }
         case 'TO_BREAK': {

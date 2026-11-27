@@ -1810,6 +1810,7 @@ export default function App() {
             clockSecondsOfDay={state.clock.secondsOfDay}
             totalMonths={state.totalMonths}
             activePrayer={state.activePrayer}
+            gameDay={state.day}
             lastJoinedVillageCubeId={state.lastJoinedVillageCubeId}
             lastJoinedVillageSeq={state.lastJoinedVillageSeq}
             lastDefectedCubeId={state.lastDefectedCubeId}

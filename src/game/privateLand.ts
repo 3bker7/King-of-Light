@@ -10,6 +10,7 @@ import {
   transferGold,
   type GoldStateSlice,
 } from './goldLedger';
+import { addCitizenMemory } from './personality';
 import { findPalaceCube, getCubePurchasePrice } from './production';
 import type {
   Citizen,
@@ -495,7 +496,17 @@ export function resolveLandRequest(input: {
 
   if (!input.approve) {
     const nextCitizens = input.citizens.map((c) =>
-      c.id === req.citizenId ? { ...c, deniedLandMonth: currentMonth } : c
+      c.id === req.citizenId
+        ? addCitizenMemory(
+            { ...c, deniedLandMonth: currentMonth },
+            {
+              month: currentMonth,
+              kind: 'land_denied',
+              cubeId: req.cubeId,
+              amount: null,
+            }
+          )
+        : c
     );
     return {
       cubes: input.cubes,
@@ -589,7 +600,17 @@ export function resolveLandRequest(input: {
     };
   }
 
-  const nextCitizens = tx.state.citizens ?? input.citizens;
+  const rawNextCitizens = tx.state.citizens ?? input.citizens;
+  const nextCitizens = rawNextCitizens.map((c) =>
+    c.id === citizen.id
+      ? addCitizenMemory(c, {
+          month: currentMonth,
+          kind: 'land_bought',
+          cubeId: cube.id,
+          amount: req.price,
+        })
+      : c
+  );
 
   const nextCubes = input.cubes.map((c) =>
     c.id === cube.id

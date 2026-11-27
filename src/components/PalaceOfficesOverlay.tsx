@@ -25,6 +25,7 @@ import {
   MAX_ETERNAL_DISPLAY_ROWS,
   resolveDeceasedFamilyForCitizen,
 } from '../game/mortality';
+import { opinionBandAr } from '../game/personality';
 import { STRINGS } from '../game/strings';
 import type {
   CitizenAttrKey,
@@ -749,6 +750,18 @@ export function PalaceOfficesOverlay({
                         <div className="text-[10px] font-bold text-[#6F5C43]">
                           {statusLabel} · أسرة #{c.householdId}
                           {c.homeCubeId === null ? ' (بلا سكن)' : ''}
+                          {' · '}
+                          <span
+                            className={
+                              c.opinionOfKing >= 10
+                                ? 'text-[#B58119] font-extrabold'
+                                : c.opinionOfKing <= -10
+                                  ? 'text-[#A83629] font-extrabold'
+                                  : 'text-[#6F5C43]'
+                            }
+                          >
+                            {opinionBandAr(c.opinionOfKing)}
+                          </span>
                         </div>
                         {hasDeceasedFamily && (
                           <div className="text-[10px] font-bold text-[#7A6B58]">

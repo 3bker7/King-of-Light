@@ -1,8 +1,11 @@
 import { THEMES } from './constants';
 import { pickCitizenName } from './names';
 import {
+  addCitizenMemory,
   generateTraits,
   inheritTraits,
+  sanitizeMemoriesOnHydrate,
+  sanitizeOpinionOnHydrate,
   sanitizeTraitsOnHydrate,
 } from './personality';
 import type {
@@ -245,6 +248,8 @@ export function generateInitialCitizens(
       wealth: 0,
       attrs: generateBellAttrs(rng),
       traits: generateTraits(id, birthMonth),
+      memories: [],
+      opinionOfKing: 0,
       cvFiled: isAdultCv,
       cvFiledMonth: isAdultCv ? totalMonths : null,
       housingRequestMonth: null,
@@ -315,6 +320,8 @@ export function generateInitialCitizens(
           wealth: 0,
           attrs: fatherAttrs,
           traits: fTraits,
+          memories: [],
+          opinionOfKing: 0,
           cvFiled: true,
           cvFiledMonth: totalMonths,
           housingRequestMonth: homeCubeId === null ? totalMonths : null,
@@ -335,6 +342,8 @@ export function generateInitialCitizens(
           wealth: 0,
           attrs: motherAttrs,
           traits: mTraits,
+          memories: [],
+          opinionOfKing: 0,
           cvFiled: true,
           cvFiledMonth: totalMonths,
           housingRequestMonth: null,
@@ -355,6 +364,8 @@ export function generateInitialCitizens(
           wealth: 0,
           attrs: inheritAttrs(fatherAttrs, motherAttrs, rng),
           traits: inheritTraits(childId, cBirth, mTraits, fTraits),
+          memories: [],
+          opinionOfKing: 0,
           cvFiled: cAge >= 14,
           cvFiledMonth: cAge >= 14 ? totalMonths : null,
           housingRequestMonth: null,
@@ -381,6 +392,8 @@ export function generateInitialCitizens(
         wealth: 0,
         attrs: generateBellAttrs(rng),
         traits: generateTraits(id, birthMonth),
+        memories: [],
+        opinionOfKing: 0,
         cvFiled: true,
         cvFiledMonth: totalMonths,
         housingRequestMonth: homeCubeId === null ? totalMonths : null,
@@ -507,6 +520,8 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
     ...c,
     attrs: { ...c.attrs },
     traits: c.traits ? { ...c.traits } : generateTraits(c.id, c.birthMonth),
+    memories: Array.isArray(c.memories) ? [...c.memories] : [],
+    opinionOfKing: sanitizeOpinionOnHydrate(c.opinionOfKing),
     parentIds: c.parentIds ? ([c.parentIds[0], c.parentIds[1]] as [number, number]) : null,
   }));
   let nextId = Math.max(
@@ -590,6 +605,8 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
           intelligence: clampVisaAttr(arrival.attributes.intelligence),
         },
         traits: generateTraits(id, arrivalBirthMonth),
+        memories: [],
+        opinionOfKing: 0,
         cvFiled: true,
         cvFiledMonth: totalMonths,
         housingRequestMonth: totalMonths,
@@ -629,11 +646,28 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
           birthCouple.mother,
           birthCouple.father
         ),
+        memories: [],
+        opinionOfKing: 0,
         cvFiled: false,
         cvFiledMonth: null,
         housingRequestMonth: null,
         marriedMonth: null,
       };
+      // V5 Prompt 5 Element 2: Both parents record 'child_born' memory
+      const birthMemory = {
+        month: totalMonths,
+        kind: 'child_born' as const,
+        cubeId: birthCouple.mother.homeCubeId,
+        amount: null,
+      };
+      const fatherIdx = list.findIndex((c) => c.id === birthCouple.father.id);
+      if (fatherIdx >= 0) {
+        list[fatherIdx] = addCitizenMemory(list[fatherIdx], birthMemory);
+      }
+      const motherIdx = list.findIndex((c) => c.id === birthCouple.mother.id);
+      if (motherIdx >= 0) {
+        list[motherIdx] = addCitizenMemory(list[motherIdx], birthMemory);
+      }
       list.push(child);
       birthsCount += 1;
       policeRecords.push(
@@ -685,6 +719,8 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
           wealth: 0,
           attrs: fAttrs,
           traits: fTraits,
+          memories: [],
+          opinionOfKing: 0,
           cvFiled: true,
           cvFiledMonth: totalMonths,
           housingRequestMonth: totalMonths,
@@ -705,6 +741,8 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
           wealth: 0,
           attrs: mAttrs,
           traits: mTraits,
+          memories: [],
+          opinionOfKing: 0,
           cvFiled: true,
           cvFiledMonth: totalMonths,
           housingRequestMonth: null,
@@ -725,6 +763,8 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
           wealth: 0,
           attrs: inheritAttrs(fAttrs, mAttrs, rng),
           traits: inheritTraits(cId, cBirth, mTraits, fTraits),
+          memories: [],
+          opinionOfKing: 0,
           cvFiled: false,
           cvFiledMonth: null,
           housingRequestMonth: null,
@@ -756,6 +796,8 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
           wealth: 0,
           attrs: generateBellAttrs(rng),
           traits: generateTraits(fId, fBirth),
+          memories: [],
+          opinionOfKing: 0,
           cvFiled: true,
           cvFiledMonth: totalMonths,
           housingRequestMonth: totalMonths,
@@ -776,6 +818,8 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
           wealth: 0,
           attrs: generateBellAttrs(rng),
           traits: generateTraits(mId, mBirth),
+          memories: [],
+          opinionOfKing: 0,
           cvFiled: true,
           cvFiledMonth: totalMonths,
           housingRequestMonth: null,
@@ -804,6 +848,8 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
         wealth: 0,
         attrs: generateBellAttrs(rng),
         traits: generateTraits(id, birthMonth),
+        memories: [],
+        opinionOfKing: 0,
         cvFiled: true,
         cvFiledMonth: totalMonths,
         housingRequestMonth: totalMonths,
@@ -1146,6 +1192,8 @@ export function sanitizeCitizensOnHydrate(
       wealth,
       attrs,
       traits: sanitizeTraitsOnHydrate(raw.traits, id, birthMonth),
+      memories: sanitizeMemoriesOnHydrate(raw.memories, safeTotalMonths),
+      opinionOfKing: sanitizeOpinionOnHydrate(raw.opinionOfKing),
       cvFiled,
       cvFiledMonth,
       housingRequestMonth,

@@ -236,10 +236,16 @@ function manhattanDistance(a: Cube, b: Cube): number {
   return Math.abs(a.row - b.row) + Math.abs(a.col - b.col);
 }
 
+function pietyRankOf(piety: Citizen['traits']['piety'] | undefined): number {
+  if (piety === 'devout') return 2;
+  if (piety === 'lax') return 0;
+  return 1;
+}
+
 /**
  * Selects eligible prayer attendees at a prayer trigger:
  * - Citizens aged >= 14 whose schedule phase at the trigger minute is 'working' or 'evening'.
- * - Sorted by (Manhattan distance from homeCube to nearest staffed mosque, citizen.id).
+ * - Sorted by (pietyRank desc: devout=2 > balanced=1 > lax=0, Manhattan distance from homeCube to nearest staffed mosque asc, citizen.id asc).
  * - Capped at total capacity = 24 * number of staffed mosques.
  * - Each attendee is assigned to his nearest staffed mosque (tie-break by mosque cube.id).
  */
@@ -258,6 +264,7 @@ export function selectPrayerAttendees(
   const candidates: Array<{
     citizenId: number;
     mosqueCubeId: number;
+    pietyRank: number;
     dist: number;
   }> = [];
 
@@ -290,11 +297,13 @@ export function selectPrayerAttendees(
     candidates.push({
       citizenId: cit.id,
       mosqueCubeId: bestMosque.id,
+      pietyRank: pietyRankOf(cit.traits?.piety),
       dist: bestDist,
     });
   }
 
   candidates.sort((a, b) => {
+    if (a.pietyRank !== b.pietyRank) return b.pietyRank - a.pietyRank;
     if (a.dist !== b.dist) return a.dist - b.dist;
     return a.citizenId - b.citizenId;
   });

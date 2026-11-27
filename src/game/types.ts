@@ -231,6 +231,24 @@ export interface CitizenTraits {
 
 export type CitizenTraitAxis = keyof CitizenTraits;
 
+export type CitizenMemoryKind =
+  | 'job_gained'
+  | 'job_lost'
+  | 'married'
+  | 'child_born'
+  | 'got_housing'
+  | 'prayer_attended'
+  | 'death_in_family'
+  | 'land_bought'
+  | 'land_denied';
+
+export interface CitizenMemory {
+  month: number;
+  kind: CitizenMemoryKind;
+  cubeId: number | null;
+  amount: number | null;
+}
+
 export interface Citizen {
   id: number;
   name: string;
@@ -247,6 +265,10 @@ export interface Citizen {
   attrs: CitizenAttrs;
   // V5 Prompt 5 Element 1: Stable personality traits (separate from attrs)
   traits: CitizenTraits;
+  // V5 Prompt 5 Element 2: Per-citizen personal memories (capped at last 12, hydrate default [])
+  memories: CitizenMemory[];
+  // V5 Prompt 5 Element 3: Opinion of the king (-100..+100, integer, hydrate default 0)
+  opinionOfKing: number;
   cvFiled: boolean;
   cvFiledMonth?: number | null;
   housingRequestMonth: number | null;

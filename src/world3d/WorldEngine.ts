@@ -93,6 +93,8 @@ export interface WorldSyncPayload {
   totalMonths?: number;
   // V5 Prompt 2: Live prayer session for mosque walk/despawn flow
   activePrayer?: ActivePrayerSession | null;
+  // V5 Prompt 5 Element 5: Current game day for stable daily speech variety
+  gameDay?: number;
 }
 
 interface ProvinceFlagAnim {
@@ -1054,7 +1056,8 @@ export class WorldEngine {
       payload.citizens,
       payload.clockSecondsOfDay,
       payload.totalMonths,
-      payload.activePrayer
+      payload.activePrayer,
+      payload.gameDay
     );
     this.peopleAgents.setSelectedAgent(payload.selectedCitizenId);
     this.followAgentId = payload.followCitizenId;

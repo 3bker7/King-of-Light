@@ -1,6 +1,8 @@
 import type {
   AmbitionTrait,
   Citizen,
+  CitizenMemory,
+  CitizenMemoryKind,
   CitizenTraitAxis,
   CitizenTraits,
   GenerosityTrait,
@@ -11,6 +13,8 @@ import type {
 
 export type {
   AmbitionTrait,
+  CitizenMemory,
+  CitizenMemoryKind,
   CitizenTraitAxis,
   CitizenTraits,
   GenerosityTrait,
@@ -224,3 +228,289 @@ export function sanitizeTraitsOnHydrate(
     piety: isValidTraitValue('piety', raw.piety) ? raw.piety : fallback.piety,
   };
 }
+
+// =============================================================================
+// Element 2 — Citizen Memory (capped last 12, derived Arabic text, no free-text)
+// =============================================================================
+
+export const MAX_CITIZEN_MEMORIES = 12;
+
+const VALID_MEMORY_KINDS: ReadonlySet<string> = new Set<CitizenMemoryKind>([
+  'job_gained',
+  'job_lost',
+  'married',
+  'child_born',
+  'got_housing',
+  'prayer_attended',
+  'death_in_family',
+  'land_bought',
+  'land_denied',
+]);
+
+function isValidMemoryKind(kind: unknown): kind is CitizenMemoryKind {
+  return typeof kind === 'string' && VALID_MEMORY_KINDS.has(kind);
+}
+
+function normalizeMemory(memory: CitizenMemory): CitizenMemory {
+  return {
+    month: Number.isFinite(memory.month) ? Math.max(0, Math.trunc(memory.month)) : 0,
+    kind: memory.kind,
+    cubeId:
+      typeof memory.cubeId === 'number' && Number.isFinite(memory.cubeId)
+        ? Math.trunc(memory.cubeId)
+        : null,
+    amount:
+      typeof memory.amount === 'number' && Number.isFinite(memory.amount)
+        ? Math.trunc(memory.amount)
+        : null,
+  };
+}
+
+/**
+ * Pure helper: appends a personal memory to a citizen and keeps only the LAST 12 (oldest dropped).
+ */
+export function addCitizenMemory(
+  citizen: Citizen,
+  memory: CitizenMemory
+): Citizen {
+  if (!isValidMemoryKind(memory.kind)) {
+    return citizen;
+  }
+  const existing = Array.isArray(citizen.memories) ? citizen.memories : [];
+  const next = [...existing, normalizeMemory(memory)];
+  const capped =
+    next.length > MAX_CITIZEN_MEMORIES
+      ? next.slice(next.length - MAX_CITIZEN_MEMORIES)
+      : next;
+  return {
+    ...citizen,
+    memories: capped,
+  };
+}
+
+/**
+ * Sanitizes saved memories on hydrate: drops invalid entries and enforces the last-12 cap.
+ */
+export function sanitizeMemoriesOnHydrate(
+  raw: unknown,
+  maxMonth?: number
+): CitizenMemory[] {
+  if (!Array.isArray(raw) || raw.length === 0) return [];
+  const clean: CitizenMemory[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const item = raw[i];
+    if (!item || typeof item !== 'object') continue;
+    const obj = item as Record<string, unknown>;
+    if (!isValidMemoryKind(obj.kind)) continue;
+    const rawMonth =
+      typeof obj.month === 'number' && Number.isFinite(obj.month)
+        ? Math.max(0, Math.trunc(obj.month))
+        : 0;
+    const month =
+      typeof maxMonth === 'number' && Number.isFinite(maxMonth)
+        ? Math.min(Math.max(0, Math.trunc(maxMonth)), rawMonth)
+        : rawMonth;
+    const cubeId =
+      typeof obj.cubeId === 'number' && Number.isFinite(obj.cubeId)
+        ? Math.trunc(obj.cubeId)
+        : null;
+    const amount =
+      typeof obj.amount === 'number' && Number.isFinite(obj.amount)
+        ? Math.trunc(obj.amount)
+        : null;
+    clean.push({ month, kind: obj.kind, cubeId, amount });
+  }
+  return clean.length > MAX_CITIZEN_MEMORIES
+    ? clean.slice(clean.length - MAX_CITIZEN_MEMORIES)
+    : clean;
+}
+
+/**
+ * Derives truthful Arabic display text solely from a CitizenMemory's kind + structured fields.
+ * No free-text field exists on CitizenMemory.
+ */
+export function memoryTextAr(memory: CitizenMemory): string {
+  switch (memory.kind) {
+    case 'job_gained':
+      return 'حصل على وظيفة';
+    case 'job_lost':
+      return 'فقد وظيفته';
+    case 'married':
+      return 'تزوّج وبنى أسرة';
+    case 'child_born':
+      return 'رُزق بمولود جديد';
+    case 'got_housing':
+      return 'حصل على مسكن';
+    case 'prayer_attended':
+      return 'أدّى الصلاة في المسجد';
+    case 'death_in_family':
+      return 'فقد قريباً له';
+    case 'land_bought':
+      return memory.amount !== null && memory.amount > 0
+        ? `اشترى أرضاً بـ ${memory.amount} ذهب`
+        : 'اشترى أرضاً';
+    case 'land_denied':
+      return 'رُفض طلبه لشراء أرض';
+  }
+}
+
+// =============================================================================
+// Element 3 — Opinion of the King (-100..+100 integer, memory-driven drift)
+// =============================================================================
+
+export const OPINION_MIN = -100;
+export const OPINION_MAX = 100;
+
+/**
+ * Clamps any numeric opinion value to an integer in [-100, 100].
+ */
+export function clampOpinion(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  const truncated = Math.trunc(value);
+  const clamped = Math.max(OPINION_MIN, Math.min(OPINION_MAX, truncated));
+  return clamped === 0 ? 0 : clamped;
+}
+
+/**
+ * Sanitizes saved opinionOfKing on hydrate (defaults to 0, integer in [-100, 100]).
+ */
+export function sanitizeOpinionOnHydrate(raw: unknown): number {
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return 0;
+  return clampOpinion(raw);
+}
+
+/**
+ * Maps an opinion score (-100..+100) to its Arabic loyalty band label.
+ */
+export function opinionBandAr(opinion: number): string {
+  const val = clampOpinion(opinion);
+  if (val >= 40) return 'مُوالٍ';
+  if (val >= 10) return 'راضٍ';
+  if (val > -10) return 'محايد';
+  if (val > -40) return 'ساخط';
+  return 'غاضب';
+}
+
+function memoryOpinionWeight(
+  memory: CitizenMemory,
+  traits: CitizenTraits | null | undefined
+): number {
+  switch (memory.kind) {
+    case 'job_gained':
+      return 6;
+    case 'job_lost':
+      return -8;
+    case 'married':
+      return 4;
+    case 'child_born':
+      return 3;
+    case 'got_housing':
+      return 6;
+    case 'death_in_family':
+      return -6;
+    case 'prayer_attended':
+      return traits?.piety === 'devout' ? 2 : 1;
+    case 'land_bought':
+      return 5;
+    case 'land_denied':
+      return -5;
+  }
+}
+
+/**
+ * Pure monthly opinion drift:
+ * - If thisMonthMemories is non-empty: adds exact weight sum for those memories and clamps [-100, 100].
+ * - If thisMonthMemories is empty: decays 10% toward 0, rounded toward zero, never crossing 0.
+ */
+export function computeOpinionDrift(
+  citizen: Pick<Citizen, 'opinionOfKing' | 'traits'>,
+  thisMonthMemories: readonly CitizenMemory[]
+): number {
+  const current = clampOpinion(citizen.opinionOfKing);
+  if (thisMonthMemories.length > 0) {
+    let delta = 0;
+    for (let i = 0; i < thisMonthMemories.length; i++) {
+      delta += memoryOpinionWeight(thisMonthMemories[i], citizen.traits);
+    }
+    return clampOpinion(current + delta);
+  }
+  if (current === 0) return 0;
+  // Exact integer 10% decay toward 0 (round toward zero; identical to trunc(current * 0.9), never crosses 0)
+  const step = Math.floor((Math.abs(current) + 9) / 10);
+  return current > 0 ? Math.max(0, current - step) : Math.min(0, current + step);
+}
+
+// =============================================================================
+// Element 6 — Citizen Card Personality/Memory/Opinion Display Helpers
+// =============================================================================
+
+export interface DistinctiveTraitBadge {
+  axis: CitizenTraitAxis;
+  labelAr: string;
+}
+
+export interface CitizenCardPersonalityView {
+  distinctiveTraits: DistinctiveTraitBadge[];
+  traitsFallbackAr: string;
+  lastMemoryAr: string;
+  opinionValue: number;
+  opinionSignedText: string;
+  opinionBandAr: string;
+  opinionTone: 'positive' | 'neutral' | 'negative';
+}
+
+/**
+ * Returns up to 2 non-balanced personality trait badges in deterministic axis order.
+ * Returns [] if all 5 axes are 'balanced' (UI shows 'متوازن الطباع').
+ */
+export function getDistinctiveTraits(
+  traits: CitizenTraits | null | undefined,
+  maxCount = 2
+): DistinctiveTraitBadge[] {
+  if (!traits) return [];
+  const cap = Math.max(0, Math.trunc(maxCount));
+  const out: DistinctiveTraitBadge[] = [];
+  for (let i = 0; i < TRAIT_AXES.length && out.length < cap; i++) {
+    const axis = TRAIT_AXES[i];
+    const value = traits[axis];
+    if (value && value !== 'balanced') {
+      const labelAr = (TRAIT_LABELS_AR[axis] as Record<string, string>)[value];
+      if (labelAr) {
+        out.push({ axis, labelAr });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Pure derived view model for the CitizenCard personality, last memory, and opinion block.
+ */
+export function formatCitizenCardPersonality(
+  citizen: Pick<Citizen, 'traits' | 'memories' | 'opinionOfKing'>
+): CitizenCardPersonalityView {
+  const distinctiveTraits = getDistinctiveTraits(citizen.traits, 2);
+  const memories = Array.isArray(citizen.memories) ? citizen.memories : [];
+  const lastMem = memories.length > 0 ? memories[memories.length - 1] : null;
+  const opinionValue = clampOpinion(citizen.opinionOfKing);
+  const opinionSignedText =
+    opinionValue > 0 ? `+${opinionValue}` : `${opinionValue}`;
+  const opinionTone: 'positive' | 'neutral' | 'negative' =
+    opinionValue >= 10
+      ? 'positive'
+      : opinionValue <= -10
+        ? 'negative'
+        : 'neutral';
+
+  return {
+    distinctiveTraits,
+    traitsFallbackAr: 'متوازن الطباع',
+    lastMemoryAr: lastMem ? memoryTextAr(lastMem) : 'لا ذكريات مسجلة بعد',
+    opinionValue,
+    opinionSignedText,
+    opinionBandAr: opinionBandAr(opinionValue),
+    opinionTone,
+  };
+}
+
+

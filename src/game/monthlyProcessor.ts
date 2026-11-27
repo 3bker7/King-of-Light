@@ -25,6 +25,7 @@ import { runMarriageOffice } from './marriageOffice';
 import { processDeaths } from './mortality';
 import { computeMonthlyPayroll } from './payroll';
 import { computeNeedsAndSatisfaction } from './people';
+import { addCitizenMemory, computeOpinionDrift } from './personality';
 import {
   cleanupEmigratedPrivateOwners,
   runPrivateLaborMatching,
@@ -286,14 +287,67 @@ export function runMonthlyProcessor(
       ? new Set<number>(deathRes.bereavedSpouseIds)
       : undefined;
 
+  // V5 Prompt 5 Element 2: Bereaved spouse & living children record 'death_in_family'
+  if (deathRes.deaths.length > 0) {
+    for (const rec of deathRes.deaths) {
+      const affectedIds = new Set<number>();
+      if (rec.spouseId !== null) {
+        affectedIds.add(rec.spouseId);
+      }
+      for (const c of citizens) {
+        if (
+          c.parentIds &&
+          (c.parentIds[0] === rec.citizenId || c.parentIds[1] === rec.citizenId)
+        ) {
+          affectedIds.add(c.id);
+        }
+      }
+      if (affectedIds.size > 0) {
+        citizens = citizens.map((c) =>
+          affectedIds.has(c.id)
+            ? addCitizenMemory(c, {
+                month: nextTotalMonths,
+                kind: 'death_in_family',
+                cubeId: null,
+                amount: null,
+              })
+            : c
+        );
+      }
+    }
+  }
+
   // (b) Crown Labor matching (skips private cubes & private workers)
+  const prevCrownJobById = new Map<number, number | null>();
+  for (const c of citizens) {
+    prevCrownJobById.set(c.id, c.jobCubeId);
+  }
   const laborRes = runLaborMatching(
     citizens,
     cubes,
     population,
     nextTotalMonths
   );
-  citizens = laborRes.citizens;
+  citizens = laborRes.citizens.map((c) => {
+    const prevJob = prevCrownJobById.get(c.id) ?? null;
+    if (prevJob === null && c.jobCubeId !== null) {
+      return addCitizenMemory(c, {
+        month: nextTotalMonths,
+        kind: 'job_gained',
+        cubeId: c.jobCubeId,
+        amount: null,
+      });
+    }
+    if (prevJob !== null && c.jobCubeId === null) {
+      return addCitizenMemory(c, {
+        month: nextTotalMonths,
+        kind: 'job_lost',
+        cubeId: prevJob,
+        amount: null,
+      });
+    }
+    return c;
+  });
 
   // (c) Housing grants & fax (with offline flood-control merge for unread faxes)
   const prevFaxIds = new Set(officeFaxes.map((f) => f.id));
@@ -610,6 +664,10 @@ export function runMonthlyProcessor(
   const nextLandRequests = landReqRes.landRequests;
 
   // (k) Private Job Ads sync & Private Labor Matching (after crown matching & construction)
+  const prevPrivJobById = new Map<number, number | null>();
+  for (const c of citizens) {
+    prevPrivJobById.set(c.id, c.jobCubeId);
+  }
   const privMatchRes = runPrivateLaborMatching({
     cubes,
     citizens,
@@ -617,7 +675,26 @@ export function runMonthlyProcessor(
     totalMonths: nextTotalMonths,
   });
   privateAds = privMatchRes.privateAds;
-  citizens = privMatchRes.citizens;
+  citizens = privMatchRes.citizens.map((c) => {
+    const prevJob = prevPrivJobById.get(c.id) ?? null;
+    if (prevJob === null && c.jobCubeId !== null) {
+      return addCitizenMemory(c, {
+        month: nextTotalMonths,
+        kind: 'job_gained',
+        cubeId: c.jobCubeId,
+        amount: null,
+      });
+    }
+    if (prevJob !== null && c.jobCubeId === null) {
+      return addCitizenMemory(c, {
+        month: nextTotalMonths,
+        kind: 'job_lost',
+        cubeId: prevJob,
+        amount: null,
+      });
+    }
+    return c;
+  });
   citizenWealth = sumCitizenWealth(citizens);
 
   // (l) Bank installments & People's Bank trades (processBankMonth)
@@ -737,6 +814,33 @@ export function runMonthlyProcessor(
   );
   const nextProvinceEvents = recProvEvents.events;
   const addedProvinceEvents = recProvEvents.added;
+
+  // (l3) V5 Prompt 5 Element 3: Opinion of the king drift — LAST citizen step before trims
+  // Monthly-only kinds match month === nextTotalMonths; live-play-only kinds match month === monthJustEnded
+  // (plus child_born from live daily growth / offline pre-reconcile at monthJustEnded when step (f) did not birth).
+  const monthJustEndedForOpinion = nextTotalMonths - 1;
+  citizens = citizens.map((c) => {
+    const thisMonthMemories = c.memories.filter((m) => {
+      if (
+        m.kind === 'prayer_attended' ||
+        m.kind === 'land_bought' ||
+        m.kind === 'land_denied'
+      ) {
+        return m.month === monthJustEndedForOpinion;
+      }
+      if (m.kind === 'child_born') {
+        return (
+          m.month === nextTotalMonths ||
+          (recRes.birthsCount === 0 && m.month === monthJustEndedForOpinion)
+        );
+      }
+      return m.month === nextTotalMonths;
+    });
+    const nextOpinion = computeOpinionDrift(c, thisMonthMemories);
+    return nextOpinion === c.opinionOfKing
+      ? c
+      : { ...c, opinionOfKing: nextOpinion };
+  });
 
   // (m) Advisor briefing (pure observer at end; runs once per month boundary; skipped on non-final offline months)
   const shouldComputeBriefing =

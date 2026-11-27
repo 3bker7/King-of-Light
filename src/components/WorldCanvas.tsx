@@ -48,6 +48,7 @@ interface WorldCanvasProps {
   clockSecondsOfDay?: number;
   totalMonths?: number;
   activePrayer?: ActivePrayerSession | null;
+  gameDay?: number;
   resetSignal: number;
   onCubeClick: (cubeId: number) => void;
   onCitizenClick: (agentId: number) => void;
@@ -80,6 +81,7 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
       clockSecondsOfDay,
       totalMonths,
       activePrayer,
+      gameDay,
       resetSignal,
       onCubeClick,
       onCitizenClick,
@@ -123,6 +125,7 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
       clockSecondsOfDay,
       totalMonths,
       activePrayer,
+      gameDay,
     });
 
     const [webglError, setWebglError] = useState(false);
@@ -192,6 +195,7 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
         clockSecondsOfDay,
         totalMonths,
         activePrayer,
+        gameDay,
       });
     }, [
       cubes,
@@ -214,6 +218,7 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
       clockSecondsOfDay,
       totalMonths,
       activePrayer,
+      gameDay,
     ]);
 
     // Element 4.1: Smoothly refit camera ONLY when owned-cell count changes (purchases & village joins)

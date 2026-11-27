@@ -1,5 +1,9 @@
-import { Clock, Compass, Frown, Meh, Navigation, Smile, User, X } from 'lucide-react';
+import { BookOpen, Clock, Compass, Crown, Frown, Meh, Navigation, Smile, Sparkles, User, X } from 'lucide-react';
 import { minuteOfDayOf } from '../game/clock';
+import {
+  formatCitizenCardPersonality,
+  generateTraits,
+} from '../game/personality';
 import {
   formatCitizenScheduleLineAr,
   SCHEDULE_CONSTANTS,
@@ -52,14 +56,19 @@ export function CitizenCard({
   onToggleFollow,
   onClose,
 }: CitizenCardProps) {
+  const registryCitizen: Citizen | undefined =
+    state && typeof citizen.citizenId === 'number'
+      ? state.citizens.find((c) => c.id === citizen.citizenId)
+      : undefined;
+
   // Never render a card for a citizen who is no longer in the living registry (deceased/emigrated)
-  if (
-    state &&
-    typeof citizen.citizenId === 'number' &&
-    !state.citizens.some((c) => c.id === citizen.citizenId)
-  ) {
+  if (state && typeof citizen.citizenId === 'number' && !registryCitizen) {
     return null;
   }
+
+  const personalityView = registryCitizen
+    ? formatCitizenCardPersonality(registryCitizen)
+    : null;
 
   let scheduleLineAr: string | null = null;
   if (citizen.prayerStatus === 'to_prayer') {
@@ -69,11 +78,6 @@ export function CitizenCard({
   } else if (citizen.prayerStatus === 'returning') {
     scheduleLineAr = 'عائد من الصلاة';
   } else if (state) {
-    const registryCitizen: Citizen | undefined =
-      typeof citizen.citizenId === 'number'
-        ? state.citizens.find((c) => c.id === citizen.citizenId)
-        : undefined;
-
     if (registryCitizen) {
       scheduleLineAr = formatCitizenScheduleLineAr(
         registryCitizen,
@@ -100,11 +104,12 @@ export function CitizenCard({
                   c.secondThemeId === citizen.workThemeId)
             )?.id ?? null
           : null;
+      const synthBirthMonth = state.totalMonths - synthAge;
       const synthetic: Citizen = {
         id: citizen.id,
         name: citizen.name,
         gender: citizen.role === 'woman' ? 'f' : 'm',
-        birthMonth: state.totalMonths - synthAge,
+        birthMonth: synthBirthMonth,
         householdId: 0,
         homeCubeId: null,
         spouseId: null,
@@ -122,6 +127,9 @@ export function CitizenCard({
           health: 50,
           intelligence: 50,
         },
+        traits: generateTraits(citizen.id, synthBirthMonth),
+        memories: [],
+        opinionOfKing: 0,
         cvFiled: false,
         housingRequestMonth: null,
       };
@@ -194,6 +202,60 @@ export function CitizenCard({
           <span className={moodClass}>{citizen.moodAr}</span>
         </div>
       </div>
+
+      {/* Personality, last memory & opinion of the king (living registry citizens) */}
+      {personalityView && (
+        <div className="p-2.5 rounded-xl bg-[#FDF8EC] border border-[#E3D3AC] space-y-2 text-xs">
+          <div className="flex items-center justify-between gap-2">
+            <span className="flex items-center gap-1.5 font-bold text-[#6F5C43] shrink-0">
+              <Sparkles className="w-3.5 h-3.5 text-[#8A5F12] shrink-0" />
+              <span>الشخصية</span>
+            </span>
+            <div className="flex items-center gap-1.5 flex-wrap justify-end">
+              {personalityView.distinctiveTraits.length > 0 ? (
+                personalityView.distinctiveTraits.map((t) => (
+                  <span
+                    key={t.axis}
+                    className="px-2 py-0.5 rounded-md bg-[#F4E7C8] border border-[#DFC996] text-[11px] font-extrabold text-[#4F3F2B]"
+                  >
+                    {t.labelAr}
+                  </span>
+                ))
+              ) : (
+                <span className="text-[11px] font-bold text-[#6F5C43]">
+                  {personalityView.traitsFallbackAr}
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-start gap-2 pt-1.5 border-t border-[#EFE3C5] font-bold text-[#4F3F2B]">
+            <BookOpen className="w-3.5 h-3.5 text-[#6F5C43] shrink-0 mt-0.5" />
+            <span className="leading-snug">
+              <span className="text-[#6F5C43]">آخر ذكرى: </span>
+              <span>{personalityView.lastMemoryAr}</span>
+            </span>
+          </div>
+
+          <div className="flex items-center justify-between gap-2 pt-1.5 border-t border-[#EFE3C5] font-bold">
+            <span className="flex items-center gap-1.5 text-[#6F5C43]">
+              <Crown className="w-3.5 h-3.5 text-[#B58119] shrink-0" />
+              <span>رأيه في الملك</span>
+            </span>
+            <span
+              className={`font-extrabold tabular-nums-latin ${
+                personalityView.opinionTone === 'positive'
+                  ? 'text-[#B58119]'
+                  : personalityView.opinionTone === 'negative'
+                    ? 'text-[#A83629]'
+                    : 'text-[#6F5C43]'
+              }`}
+            >
+              {personalityView.opinionBandAr} ({personalityView.opinionSignedText})
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Follow toggle button */}
       <button

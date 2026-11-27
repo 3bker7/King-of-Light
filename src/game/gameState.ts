@@ -54,6 +54,7 @@ import {
   sanitizeCitizensOnHydrate,
   sumCitizenWealth,
 } from './citizens';
+import { addCitizenMemory } from './personality';
 import {
   getGrossPayrollBase,
   logDecree,
@@ -2506,10 +2507,10 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
       if (!session || session.logged || session.id !== action.sessionId) {
         return state;
       }
-      const isAttendee = session.attendees.some(
+      const attendee = session.attendees.find(
         (a) => a.citizenId === action.citizenId
       );
-      if (!isAttendee || session.completedCitizenIds.includes(action.citizenId)) {
+      if (!attendee || session.completedCitizenIds.includes(action.citizenId)) {
         return state;
       }
 
@@ -2517,10 +2518,18 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
       const targetUntil = completionMin + PRAYER_BUFF_DURATION_MINUTES;
       const nextCitizens = state.citizens.map((c) =>
         c.id === action.citizenId
-          ? {
-              ...c,
-              prayerBuffUntil: Math.max(c.prayerBuffUntil ?? 0, targetUntil),
-            }
+          ? addCitizenMemory(
+              {
+                ...c,
+                prayerBuffUntil: Math.max(c.prayerBuffUntil ?? 0, targetUntil),
+              },
+              {
+                month: state.totalMonths,
+                kind: 'prayer_attended',
+                cubeId: attendee.mosqueCubeId,
+                amount: null,
+              }
+            )
           : c
       );
 
