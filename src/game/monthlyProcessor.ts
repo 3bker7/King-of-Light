@@ -763,7 +763,9 @@ export function runMonthlyProcessor(
     warehouse,
     population,
     Boolean(input.hungerFlag),
-    taxMoodDelta
+    taxMoodDelta,
+    citizens,
+    nextTotalMonths
   );
   const observedSatisfaction =
     nextArrears > 0

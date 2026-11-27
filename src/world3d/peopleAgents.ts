@@ -1004,6 +1004,8 @@ export class PeopleAgentsManager {
         traits: generateTraits(agent.id, synthBirthMonth),
         memories: [],
         opinionOfKing: 0,
+        needHistory7: [],
+        preferredVenueCubeId: null,
         cvFiled: false,
         housingRequestMonth: null,
       };

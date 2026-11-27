@@ -21,6 +21,25 @@ import type {
 
 export const LEISURE_VENUE_MONTHLY_CAP = 20;
 
+/**
+ * V5 Prompt 6 Element 4: Deterministic 32-bit unsigned hash over (citizenId + totalMonths)
+ * used to decide whether a citizen revisits their preferred leisure venue (~70% of months).
+ */
+export function hashVenueChoice(citizenId: number, totalMonths: number): number {
+  let h = (Math.trunc(citizenId) + Math.trunc(totalMonths)) | 0;
+  h = Math.imul(h ^ (h >>> 16), 0x45d9f3b);
+  h = Math.imul(h ^ (h >>> 16), 0x45d9f3b);
+  h = h ^ (h >>> 16);
+  return h >>> 0;
+}
+
+export function shouldVisitPreferredVenue(
+  citizenId: number,
+  totalMonths: number
+): boolean {
+  return hashVenueChoice(citizenId, totalMonths) % 10 < 7;
+}
+
 const DOMESTIC_FOOD_PILES: readonly FoodResourceKey[] = [
   'fish',
   'crops',
@@ -514,6 +533,14 @@ export function runCitizenSpending(
       }
     }
 
+    // V5 Prompt 6 Element 4: Remember the visited leisure venue cube (only on successful spend)
+    nextSlice = {
+      ...nextSlice,
+      citizens: (nextSlice.citizens ?? []).map((c) =>
+        c.id === citizenId ? { ...c, preferredVenueCubeId: venue.cubeId } : c
+      ),
+    };
+
     goldSlice = nextSlice;
     venue.remainingCap -= 1;
     totalCitizenSpent += spend;
@@ -537,9 +564,46 @@ export function runCitizenSpending(
     const leisureAttempts = citizen.attrs.intelligence < 35 ? 2 : 1;
 
     let spent = false;
+    let triedHotel = false;
+
+    // V5 Prompt 6 Element 4: ~70% of months (deterministic hash), revisit preferred staffed leisure venue
+    if (
+      citizen.preferredVenueCubeId !== null &&
+      shouldVisitPreferredVenue(citizen.id, currentMonth)
+    ) {
+      const prefCubeId = citizen.preferredVenueCubeId;
+      const prefRest = venuesByTheme.restaurant.find(
+        (v) => v.cubeId === prefCubeId && v.remainingCap > 0
+      );
+      const prefCafe = venuesByTheme.cafe.find(
+        (v) => v.cubeId === prefCubeId && v.remainingCap > 0
+      );
+      const prefTheater = venuesByTheme.theater.find(
+        (v) => v.cubeId === prefCubeId && v.remainingCap > 0
+      );
+      const prefHotel = venuesByTheme.hotel.find(
+        (v) => v.cubeId === prefCubeId && v.remainingCap > 0
+      );
+
+      if (prefRest && citizen.wealth >= 30) {
+        spent = applyLeisureSpend(citizen.id, prefRest, 6);
+      } else if (prefCafe && citizen.wealth >= 30) {
+        spent = applyLeisureSpend(citizen.id, prefCafe, 4);
+      } else if (prefTheater && !isSmartSaver && citizen.wealth >= 20) {
+        spent = applyLeisureSpend(citizen.id, prefTheater, 3);
+      } else if (prefHotel && !isSmartSaver && citizen.wealth >= 200) {
+        triedHotel = true;
+        for (let attempt = 0; attempt < leisureAttempts; attempt++) {
+          if (rng() < 0.05) {
+            spent = applyLeisureSpend(citizen.id, prefHotel, 15);
+            if (spent) break;
+          }
+        }
+      }
+    }
 
     // 1. Dining: wealth >= 30 & social >= 40 -> restaurant (6), else cafe (4)
-    if (citizen.wealth >= 30) {
+    if (!spent && citizen.wealth >= 30) {
       if (citizen.attrs.social >= 40) {
         const rest = pickAvailableVenue('restaurant');
         if (rest) {
@@ -567,7 +631,7 @@ export function runCitizenSpending(
     }
 
     // 3. Hotel stay: wealth >= 200 -> 5% monthly chance, spend 15 (not smart-saver; 2 rolls if intel < 35)
-    if (!spent && !isSmartSaver && citizen.wealth >= 200) {
+    if (!spent && !triedHotel && !isSmartSaver && citizen.wealth >= 200) {
       const hotel = pickAvailableVenue('hotel');
       if (hotel) {
         for (let attempt = 0; attempt < leisureAttempts; attempt++) {

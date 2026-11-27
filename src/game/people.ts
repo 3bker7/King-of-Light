@@ -24,7 +24,8 @@ import {
   WEIGHT_HOUSING,
   WEIGHT_WATER,
 } from './constants';
-import type { Cube, FoodResourceKey, NeedsBreakdown, ThemeId, Warehouse } from './types';
+import { aggregateDailyFood, HUNGER_AVG_SCORE_THRESHOLD } from './needs';
+import type { Citizen, Cube, FoodResourceKey, NeedsBreakdown, ThemeId, Warehouse } from './types';
 
 // Strictly counts Fish + Crops + Wheat + Fruit + Meat + Bread. Water NEVER counts as food.
 export function getTotalFood(warehouse: Warehouse): number {
@@ -128,13 +129,20 @@ export function computeNeedsAndSatisfaction(
   warehouse: Warehouse,
   population: number,
   hungerFlag: boolean,
-  taxMoodDelta = 0
+  taxMoodDelta = 0,
+  citizens?: readonly Citizen[],
+  totalMonths = 0
 ): { needs: NeedsBreakdown; satisfaction: number } {
   const denom = Math.max(1, population);
-  const totalFood = getTotalFood(warehouse);
   const houseCapacity = getHouseCapacity(cubes);
 
-  const foodScore = Math.min(100, (totalFood / denom) * 100);
+  // V5 Prompt 6 Element 2: Food component is aggregated from each living citizen's daily need, access & variety.
+  const foodScore = aggregateDailyFood({
+    warehouse,
+    population,
+    citizens,
+    totalMonths,
+  }).avgScore;
   const waterScore = Math.min(100, (Math.max(0, warehouse.water) / denom) * 100);
   const housingScore = Math.min(100, (houseCapacity / denom) * 100);
   const entertainmentScore = getEntertainmentBreakdown(cubes, warehouse).score;
@@ -147,8 +155,12 @@ export function computeNeedsAndSatisfaction(
 
   const baseFormula = Math.round(Math.max(0, Math.min(100, weighted)));
   const withMood = Math.max(0, Math.min(100, baseFormula + taxMoodDelta));
-  // Active hunger cap: on a hunger-flag day, Satisfaction is strictly capped at 30.
-  const capped = hungerFlag ? Math.min(HUNGER_SATISFACTION_CAP, withMood) : withMood;
+  // Active hunger cap: triggers when hungerFlag is set OR avg food score < 25 (caps satisfaction at 30).
+  const effectiveHunger =
+    hungerFlag || (population > 0 && foodScore < HUNGER_AVG_SCORE_THRESHOLD);
+  const capped = effectiveHunger
+    ? Math.min(HUNGER_SATISFACTION_CAP, withMood)
+    : withMood;
 
   return {
     needs: {
@@ -178,12 +190,20 @@ export function processDayRolloverPeople(
   population: number,
   reputation: number,
   level: 1 | 2,
-  taxMoodDelta = 0
+  taxMoodDelta = 0,
+  citizens?: readonly Citizen[],
+  totalMonths = 0
 ): DayRolloverPeopleResult {
   const nextWarehouse: Warehouse = { ...warehouse };
-  const foodAvailableBefore = getTotalFood(nextWarehouse);
-
-  const hungerFlag = population > 0 && foodAvailableBefore === 0;
+  // V5 Prompt 6 Element 2: Hunger triggers when aggregated citizen daily food score < 25
+  const preConsumeFood = aggregateDailyFood({
+    warehouse: nextWarehouse,
+    population,
+    citizens,
+    totalMonths,
+  });
+  const hungerFlag =
+    population > 0 && preConsumeFood.avgScore < HUNGER_AVG_SCORE_THRESHOLD;
 
   // Consume 1 food unit per person evenly from available food types.
   let remainingFoodToEat = Math.max(0, population * FOOD_PER_PERSON_PER_DAY);
@@ -214,7 +234,9 @@ export function processDayRolloverPeople(
     nextWarehouse,
     population,
     hungerFlag,
-    taxMoodDelta
+    taxMoodDelta,
+    citizens,
+    totalMonths
   );
 
   const capacity = getHouseCapacity(cubes);
@@ -262,7 +284,9 @@ export function processDayRolloverPeople(
     nextWarehouse,
     nextPopulation,
     hungerFlag,
-    taxMoodDelta
+    taxMoodDelta,
+    citizens,
+    totalMonths
   );
 
   return {

@@ -1,5 +1,6 @@
-import { BookOpen, Clock, Compass, Crown, Frown, Meh, Navigation, Smile, Sparkles, User, X } from 'lucide-react';
+import { BookOpen, Clock, Compass, Crown, Frown, MapPin, Meh, Navigation, Smile, Sparkles, User, Utensils, X } from 'lucide-react';
 import { minuteOfDayOf } from '../game/clock';
+import { formatCitizenCardNeeds } from '../game/needs';
 import {
   formatCitizenCardPersonality,
   generateTraits,
@@ -70,6 +71,11 @@ export function CitizenCard({
     ? formatCitizenCardPersonality(registryCitizen)
     : null;
 
+  const needsView =
+    registryCitizen && state
+      ? formatCitizenCardNeeds(registryCitizen, state)
+      : null;
+
   let scheduleLineAr: string | null = null;
   if (citizen.prayerStatus === 'to_prayer') {
     scheduleLineAr = 'في طريقه إلى المسجد للصلاة';
@@ -130,6 +136,8 @@ export function CitizenCard({
         traits: generateTraits(citizen.id, synthBirthMonth),
         memories: [],
         opinionOfKing: 0,
+        needHistory7: [],
+        preferredVenueCubeId: null,
         cvFiled: false,
         housingRequestMonth: null,
       };
@@ -254,6 +262,28 @@ export function CitizenCard({
               {personalityView.opinionBandAr} ({personalityView.opinionSignedText})
             </span>
           </div>
+
+          {needsView && (
+            <div className="flex items-start gap-2 pt-1.5 border-t border-[#EFE3C5] font-bold text-[#4F3F2B]">
+              <Utensils className="w-3.5 h-3.5 text-[#2D6E3B] shrink-0 mt-0.5" />
+              <span className="leading-snug">
+                <span className="text-[#6F5C43]">احتياجاته: </span>
+                <span className="tabular-nums-latin">{needsView.needsLineAr}</span>
+              </span>
+            </div>
+          )}
+
+          {needsView?.preferredVenueNameAr && (
+            <div className="flex items-center justify-between gap-2 pt-1.5 border-t border-[#EFE3C5] font-bold">
+              <span className="flex items-center gap-1.5 text-[#6F5C43]">
+                <MapPin className="w-3.5 h-3.5 text-[#14524A] shrink-0" />
+                <span>مكانه المفضل</span>
+              </span>
+              <span className="font-extrabold text-[#2B2118]">
+                {needsView.preferredVenueNameAr}
+              </span>
+            </div>
+          )}
         </div>
       )}
 

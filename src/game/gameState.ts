@@ -76,6 +76,7 @@ import {
   sanitizeEternalRecordOnHydrate,
   sanitizePalaceOfPeopleOnHydrate,
 } from './mortality';
+import { aggregateDailyFood, appendNeedHistory7 } from './needs';
 import {
   computeNeedsAndSatisfaction,
   getTotalFood,
@@ -326,13 +327,16 @@ export function createFreshGameState(now = Date.now()): GameState {
   const cubes = createInitialCubes(now);
   const warehouse = createInitialWarehouse();
   const prices = createInitialPrices();
+  const initialPop = generateInitialCitizens(cubes, STARTING_POPULATION, 0, 0);
   const evalNeeds = computeNeedsAndSatisfaction(
     cubes,
     warehouse,
     STARTING_POPULATION,
-    false
+    false,
+    0,
+    initialPop.citizens,
+    0
   );
-  const initialPop = generateInitialCitizens(cubes, STARTING_POPULATION, 0, 0);
 
   return {
     cubes,
@@ -515,7 +519,9 @@ export function hydrateGameState(saved: PersistedSaveData): GameState {
     saved.warehouse,
     safePop,
     saved.hungerFlag,
-    taxMoodDelta
+    taxMoodDelta,
+    syncedAds.citizens,
+    totalMonths
   );
 
   const defaultObjectives = createInitialObjectives();
@@ -1154,7 +1160,9 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
           nextPopulation,
           nextReputation,
           state.level,
-          dayTaxMoodDelta
+          dayTaxMoodDelta,
+          nextCitizens,
+          nextTotalMonths
         );
         nextWarehouse = peopleRes.warehouse;
         nextPopulation = peopleRes.population;
@@ -1465,6 +1473,24 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         nextPendingArrivals = campSync.pendingArrivals;
       }
 
+      if (dayWrapped) {
+        // V5 Prompt 6 Element 3: Append each living citizen's daily food score into needHistory7 (cap 7)
+        const dayFoodAgg = aggregateDailyFood({
+          warehouse: nextWarehouse,
+          population: nextPopulation,
+          citizens: nextCitizens,
+          totalMonths: nextTotalMonths,
+        });
+        nextCitizens = nextCitizens.map((c) => {
+          const score = dayFoodAgg.scores.get(c.id);
+          if (score === undefined) return c;
+          return {
+            ...c,
+            needHistory7: appendNeedHistory7(c.needHistory7, score),
+          };
+        });
+      }
+
       const tickTaxMoodDelta = computeTaxMoodDelta(
         state.taxPolicy,
         nextCitizenWealth,
@@ -1475,7 +1501,9 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         nextWarehouse,
         nextPopulation,
         nextHungerFlag,
-        tickTaxMoodDelta
+        tickTaxMoodDelta,
+        nextCitizens,
+        nextTotalMonths
       );
 
       const updated: GameState = {
@@ -1643,7 +1671,9 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         nextWarehouse,
         state.population,
         state.hungerFlag,
-        computeTaxMoodDelta(state.taxPolicy, state.citizenWealth, state.population)
+        computeTaxMoodDelta(state.taxPolicy, state.citizenWealth, state.population),
+        state.citizens,
+        state.totalMonths
       );
 
       let baseState: GameState = state;
@@ -1727,7 +1757,9 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         state.warehouse,
         state.population,
         state.hungerFlag,
-        computeTaxMoodDelta(state.taxPolicy, state.citizenWealth, state.population)
+        computeTaxMoodDelta(state.taxPolicy, state.citizenWealth, state.population),
+        state.citizens,
+        state.totalMonths
       );
 
       return {
@@ -1845,7 +1877,9 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         result.warehouse,
         state.population,
         state.hungerFlag,
-        computeTaxMoodDelta(state.taxPolicy, state.citizenWealth, state.population)
+        computeTaxMoodDelta(state.taxPolicy, state.citizenWealth, state.population),
+        state.citizens,
+        state.totalMonths
       );
 
       const updated: GameState = {
@@ -1909,7 +1943,9 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         nextWarehouse,
         state.population,
         state.hungerFlag,
-        computeTaxMoodDelta(state.taxPolicy, state.citizenWealth, state.population)
+        computeTaxMoodDelta(state.taxPolicy, state.citizenWealth, state.population),
+        state.citizens,
+        state.totalMonths
       );
 
       const updated: GameState = {
@@ -2139,7 +2175,9 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         state.warehouse,
         state.population,
         state.hungerFlag,
-        moodDelta
+        moodDelta,
+        state.citizens,
+        state.totalMonths
       );
 
       const updated: GameState = {

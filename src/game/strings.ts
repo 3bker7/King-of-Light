@@ -254,7 +254,7 @@ export const STRINGS = {
     workersRatio: (employed: number, needed: number) =>
       `العمال: ${employed} / ${needed}`,
     hungerWarning: 'تنبيه جوع اليوم: الرضا محدد بحد أقصى 30 حتى يتوفر الطعام.',
-    needsFood: 'الطعام (45%)',
+    needsFood: 'الغذاء — من احتياجات المواطنين اليومية',
     needsWater: 'المياه (20%)',
     needsHousing: 'السكن (20%)',
     needsEntertainment: 'الترفيه والرفاهية (15%)',

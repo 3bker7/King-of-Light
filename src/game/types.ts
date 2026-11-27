@@ -269,6 +269,10 @@ export interface Citizen {
   memories: CitizenMemory[];
   // V5 Prompt 5 Element 3: Opinion of the king (-100..+100, integer, hydrate default 0)
   opinionOfKing: number;
+  // V5 Prompt 6 Element 3: Citizen's own daily food scores, newest last, capped at 7 (hydrate default [])
+  needHistory7: number[];
+  // V5 Prompt 6 Element 4: Last visited leisure venue cube id (hydrate default null)
+  preferredVenueCubeId: number | null;
   cvFiled: boolean;
   cvFiledMonth?: number | null;
   housingRequestMonth: number | null;

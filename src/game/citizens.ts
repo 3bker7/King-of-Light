@@ -1,5 +1,6 @@
 import { THEMES } from './constants';
 import { pickCitizenName } from './names';
+import { sanitizeNeedHistory7OnHydrate } from './needs';
 import {
   addCitizenMemory,
   generateTraits,
@@ -250,6 +251,8 @@ export function generateInitialCitizens(
       traits: generateTraits(id, birthMonth),
       memories: [],
       opinionOfKing: 0,
+      needHistory7: [],
+      preferredVenueCubeId: null,
       cvFiled: isAdultCv,
       cvFiledMonth: isAdultCv ? totalMonths : null,
       housingRequestMonth: null,
@@ -322,6 +325,8 @@ export function generateInitialCitizens(
           traits: fTraits,
           memories: [],
           opinionOfKing: 0,
+          needHistory7: [],
+          preferredVenueCubeId: null,
           cvFiled: true,
           cvFiledMonth: totalMonths,
           housingRequestMonth: homeCubeId === null ? totalMonths : null,
@@ -344,6 +349,8 @@ export function generateInitialCitizens(
           traits: mTraits,
           memories: [],
           opinionOfKing: 0,
+          needHistory7: [],
+          preferredVenueCubeId: null,
           cvFiled: true,
           cvFiledMonth: totalMonths,
           housingRequestMonth: null,
@@ -366,6 +373,8 @@ export function generateInitialCitizens(
           traits: inheritTraits(childId, cBirth, mTraits, fTraits),
           memories: [],
           opinionOfKing: 0,
+          needHistory7: [],
+          preferredVenueCubeId: null,
           cvFiled: cAge >= 14,
           cvFiledMonth: cAge >= 14 ? totalMonths : null,
           housingRequestMonth: null,
@@ -394,6 +403,8 @@ export function generateInitialCitizens(
         traits: generateTraits(id, birthMonth),
         memories: [],
         opinionOfKing: 0,
+        needHistory7: [],
+        preferredVenueCubeId: null,
         cvFiled: true,
         cvFiledMonth: totalMonths,
         housingRequestMonth: homeCubeId === null ? totalMonths : null,
@@ -522,6 +533,13 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
     traits: c.traits ? { ...c.traits } : generateTraits(c.id, c.birthMonth),
     memories: Array.isArray(c.memories) ? [...c.memories] : [],
     opinionOfKing: sanitizeOpinionOnHydrate(c.opinionOfKing),
+    needHistory7: Array.isArray(c.needHistory7) ? [...c.needHistory7] : [],
+    preferredVenueCubeId:
+      typeof c.preferredVenueCubeId === 'number' &&
+      Number.isFinite(c.preferredVenueCubeId) &&
+      c.preferredVenueCubeId >= 0
+        ? Math.trunc(c.preferredVenueCubeId)
+        : null,
     parentIds: c.parentIds ? ([c.parentIds[0], c.parentIds[1]] as [number, number]) : null,
   }));
   let nextId = Math.max(
@@ -607,6 +625,8 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
         traits: generateTraits(id, arrivalBirthMonth),
         memories: [],
         opinionOfKing: 0,
+        needHistory7: [],
+        preferredVenueCubeId: null,
         cvFiled: true,
         cvFiledMonth: totalMonths,
         housingRequestMonth: totalMonths,
@@ -648,6 +668,8 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
         ),
         memories: [],
         opinionOfKing: 0,
+        needHistory7: [],
+        preferredVenueCubeId: null,
         cvFiled: false,
         cvFiledMonth: null,
         housingRequestMonth: null,
@@ -721,6 +743,8 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
           traits: fTraits,
           memories: [],
           opinionOfKing: 0,
+          needHistory7: [],
+          preferredVenueCubeId: null,
           cvFiled: true,
           cvFiledMonth: totalMonths,
           housingRequestMonth: totalMonths,
@@ -743,6 +767,8 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
           traits: mTraits,
           memories: [],
           opinionOfKing: 0,
+          needHistory7: [],
+          preferredVenueCubeId: null,
           cvFiled: true,
           cvFiledMonth: totalMonths,
           housingRequestMonth: null,
@@ -765,6 +791,8 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
           traits: inheritTraits(cId, cBirth, mTraits, fTraits),
           memories: [],
           opinionOfKing: 0,
+          needHistory7: [],
+          preferredVenueCubeId: null,
           cvFiled: false,
           cvFiledMonth: null,
           housingRequestMonth: null,
@@ -798,6 +826,8 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
           traits: generateTraits(fId, fBirth),
           memories: [],
           opinionOfKing: 0,
+          needHistory7: [],
+          preferredVenueCubeId: null,
           cvFiled: true,
           cvFiledMonth: totalMonths,
           housingRequestMonth: totalMonths,
@@ -820,6 +850,8 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
           traits: generateTraits(mId, mBirth),
           memories: [],
           opinionOfKing: 0,
+          needHistory7: [],
+          preferredVenueCubeId: null,
           cvFiled: true,
           cvFiledMonth: totalMonths,
           housingRequestMonth: null,
@@ -850,6 +882,8 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
         traits: generateTraits(id, birthMonth),
         memories: [],
         opinionOfKing: 0,
+        needHistory7: [],
+        preferredVenueCubeId: null,
         cvFiled: true,
         cvFiledMonth: totalMonths,
         housingRequestMonth: totalMonths,
@@ -1194,6 +1228,13 @@ export function sanitizeCitizensOnHydrate(
       traits: sanitizeTraitsOnHydrate(raw.traits, id, birthMonth),
       memories: sanitizeMemoriesOnHydrate(raw.memories, safeTotalMonths),
       opinionOfKing: sanitizeOpinionOnHydrate(raw.opinionOfKing),
+      needHistory7: sanitizeNeedHistory7OnHydrate(raw.needHistory7),
+      preferredVenueCubeId:
+        typeof raw.preferredVenueCubeId === 'number' &&
+        Number.isFinite(raw.preferredVenueCubeId) &&
+        raw.preferredVenueCubeId >= 0
+          ? Math.trunc(raw.preferredVenueCubeId)
+          : null,
       cvFiled,
       cvFiledMonth,
       housingRequestMonth,

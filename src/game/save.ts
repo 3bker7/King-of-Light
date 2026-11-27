@@ -53,6 +53,7 @@ import {
   sanitizeEternalRecordOnHydrate,
   sanitizePalaceOfPeopleOnHydrate,
 } from './mortality';
+import { aggregateDailyFood, appendNeedHistory7 } from './needs';
 import { computeNeedsAndSatisfaction, processDayRolloverPeople } from './people';
 import { cleanupEmigratedPrivateOwners, syncPrivateAds } from './privateJobs';
 import { sanitizePrivateLandOnHydrate } from './privateLand';
@@ -630,7 +631,9 @@ export function simulateOfflineProgress(
       nextPopulation,
       nextReputation,
       saved.level,
-      dayTaxMoodDelta
+      dayTaxMoodDelta,
+      nextCitizens,
+      nextTotalMonths
     );
     nextWarehouse = peopleRes.warehouse;
     nextPopulation = peopleRes.population;
@@ -955,6 +958,24 @@ export function simulateOfflineProgress(
       ? nextLedger.slice(nextLedger.length - MAX_LEDGER_ENTRIES)
       : nextLedger;
 
+  // V5 Prompt 6 Element 3: On offline return, append ONE entry per living citizen from restored state access
+  if (daysElapsed > 0 && nextCitizens.length > 0) {
+    const returnFoodAgg = aggregateDailyFood({
+      warehouse: nextWarehouse,
+      population: nextPopulation,
+      citizens: nextCitizens,
+      totalMonths: nextTotalMonths,
+    });
+    nextCitizens = nextCitizens.map((c) => {
+      const score = returnFoodAgg.scores.get(c.id);
+      if (score === undefined) return c;
+      return {
+        ...c,
+        needHistory7: appendNeedHistory7(c.needHistory7, score),
+      };
+    });
+  }
+
   const finalTaxMoodDelta = computeTaxMoodDelta(
     nextTaxPolicy,
     nextCitizenWealth,
@@ -965,7 +986,9 @@ export function simulateOfflineProgress(
     nextWarehouse,
     nextPopulation,
     nextHungerFlag,
-    finalTaxMoodDelta
+    finalTaxMoodDelta,
+    nextCitizens,
+    nextTotalMonths
   );
   const finalSatisfaction =
     nextArrears > 0
