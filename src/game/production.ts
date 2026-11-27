@@ -88,6 +88,114 @@ export function getCubePurchasePrice(cubes: Cube[], cube: Cube): number {
   return Math.round(raw / CUBE_PRICE_ROUND_STEP) * CUBE_PRICE_ROUND_STEP;
 }
 
+export const BULK_BUY_MAX_CUBES = 20;
+
+export interface BulkCubePurchaseValidation {
+  valid: boolean;
+  empty: boolean;
+  uniqueIds: number[];
+  totalPrice: number;
+  workingCubes: Cube[];
+  invalidCubeId: number | null;
+  reasonAr: string | null;
+}
+
+/**
+ * Amendment B1(c): Single source of truth for sequential bulk land purchase validation.
+ * - Deduplicates repeated cube IDs preserving first-seen order (bought & charged once).
+ * - Rejects non-integer / out-of-range IDs, batches exceeding 20 unique cubes, or any cube
+ *   that is not a purchasable neutral cube (or carries sea) at its sequential turn.
+ * - Allows chaining: a later cube may become orthogonally adjacent because an earlier one
+ *   in the batch was already marked player-owned in the evolving map.
+ */
+export function validateBulkCubePurchase(
+  cubes: Cube[],
+  cubeIds: readonly number[]
+): BulkCubePurchaseValidation {
+  if (!Array.isArray(cubeIds) || cubeIds.length === 0) {
+    return {
+      valid: false,
+      empty: true,
+      uniqueIds: [],
+      totalPrice: 0,
+      workingCubes: cubes,
+      invalidCubeId: null,
+      reasonAr: null,
+    };
+  }
+
+  const seen = new Set<number>();
+  const uniqueIds: number[] = [];
+  for (let i = 0; i < cubeIds.length; i++) {
+    const rawId = cubeIds[i];
+    if (
+      typeof rawId !== 'number' ||
+      !Number.isInteger(rawId) ||
+      rawId < 0 ||
+      rawId >= cubes.length
+    ) {
+      return {
+        valid: false,
+        empty: false,
+        uniqueIds: [],
+        totalPrice: 0,
+        workingCubes: cubes,
+        invalidCubeId: typeof rawId === 'number' ? rawId : null,
+        reasonAr: 'تعذّر الشراء المتعدد: إحدى الأراضي المختارة غير صالحة.',
+      };
+    }
+    if (!seen.has(rawId)) {
+      seen.add(rawId);
+      uniqueIds.push(rawId);
+    }
+  }
+
+  if (uniqueIds.length > BULK_BUY_MAX_CUBES) {
+    return {
+      valid: false,
+      empty: false,
+      uniqueIds,
+      totalPrice: 0,
+      workingCubes: cubes,
+      invalidCubeId: uniqueIds[BULK_BUY_MAX_CUBES],
+      reasonAr: `الحد الأقصى للشراء المتعدد هو ${BULK_BUY_MAX_CUBES} أرضاً في المرة الواحدة.`,
+    };
+  }
+
+  const workingCubes = cubes.slice();
+  let totalPrice = 0;
+
+  for (let i = 0; i < uniqueIds.length; i++) {
+    const id = uniqueIds[i];
+    const cube = workingCubes[id];
+    const hasSea = cube ? cube.themeId === 'sea' || cube.secondThemeId === 'sea' : false;
+    if (!cube || hasSea || !isPurchasableNeutralCube(workingCubes, cube)) {
+      return {
+        valid: false,
+        empty: false,
+        uniqueIds,
+        totalPrice: 0,
+        workingCubes: cubes,
+        invalidCubeId: id,
+        reasonAr:
+          'تعذّر الشراء المتعدد: إحدى الأراضي المختارة غير متاحة للشراء أو غير مجاورة لمملكتك.',
+      };
+    }
+    totalPrice += getCubePurchasePrice(workingCubes, cube);
+    workingCubes[id] = { ...cube, owner: 'player' as const };
+  }
+
+  return {
+    valid: true,
+    empty: false,
+    uniqueIds,
+    totalPrice,
+    workingCubes,
+    invalidCubeId: null,
+    reasonAr: null,
+  };
+}
+
 export function countAdjacentSeas(cubes: Cube[], cube: Cube): number {
   return getOrthogonalNeighbors(cubes, cube.row, cube.col).filter(
     (neighbor) => neighbor.owner === 'player' && neighbor.themeId === 'sea'

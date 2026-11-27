@@ -40,11 +40,13 @@ import {
   hydrateGameState,
 } from './game/gameState';
 import {
+  BULK_BUY_MAX_CUBES,
   checkMaterialCosts,
   computeStaffing,
   findPalaceCube,
   getManhattanDistanceToPalace,
   isPurchasableNeutralCube,
+  validateBulkCubePurchase,
 } from './game/production';
 import {
   loadPersistedSave,
@@ -250,6 +252,9 @@ export default function App() {
   const [worldPanelError, setWorldPanelError] = useState<string | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  // Amendment B1(c): UI-local bulk land-purchase selection (never persisted)
+  const [bulkBuyMode, setBulkBuyMode] = useState(false);
+  const [bulkSelectedCubeIds, setBulkSelectedCubeIds] = useState<number[]>([]);
 
   const isOnlineSession = Boolean(onlineConfigEnabled && worldUser);
   const isWorldBourseActive = Boolean(
@@ -781,15 +786,15 @@ export default function App() {
     }
   }, [state.pendingAudioCue, state.muted]);
 
-  // Auto-dismiss toasts after 5s
+  // Amendment B1(b): Auto-dismiss toasts after 2.5s (keyed on oldest toast so new arrivals don't reset its timer)
+  const oldestToastId = state.toasts[0]?.id ?? null;
   useEffect(() => {
-    if (state.toasts.length === 0) return;
-    const oldest = state.toasts[0];
+    if (oldestToastId === null) return;
     const timeout = window.setTimeout(() => {
-      dispatch({ type: 'DISMISS_TOAST', id: oldest.id });
-    }, 5000);
+      dispatch({ type: 'DISMISS_TOAST', id: oldestToastId });
+    }, 2500);
     return () => window.clearTimeout(timeout);
-  }, [state.toasts]);
+  }, [oldestToastId]);
 
   // V5 Prompt 2 Element 4: Auto-dismiss prayer banner after 6 real seconds (new banner replaces prior, never stacks)
   const prayerBannerId = state.prayerBanner?.id ?? null;
@@ -846,6 +851,9 @@ export default function App() {
         setBankOverlayOpen(false);
       } else if (openOfficeTab !== null) {
         setOpenOfficeTab(null);
+      } else if (bulkBuyMode) {
+        setBulkBuyMode(false);
+        setBulkSelectedCubeIds([]);
       } else if (selectedCitizenId !== null) {
         setSelectedCitizenId(null);
         setFollowCitizenId(null);
@@ -888,6 +896,7 @@ export default function App() {
     advisorOverlayOpen,
     bankOverlayOpen,
     openOfficeTab,
+    bulkBuyMode,
     selectedCitizenId,
     selectedCubeId,
     kingdomCardOpen,
@@ -926,7 +935,62 @@ export default function App() {
     citizenInfo || selectedCube || kingdomCardOpen
   );
 
+  const bulkValidation = useMemo(
+    () => validateBulkCubePurchase(state.cubes, bulkSelectedCubeIds),
+    [state.cubes, bulkSelectedCubeIds]
+  );
+
+  const handleToggleBulkBuyMode = (seedCubeId?: number) => {
+    if (bulkBuyMode) {
+      setBulkBuyMode(false);
+      setBulkSelectedCubeIds([]);
+      return;
+    }
+    setActiveBuildTheme(null);
+    setInspectedShortTheme(null);
+    setOpenBuildCategory(null);
+    setPulsingTheme(null);
+    setSelectedCitizenId(null);
+    setFollowCitizenId(null);
+    setCitizenInfo(null);
+    setKingdomCardOpen(false);
+    setBulkBuyMode(true);
+    if (typeof seedCubeId === 'number') {
+      const check = validateBulkCubePurchase(state.cubes, [seedCubeId]);
+      setBulkSelectedCubeIds(check.valid ? [seedCubeId] : []);
+    } else {
+      setBulkSelectedCubeIds([]);
+    }
+  };
+
+  const handleConfirmBulkBuy = () => {
+    if (!bulkBuyMode || bulkSelectedCubeIds.length === 0) return;
+    dispatch({ type: 'BUY_CUBES_BULK', cubeIds: bulkSelectedCubeIds });
+    setBulkBuyMode(false);
+    setBulkSelectedCubeIds([]);
+  };
+
   const handleCubeClick = (cubeId: number) => {
+    if (bulkBuyMode) {
+      setBulkSelectedCubeIds((prev) => {
+        if (prev.includes(cubeId)) {
+          // Removing a cube may break adjacency for later chained cubes: keep only sequentially valid prefix/subset
+          const remaining = prev.filter((id) => id !== cubeId);
+          const pruned: number[] = [];
+          for (let i = 0; i < remaining.length; i++) {
+            const candidate = [...pruned, remaining[i]];
+            if (validateBulkCubePurchase(state.cubes, candidate).valid) {
+              pruned.push(remaining[i]);
+            }
+          }
+          return pruned;
+        }
+        if (prev.length >= BULK_BUY_MAX_CUBES) return prev;
+        const next = [...prev, cubeId];
+        return validateBulkCubePurchase(state.cubes, next).valid ? next : prev;
+      });
+      return;
+    }
     if (activeBuildTheme) {
       dispatch({ type: 'PLACE_THEME', cubeId, themeId: activeBuildTheme });
       setPulsingTheme(null);
@@ -943,7 +1007,9 @@ export default function App() {
   };
 
   const handleCitizenClick = (agentId: number) => {
-    // Placement mode cancels citizen selection and vice versa
+    // Placement / bulk-buy mode cancels citizen selection and vice versa
+    setBulkBuyMode(false);
+    setBulkSelectedCubeIds([]);
     setActiveBuildTheme(null);
     setInspectedShortTheme(null);
     setPulsingTheme(null);
@@ -960,6 +1026,10 @@ export default function App() {
     themeId: ThemeId | null,
     closePanel = true
   ) => {
+    if (themeId !== null) {
+      setBulkBuyMode(false);
+      setBulkSelectedCubeIds([]);
+    }
     setActiveBuildTheme(themeId);
     setPulsingTheme(null);
     if (themeId !== null) {
@@ -1799,6 +1869,7 @@ export default function App() {
             population={state.population}
             satisfaction={state.satisfaction}
             selectedCubeId={selectedCubeId}
+            bulkSelectedCubeIds={bulkBuyMode ? bulkSelectedCubeIds : undefined}
             selectedCitizenId={selectedCitizenId}
             followCitizenId={followCitizenId}
             activeBuildTheme={activeBuildTheme}
@@ -1872,6 +1943,47 @@ export default function App() {
                 }}
               />
             </div>
+
+            {/* Amendment B1(c): Floating bulk land-purchase bar (visible only while bulkBuyMode is active) */}
+            {bulkBuyMode && (
+              <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2.5 px-3.5 py-2 rounded-2xl bg-[#FBF3DF]/95 border-2 border-[#C9962E] shadow-xl text-[#2B2118] text-xs font-extrabold max-w-[calc(100%-24px)] flex-wrap justify-center">
+                <span className="text-[#14524A]">شراء متعدد</span>
+                <span className="tabular-nums-latin text-[#6F5C43]">
+                  {bulkSelectedCubeIds.length} / {BULK_BUY_MAX_CUBES} أرض
+                </span>
+                <span
+                  className={`tabular-nums-latin ${
+                    bulkValidation.totalPrice > state.gold
+                      ? 'text-[#A83629]'
+                      : 'text-[#8A5F12]'
+                  }`}
+                >
+                  الإجمالي: {bulkValidation.totalPrice} ذهب
+                </span>
+                <button
+                  type="button"
+                  disabled={
+                    bulkSelectedCubeIds.length === 0 ||
+                    !bulkValidation.valid ||
+                    bulkValidation.totalPrice > state.gold
+                  }
+                  onClick={handleConfirmBulkBuy}
+                  className="px-3 py-1 rounded-xl bg-[#14524A] hover:bg-[#1B685E] disabled:opacity-45 text-white font-extrabold transition-colors"
+                >
+                  تأكيد الشراء ({bulkSelectedCubeIds.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBulkBuyMode(false);
+                    setBulkSelectedCubeIds([]);
+                  }}
+                  className="px-2.5 py-1 rounded-xl bg-[#EFE2C2] hover:bg-[#E3D1A7] text-[#4F3F2B] font-extrabold transition-colors"
+                >
+                  إلغاء
+                </button>
+              </div>
+            )}
           </WorldCanvas>
         </div>
       </div>
@@ -1893,6 +2005,8 @@ export default function App() {
         onClose={handleCloseOverlayCard}
         onToggleFollowCitizen={handleToggleFollowCitizen}
         onBuyCube={(cubeId) => dispatch({ type: 'BUY_CUBE', cubeId })}
+        bulkBuyMode={bulkBuyMode}
+        onToggleBulkBuyMode={handleToggleBulkBuyMode}
         onDemolishTheme={handleDemolish}
         onFixHint={handleFixHint}
         onBuyMaterials={handleBuyMaterials}

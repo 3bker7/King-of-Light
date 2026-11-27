@@ -109,6 +109,7 @@ import {
   getCubePurchasePrice,
   isAdjacentToOwned,
   isPurchasableNeutralCube,
+  validateBulkCubePurchase,
 } from './production';
 import {
   computeProvinces,
@@ -179,7 +180,7 @@ function createToast(
 
 function appendToasts(existing: ToastItem[], additions: ToastItem[]): ToastItem[] {
   if (additions.length === 0) return existing;
-  return [...existing, ...additions].slice(-4);
+  return [...existing, ...additions].slice(-3);
 }
 
 function appendLedger(
@@ -850,6 +851,7 @@ export type GameAction =
   | { type: 'PLACE_THEME'; cubeId: number; themeId: ThemeId }
   | { type: 'DEMOLISH_THEME'; cubeId: number; slot: SlotIndex }
   | { type: 'BUY_CUBE'; cubeId: number }
+  | { type: 'BUY_CUBES_BULK'; cubeIds: number[] }
   | {
       type: 'TRADE_RESOURCE';
       resource: TradedResourceKey;
@@ -1813,6 +1815,68 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         toasts: appendToasts(state.toasts, [
           createToast(STRINGS.toasts.cubePurchased, 'success'),
         ]),
+        pendingAudioCue: makeCue('build'),
+      };
+
+      return evaluateObjectivesAndProgression(updated);
+    }
+
+    case 'BUY_CUBES_BULK': {
+      const check = validateBulkCubePurchase(state.cubes, action.cubeIds);
+      if (check.empty) return state;
+
+      if (!check.valid) {
+        return {
+          ...state,
+          toasts: appendToasts(state.toasts, [
+            createToast(
+              check.reasonAr ?? 'تعذّر تنفيذ الشراء المتعدد.',
+              'warning'
+            ),
+          ]),
+          pendingAudioCue: makeCue('error'),
+        };
+      }
+
+      if (state.gold < check.totalPrice) {
+        return {
+          ...state,
+          toasts: appendToasts(state.toasts, [
+            createToast(STRINGS.toasts.notEnoughGold, 'warning'),
+          ]),
+          pendingAudioCue: makeCue('error'),
+        };
+      }
+
+      const count = check.uniqueIds.length;
+      const labelAr = count === 1 ? 'شراء أرض' : `شراء ${count} أراضٍ`;
+      const tx = transferGold(state, {
+        from: 'treasury',
+        to: 'palace',
+        amount: check.totalPrice,
+        kind: 'land',
+        labelAr,
+        exact: true,
+      });
+      if (!tx.ok) {
+        return {
+          ...state,
+          toasts: appendToasts(state.toasts, [
+            createToast(STRINGS.toasts.notEnoughGold, 'warning'),
+          ]),
+          pendingAudioCue: makeCue('error'),
+        };
+      }
+
+      const successMsg =
+        count === 1
+          ? `تم شراء أرض واحدة بمبلغ ${check.totalPrice} ذهب`
+          : `تم شراء ${count} أراضٍ بمبلغ ${check.totalPrice} ذهب`;
+
+      const updated: GameState = {
+        ...tx.state,
+        cubes: check.workingCubes,
+        toasts: appendToasts(state.toasts, [createToast(successMsg, 'success')]),
         pendingAudioCue: makeCue('build'),
       };
 

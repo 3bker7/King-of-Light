@@ -1,10 +1,10 @@
 import type { GameClock, GameState } from './types';
 
 export const CLOCK_CONSTANTS = {
-  REAL_SECONDS_PER_GAME_DAY: 28_800, // 8 real hours
-  REAL_SECONDS_PER_GAME_HOUR: 1_200, // 20 real minutes
-  REAL_SECONDS_PER_GAME_MINUTE: 20, // 20 real seconds
-  GAME_SECONDS_PER_TICK: 3, // 1 real second tick = 3 game seconds
+  REAL_SECONDS_PER_GAME_DAY: 3_600, // 1 real hour
+  REAL_SECONDS_PER_GAME_HOUR: 150, // 2.5 real minutes
+  REAL_SECONDS_PER_GAME_MINUTE: 2.5, // 2.5 real seconds
+  GAME_SECONDS_PER_TICK: 24, // 1 real second tick = 24 game seconds
   GAME_SECONDS_PER_DAY: 86_400, // 24 * 60 * 60
   GAME_MINUTES_PER_DAY: 1_440, // 24 * 60
   DEFAULT_START_SECONDS_OF_DAY: 8 * 3_600, // 08:00 morning light on fresh game
@@ -13,7 +13,7 @@ export const CLOCK_CONSTANTS = {
   SUNRISE_SECONDS: 6 * 3_600, // 21,600
   SUNSET_SECONDS: 18 * 3_600, // 64,800
   MAX_OFFLINE_GAME_DAYS: 90,
-  MAX_OFFLINE_REAL_SECONDS: 90 * 28_800, // 2,592,000 real seconds = 90 game days
+  MAX_OFFLINE_REAL_SECONDS: 90 * 3_600, // 324,000 real seconds = 90 real hours = 90 game days
 } as const;
 
 export function createInitialClock(): GameClock {

@@ -39,12 +39,12 @@ export const VILLAGE_NAMES = [
 
 // Time and persistence
 export const TICK_MS = 1000;
-export const TICKS_PER_DAY = 28800; // 8 real hours = 1 game day (3 game-seconds per 1s tick)
+export const TICKS_PER_DAY = 3600; // 1 real hour = 1 game day (24 game-seconds per 1s tick)
 export const SAVE_KEY = 'noor-alshaab-save-v1';
 export const SAVE_VERSION = 2;
 export const SAVE_THROTTLE_MS = 2000;
 export const MAX_OFFLINE_GAME_DAYS = 90;
-export const MAX_OFFLINE_SECONDS = MAX_OFFLINE_GAME_DAYS * TICKS_PER_DAY; // 90 game days cap (2,592,000 real seconds)
+export const MAX_OFFLINE_SECONDS = MAX_OFFLINE_GAME_DAYS * TICKS_PER_DAY; // 90 game days cap (324,000 real seconds = 90 real hours)
 export const AWAY_MODAL_MIN_SECONDS = 60;
 export const MAX_OFFLINE_POP_DELTA = 6;
 export const READY_PULSE_WINDOW_SECONDS = 5;

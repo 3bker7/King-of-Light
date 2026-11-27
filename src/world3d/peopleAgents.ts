@@ -53,9 +53,24 @@ const ADULT_MESH_SCALE = 1.6;
 const CHILD_RELATIVE_SCALE = 0.6;
 const ENTER_DOOR_DURATION = 0.2; // 200ms step-forward shrink into front door
 
+// Amendment 6-B (B2): Closed-interior service buildings where citizens enter through the door
+// during timed sessions (staff shifts, school classes, leisure/break visits) instead of standing outside.
+// Open-air venues (garden, palace, grand_market, shop storefront) & outdoor/craft workplaces stay visible.
+export const INDOOR_SERVICE_THEMES: ReadonlySet<ThemeId> = new Set<ThemeId>([
+  'clinic',
+  'school',
+  'theater',
+  'mosque',
+  'restaurant',
+  'cafe',
+  'hotel',
+  'trade_office',
+]);
+
 type RoutineState =
   | 'AT_HOME'
   | 'ENTERING_HOME'
+  | 'ENTERING_BUILDING'
   | 'TO_WORK'
   | 'WORKING'
   | 'TO_BREAK'
@@ -68,6 +83,13 @@ type RoutineState =
   | 'ENTERING_MOSQUE'
   | 'PRAYING'
   | 'RETURNING_FROM_PRAYER';
+
+interface DoorAnchor {
+  cubeId: number;
+  themeId: ThemeId;
+  doorstep: AnchorPoint;
+  faceTarget: AnchorPoint;
+}
 
 type BreakThemeId =
   | 'mosque'
@@ -141,6 +163,11 @@ interface LivingAgent {
   prayerMosqueSpot: BreakAnchorSpot | null;
   prayerTimer: number;
   prayerReturnTarget: 'work' | 'break' | 'home' | 'school' | null;
+  // Amendment 6-B (B2): Shared indoor service-building entry state
+  activeDoorAnchor: DoorAnchor | null;
+  pendingIndoorState: 'WORKING' | 'ON_BREAK' | 'PLAYING' | null;
+  pendingIndoorDuration: number;
+  insideBuilding: boolean;
 }
 
 const CAMP_AGENT_ID_OFFSET = 100000;
@@ -232,8 +259,8 @@ export const THEME_ARRIVED_TEXT: Record<ThemeId, string> = {
   sea: 'يصيد على شاطئ البحر',
   well: 'يستقي الماء من بئر الماء',
   bakery: 'يخبز الخبز عند باب المخبز',
-  restaurant: 'يجهّز الطعام عند مدخل المطعم',
-  cafe: 'يعدّ القهوة عند مدخل المقهى',
+  restaurant: 'يجهّز الطعام داخل المطعم',
+  cafe: 'يعدّ القهوة داخل المقهى',
   forest: 'يجمع الأخشاب عند طرف الغابة',
   quarry: 'يقطع الحجارة عند مدخل المحجر',
   iron_mine: 'يستخرج الخام عند مدخل منجم الحديد',
@@ -247,13 +274,13 @@ export const THEME_ARRIVED_TEXT: Record<ThemeId, string> = {
   jeweler: 'يعرض الحلي عند باب محل الصياغة',
   shop: 'يبيع البضائع عند واجهة المحل التجاري',
   grand_market: 'يدير التجارة عند بوابة السوق الكبير',
-  trade_office: 'يتابع الصفقات عند مدخل مكتب التجارة',
-  hotel: 'يستقبل ضيوف الفندق',
-  mosque: 'يصلّي ويطمئن عند ساحة المسجد',
-  theater: 'ينظّم العرض عند مدخل المسرح',
+  trade_office: 'يتابع الصفقات داخل مكتب التجارة',
+  hotel: 'يستقبل ضيوف الفندق بالداخل',
+  mosque: 'يصلّي ويطمئن داخل المسجد',
+  theater: 'ينظّم العرض داخل المسرح',
   garden: 'يستريح بين أشجار الحديقة',
-  clinic: 'يساعد المرضى عند باب العيادة',
-  school: 'يعلّم التلاميذ عند مدخل المدرسة',
+  clinic: 'يساعد المرضى داخل العيادة',
+  school: 'يعلّم التلاميذ داخل المدرسة',
 };
 
 // V5 Prompt 5 Element 5: Deterministic truthful Arabic speech variety (3 variants per state)
@@ -330,13 +357,13 @@ export function formatAgentSpeechVariant(
 }
 
 const BREAK_ARRIVED_TEXT: Record<BreakThemeId, string> = {
-  mosque: 'يصلّي ويطمئن عند ساحة المسجد',
-  restaurant: 'يتناول وجبة عند مدخل المطعم',
-  cafe: 'يشرب القهوة عند مدخل المقهى',
+  mosque: 'يصلّي ويطمئن داخل المسجد',
+  restaurant: 'يتناول وجبة داخل المطعم',
+  cafe: 'يشرب القهوة داخل المقهى',
   garden: 'يستريح بين أشجار الحديقة',
   grand_market: 'يتسوّق عند بوابة السوق الكبير',
   shop: 'يتسوّق عند واجهة المحل التجاري',
-  theater: 'يحضر عرضاً عند مدخل المسرح',
+  theater: 'يحضر عرضاً داخل المسرح',
   palace: 'في ساحة قصر الحاكم',
 };
 
@@ -934,17 +961,88 @@ export class PeopleAgentsManager {
     }
   }
 
-  private ensureVisibleAtDoorstepIfLeavingHome(agent: LivingAgent): void {
-    if (!agent.group.visible) {
-      const anchor =
-        agent.role === 'police' ? this.palaceSpot : agent.homeSpot;
-      agent.x = anchor.doorstep.x;
-      agent.z = anchor.doorstep.z;
+  private exitIndoorAtDoorstep(agent: LivingAgent): void {
+    const needsExit =
+      !agent.group.visible ||
+      agent.insideBuilding ||
+      agent.state === 'ENTERING_BUILDING' ||
+      agent.state === 'ENTERING_HOME';
+    if (needsExit) {
+      const exitDoorstep =
+        agent.activeDoorAnchor?.doorstep ??
+        ((agent.state === 'PRAYING' || agent.state === 'ENTERING_MOSQUE') &&
+        agent.prayerMosqueSpot
+          ? agent.prayerMosqueSpot.doorstep
+          : agent.role === 'police'
+            ? this.palaceSpot.doorstep
+            : agent.homeSpot.doorstep);
+      agent.x = exitDoorstep.x;
+      agent.z = exitDoorstep.z;
       const y = this.getLandHeight(agent.x, agent.z);
       agent.group.position.set(agent.x, y, agent.z);
       agent.group.scale.setScalar(1);
       agent.group.visible = true;
     }
+    agent.insideBuilding = false;
+    agent.activeDoorAnchor = null;
+    agent.pendingIndoorState = null;
+    agent.pendingIndoorDuration = 0;
+    agent.enterDoorTimer = 0;
+  }
+
+  private beginEnteringBuilding(
+    agent: LivingAgent,
+    anchor: DoorAnchor,
+    targetState: 'WORKING' | 'ON_BREAK' | 'PLAYING',
+    durationSec: number
+  ): void {
+    agent.state = 'ENTERING_BUILDING';
+    agent.enterDoorTimer = ENTER_DOOR_DURATION;
+    agent.enterStartX = agent.x;
+    agent.enterStartZ = agent.z;
+    agent.activeDoorAnchor = anchor;
+    agent.pendingIndoorState = targetState;
+    agent.pendingIndoorDuration = durationSec;
+    agent.insideBuilding = false;
+    agent.waypoints = [];
+    agent.waypointIdx = 0;
+  }
+
+  /**
+   * Shared 200ms step-forward shrink animation used by houses, mosques, and all indoor service buildings.
+   * Returns true once the citizen has stepped cleanly through the doorway and is now invisible inside.
+   */
+  private stepDoorEntryAnimation(
+    agent: LivingAgent,
+    doorAnchor: { doorstep: AnchorPoint; faceTarget: AnchorPoint },
+    dt: number
+  ): boolean {
+    agent.enterDoorTimer -= dt;
+    const progress = THREE.MathUtils.clamp(
+      1 - agent.enterDoorTimer / ENTER_DOOR_DURATION,
+      0,
+      1
+    );
+    const fx = doorAnchor.faceTarget.x - agent.enterStartX;
+    const fz = doorAnchor.faceTarget.z - agent.enterStartZ;
+    const flen = Math.hypot(fx, fz) || 1;
+    const stepIn = 0.55 * progress;
+    const curX = agent.enterStartX + (fx / flen) * stepIn;
+    const curZ = agent.enterStartZ + (fz / flen) * stepIn;
+    const groundY = this.getLandHeight(agent.enterStartX, agent.enterStartZ);
+    agent.group.position.set(curX, groundY, curZ);
+    agent.group.rotation.y = Math.atan2(fx, fz);
+    agent.group.scale.setScalar(Math.max(0.05, 1 - progress * 0.95));
+
+    if (agent.enterDoorTimer <= 0) {
+      agent.x = doorAnchor.doorstep.x;
+      agent.z = doorAnchor.doorstep.z;
+      agent.group.position.set(agent.x, groundY, agent.z);
+      agent.group.scale.setScalar(1);
+      agent.group.visible = false;
+      return true;
+    }
+    return false;
   }
 
   private buildScheduleStateView(): ScheduleStateView {
@@ -1036,6 +1134,10 @@ export class PeopleAgentsManager {
     agent.activeBreakSpot = null;
     agent.targetThemeId = 'house';
     agent.activeFaceTarget = anchor.faceTarget;
+    agent.insideBuilding = false;
+    agent.activeDoorAnchor = null;
+    agent.pendingIndoorState = null;
+    agent.pendingIndoorDuration = 0;
   }
 
   private routeAgentHome(agent: LivingAgent): void {
@@ -1046,6 +1148,7 @@ export class PeopleAgentsManager {
     if (agent.state === 'ENTERING_HOME' || agent.state === 'TO_HOME') {
       return;
     }
+    this.exitIndoorAtDoorstep(agent);
     const anchor =
       agent.role === 'police' ? this.palaceSpot : agent.homeSpot;
     agent.activeBreakSpot = null;
@@ -1189,7 +1292,7 @@ export class PeopleAgentsManager {
       const mosqueSpot = this.mosqueSpots.get(mosqueCubeId);
       if (!mosqueSpot) continue;
 
-      this.ensureVisibleAtDoorstepIfLeavingHome(a);
+      this.exitIndoorAtDoorstep(a);
       a.prayerSessionId = session.id;
       a.prayerMosqueSpot = mosqueSpot;
       a.prayerTimer = 0;
@@ -1294,8 +1397,13 @@ export class PeopleAgentsManager {
 
     if (phase === 'commute' || phase === 'working') {
       if (isStudent && this.schoolSpots.length > 0) {
-        if (agent.state !== 'PLAYING' || agent.playKind !== 'school') {
-          this.ensureVisibleAtDoorstepIfLeavingHome(agent);
+        const alreadyInSchoolFlow =
+          (agent.state === 'PLAYING' && agent.playKind === 'school') ||
+          (agent.state === 'ENTERING_BUILDING' &&
+            agent.pendingIndoorState === 'PLAYING' &&
+            agent.playKind === 'school');
+        if (!alreadyInSchoolFlow) {
+          this.exitIndoorAtDoorstep(agent);
           const s = this.schoolSpots[agent.id % this.schoolSpots.length];
           agent.state = 'PLAYING';
           agent.stateTimer = 0;
@@ -1312,8 +1420,13 @@ export class PeopleAgentsManager {
         return;
       }
       if (hasRealShift && agent.workSpot) {
-        if (agent.state !== 'TO_WORK' && agent.state !== 'WORKING') {
-          this.ensureVisibleAtDoorstepIfLeavingHome(agent);
+        const alreadyInWorkFlow =
+          agent.state === 'TO_WORK' ||
+          agent.state === 'WORKING' ||
+          (agent.state === 'ENTERING_BUILDING' &&
+            agent.pendingIndoorState === 'WORKING');
+        if (!alreadyInWorkFlow) {
+          this.exitIndoorAtDoorstep(agent);
           agent.activeBreakSpot = null;
           agent.state = 'TO_WORK';
           agent.stateTimer = 0;
@@ -1335,8 +1448,13 @@ export class PeopleAgentsManager {
     }
 
     if (phase === 'school' && this.schoolSpots.length > 0) {
-      if (agent.state !== 'PLAYING' || agent.playKind !== 'school') {
-        this.ensureVisibleAtDoorstepIfLeavingHome(agent);
+      const alreadyInSchoolFlow =
+        (agent.state === 'PLAYING' && agent.playKind === 'school') ||
+        (agent.state === 'ENTERING_BUILDING' &&
+          agent.pendingIndoorState === 'PLAYING' &&
+          agent.playKind === 'school');
+      if (!alreadyInSchoolFlow) {
+        this.exitIndoorAtDoorstep(agent);
         const s = this.schoolSpots[agent.id % this.schoolSpots.length];
         agent.state = 'PLAYING';
         agent.stateTimer = 0;
@@ -1362,7 +1480,15 @@ export class PeopleAgentsManager {
       return;
     }
 
-    if (phase === 'evening' && (agent.state === 'WORKING' || agent.state === 'TO_WORK')) {
+    if (
+      phase === 'evening' &&
+      (agent.state === 'WORKING' ||
+        agent.state === 'TO_WORK' ||
+        (agent.state === 'PLAYING' && agent.playKind === 'school') ||
+        (agent.state === 'ENTERING_BUILDING' &&
+          (agent.pendingIndoorState === 'WORKING' ||
+            agent.pendingIndoorState === 'PLAYING')))
+    ) {
       agent.stateTimer = 0;
       this.assignNextRoutine(agent);
     }
@@ -1411,10 +1537,24 @@ export class PeopleAgentsManager {
     // Commute or active work shift for citizens with real registry jobs
     if ((phase === 'commute' || phase === 'working') && hasRealShift && agent.workSpot && !isStudent) {
       if (agent.state === 'WORKING') {
+        if (INDOOR_SERVICE_THEMES.has(agent.workSpot.themeId) && !agent.insideBuilding) {
+          this.beginEnteringBuilding(
+            agent,
+            {
+              cubeId: agent.workSpot.cubeId,
+              themeId: agent.workSpot.themeId,
+              doorstep: agent.workSpot.doorstep,
+              faceTarget: agent.workSpot.faceTarget,
+            },
+            'WORKING',
+            5.2 + Math.random() * 3.5
+          );
+          return;
+        }
         agent.stateTimer = 5.2 + Math.random() * 3.5;
         return;
       }
-      this.ensureVisibleAtDoorstepIfLeavingHome(agent);
+      this.exitIndoorAtDoorstep(agent);
       agent.activeBreakSpot = null;
       agent.state = 'TO_WORK';
       agent.stateTimer = 0;
@@ -1433,11 +1573,11 @@ export class PeopleAgentsManager {
 
     // Student commute / active school hours when a staffed school exists
     if ((phase === 'school' || (phase === 'commute' && isStudent)) && this.schoolSpots.length > 0) {
-      if (agent.state === 'PLAYING' && agent.playKind === 'school' && agent.waypoints.length === 0) {
+      if (agent.state === 'PLAYING' && agent.playKind === 'school' && agent.insideBuilding) {
         agent.stateTimer = 4.0 + Math.random() * 2.5;
         return;
       }
-      this.ensureVisibleAtDoorstepIfLeavingHome(agent);
+      this.exitIndoorAtDoorstep(agent);
       agent.activeBreakSpot = null;
       const s = this.schoolSpots[agent.id % this.schoolSpots.length];
       agent.state = 'PLAYING';
@@ -1454,7 +1594,7 @@ export class PeopleAgentsManager {
       return;
     }
 
-    this.ensureVisibleAtDoorstepIfLeavingHome(agent);
+    this.exitIndoorAtDoorstep(agent);
     agent.activeBreakSpot = null;
 
     if (agent.role === 'police') {
@@ -2022,6 +2162,10 @@ export class PeopleAgentsManager {
             existing.group.position.set(existing.x, y, existing.z);
             existing.group.visible = true;
             existing.group.scale.setScalar(1);
+            existing.insideBuilding = false;
+            existing.activeDoorAnchor = null;
+            existing.pendingIndoorState = null;
+            existing.pendingIndoorDuration = 0;
             existing.state = 'AT_HOME';
             existing.stateTimer = 0.25;
             existing.waypoints = [];
@@ -2049,18 +2193,32 @@ export class PeopleAgentsManager {
             existing.group = built.root;
             existing.bodyPivot = built.bodyPivot;
             existing.castingPivot = built.castingPivot;
+            existing.insideBuilding = false;
+            existing.activeDoorAnchor = null;
+            existing.pendingIndoorState = null;
+            existing.pendingIndoorDuration = 0;
             existing.state = 'AT_HOME';
             existing.stateTimer = 0.2;
             this.assignNextRoutine(existing);
-          } else if (workChanged && existing.workSpot) {
+          } else if (
+            workChanged &&
+            (existing.workSpot ||
+              existing.insideBuilding ||
+              existing.state === 'WORKING' ||
+              existing.state === 'TO_WORK' ||
+              existing.state === 'ENTERING_BUILDING')
+          ) {
+            this.exitIndoorAtDoorstep(existing);
             existing.state = 'AT_HOME';
             existing.stateTimer = 0.1;
             this.assignNextRoutine(existing);
           } else if (
             existing.state !== 'AT_HOME' &&
             existing.state !== 'ENTERING_HOME' &&
+            existing.state !== 'ENTERING_BUILDING' &&
             existing.state !== 'ENTERING_MOSQUE' &&
             existing.state !== 'PRAYING' &&
+            !existing.insideBuilding &&
             existing.stateTimer <= 0
           ) {
             // Re-validate active path against updated street grid (e.g. player just built a sea or building)
@@ -2138,6 +2296,10 @@ export class PeopleAgentsManager {
             prayerMosqueSpot: null,
             prayerTimer: 0,
             prayerReturnTarget: null,
+            activeDoorAnchor: null,
+            pendingIndoorState: null,
+            pendingIndoorDuration: 0,
+            insideBuilding: false,
           };
           this.assignNextRoutine(agent);
           nextAgents.push(agent);
@@ -2171,7 +2333,7 @@ export class PeopleAgentsManager {
       }
     }
 
-    // Safety guard: if a mosque was demolished while an agent was walking to / praying in it, release cleanly
+    // Safety guard: if a mosque or indoor service building was demolished while an agent was entering / inside it, release cleanly
     for (let i = 0; i < this.agents.length; i++) {
       const a = this.agents[i];
       if (
@@ -2187,6 +2349,22 @@ export class PeopleAgentsManager {
         a.prayerReturnTarget = null;
         a.prayerTimer = 0;
         this.assignNextRoutine(a);
+      } else if (
+        (a.insideBuilding || a.state === 'ENTERING_BUILDING') &&
+        a.activeDoorAnchor
+      ) {
+        const hostCube = cubes[a.activeDoorAnchor.cubeId];
+        const stillExists =
+          Boolean(hostCube) &&
+          hostCube.owner === 'player' &&
+          (hostCube.themeId === a.activeDoorAnchor.themeId ||
+            hostCube.secondThemeId === a.activeDoorAnchor.themeId);
+        if (!stillExists) {
+          this.exitIndoorAtDoorstep(a);
+          a.state = 'AT_HOME';
+          a.stateTimer = 0;
+          this.assignNextRoutine(a);
+        }
       }
     }
 
@@ -2408,6 +2586,8 @@ export class PeopleAgentsManager {
     role: CitizenRoleId;
     state: RoutineState;
     visible: boolean;
+    insideBuilding: boolean;
+    activeDoorThemeId: ThemeId | null;
     phase: SchedulePhase;
     workThemeId: ThemeId | null;
     destinationAr: string;
@@ -2420,6 +2600,8 @@ export class PeopleAgentsManager {
         role: a.role,
         state: a.state,
         visible: a.group.visible,
+        insideBuilding: a.insideBuilding,
+        activeDoorThemeId: a.activeDoorAnchor?.themeId ?? null,
         phase: this.resolveAgentSchedule(a).phase,
         workThemeId: a.workSpot?.themeId ?? null,
         destinationAr: info?.destinationAr ?? '',
@@ -2457,6 +2639,12 @@ export class PeopleAgentsManager {
                   this.gameDay
                 );
           break;
+        case 'ENTERING_BUILDING': {
+          const doorTheme: ThemeId =
+            a.activeDoorAnchor?.themeId ?? a.targetThemeId ?? 'palace';
+          destinationAr = THEME_GOING_TEXT[doorTheme];
+          break;
+        }
         case 'TO_WORK': {
           const workTheme: ThemeId = a.targetThemeId ?? a.workSpot?.themeId ?? 'palace';
           destinationAr = formatAgentSpeechVariant(
@@ -2491,9 +2679,11 @@ export class PeopleAgentsManager {
           if (a.stateTimer > 0) {
             destinationAr =
               a.playKind === 'school'
-                ? phase === 'school'
-                  ? 'يتعلّم في المدرسة'
-                  : 'يلعب عند مدخل المدرسة'
+                ? a.insideBuilding
+                  ? 'يتعلّم داخل المدرسة'
+                  : phase === 'school'
+                    ? 'يتعلّم في المدرسة'
+                    : 'يلعب عند مدخل المدرسة'
                 : a.playKind === 'garden'
                   ? 'يلعب بين أشجار الحديقة'
                   : 'يلعب قرب باب البيت';
@@ -2601,67 +2791,41 @@ export class PeopleAgentsManager {
     for (let i = 0; i < this.agents.length; i++) {
       const a = this.agents[i];
 
-      // Element 3.1: 200ms step-forward shrink into house front door -> invisible inside home
+      // Shared 200ms step-forward shrink into front door (houses, mosques, and indoor service buildings)
       if (a.state === 'ENTERING_HOME') {
-        a.enterDoorTimer -= dt;
-        const progress = THREE.MathUtils.clamp(
-          1 - a.enterDoorTimer / ENTER_DOOR_DURATION,
-          0,
-          1
-        );
         const doorAnchor =
           a.role === 'police' ? this.palaceSpot : a.homeSpot;
-        const fx = doorAnchor.faceTarget.x - a.enterStartX;
-        const fz = doorAnchor.faceTarget.z - a.enterStartZ;
-        const flen = Math.hypot(fx, fz) || 1;
-        const stepIn = 0.55 * progress;
-        const curX = a.enterStartX + (fx / flen) * stepIn;
-        const curZ = a.enterStartZ + (fz / flen) * stepIn;
-        const groundY = this.getLandHeight(a.enterStartX, a.enterStartZ);
-        a.group.position.set(curX, groundY, curZ);
-        a.group.rotation.y = Math.atan2(fx, fz);
-        a.group.scale.setScalar(Math.max(0.05, 1 - progress * 0.95));
-
-        if (a.enterDoorTimer <= 0) {
-          a.x = doorAnchor.doorstep.x;
-          a.z = doorAnchor.doorstep.z;
-          a.group.position.set(a.x, groundY, a.z);
-          a.group.scale.setScalar(1);
-          a.group.visible = false;
+        if (this.stepDoorEntryAnimation(a, doorAnchor, dt)) {
           a.state = 'AT_HOME';
           a.stateTimer = 2.4 + Math.random() * 2.0;
         }
       } else if (a.state === 'ENTERING_MOSQUE') {
         // V5 Prompt 2 Element 2: 200ms step-forward shrink into mosque front door -> invisible inside during prayer
-        a.enterDoorTimer -= dt;
-        const progress = THREE.MathUtils.clamp(
-          1 - a.enterDoorTimer / ENTER_DOOR_DURATION,
-          0,
-          1
-        );
         const mosqueAnchor = a.prayerMosqueSpot ?? this.palaceSpot;
-        const fx = mosqueAnchor.faceTarget.x - a.enterStartX;
-        const fz = mosqueAnchor.faceTarget.z - a.enterStartZ;
-        const flen = Math.hypot(fx, fz) || 1;
-        const stepIn = 0.55 * progress;
-        const curX = a.enterStartX + (fx / flen) * stepIn;
-        const curZ = a.enterStartZ + (fz / flen) * stepIn;
-        const groundY = this.getLandHeight(a.enterStartX, a.enterStartZ);
-        a.group.position.set(curX, groundY, curZ);
-        a.group.rotation.y = Math.atan2(fx, fz);
-        a.group.scale.setScalar(Math.max(0.05, 1 - progress * 0.95));
-
-        if (a.enterDoorTimer <= 0) {
-          a.x = mosqueAnchor.doorstep.x;
-          a.z = mosqueAnchor.doorstep.z;
-          a.group.position.set(a.x, groundY, a.z);
-          a.group.scale.setScalar(1);
-          a.group.visible = false;
+        if (this.stepDoorEntryAnimation(a, mosqueAnchor, dt)) {
           a.state = 'PRAYING';
           a.prayerTimer = CLOCK_CONSTANTS.REAL_SECONDS_PER_GAME_MINUTE;
         }
+      } else if (a.state === 'ENTERING_BUILDING') {
+        // Amendment 6-B (B2): 200ms step-forward shrink into service building front door -> invisible during session
+        const doorAnchor = a.activeDoorAnchor ?? {
+          cubeId: this.palaceSpot.cubeId,
+          themeId: 'palace' as ThemeId,
+          doorstep: this.palaceSpot.doorstep,
+          faceTarget: this.palaceSpot.faceTarget,
+        };
+        if (this.stepDoorEntryAnimation(a, doorAnchor, dt)) {
+          const targetState = a.pendingIndoorState ?? 'ON_BREAK';
+          const duration =
+            a.pendingIndoorDuration > 0 ? a.pendingIndoorDuration : 3.0;
+          a.insideBuilding = true;
+          a.pendingIndoorState = null;
+          a.pendingIndoorDuration = 0;
+          a.state = targetState;
+          a.stateTimer = duration;
+        }
       } else if (a.state === 'PRAYING') {
-        // V5 Prompt 2 Element 2: Inside mosque for exactly 1 game-minute (20 real seconds)
+        // V5 Prompt 2 Element 2: Inside mosque for exactly 1 game-minute (2.5 real seconds)
         a.prayerTimer -= dt;
         a.group.visible = false;
         if (a.prayerTimer <= 0) {
@@ -2681,7 +2845,10 @@ export class PeopleAgentsManager {
         // Stationary timed states (AT_HOME, WORKING, ON_BREAK, PLAYING pause, PATROL pause, WAITING)
         a.stateTimer -= dt;
 
-        if (a.state === 'WORKING') {
+        if (a.insideBuilding) {
+          // Citizen is inside a closed-interior service building — remain hidden until session ends
+          a.group.visible = false;
+        } else if (a.state === 'WORKING') {
           // Element 3.3: Field themes rotate slowly among their workSpots during the shift
           if (
             a.workSpot &&
@@ -2774,14 +2941,45 @@ export class PeopleAgentsManager {
                 a.state = 'WAITING';
                 a.stateTimer = 4.0 + Math.random() * 2.5;
               } else if (a.state === 'TO_WORK') {
-                a.state = 'WORKING';
-                a.stateTimer = 5.2 + Math.random() * 3.5;
-                a.workSpotSwitchTimer = 2.4 + Math.random() * 1.2;
-                this.facePoint(a, a.activeFaceTarget);
+                if (a.workSpot && INDOOR_SERVICE_THEMES.has(a.workSpot.themeId)) {
+                  this.beginEnteringBuilding(
+                    a,
+                    {
+                      cubeId: a.workSpot.cubeId,
+                      themeId: a.workSpot.themeId,
+                      doorstep: a.workSpot.doorstep,
+                      faceTarget: a.workSpot.faceTarget,
+                    },
+                    'WORKING',
+                    5.2 + Math.random() * 3.5
+                  );
+                } else {
+                  a.state = 'WORKING';
+                  a.stateTimer = 5.2 + Math.random() * 3.5;
+                  a.workSpotSwitchTimer = 2.4 + Math.random() * 1.2;
+                  this.facePoint(a, a.activeFaceTarget);
+                }
               } else if (a.state === 'TO_BREAK') {
-                a.state = 'ON_BREAK';
-                a.stateTimer = 2.8 + Math.random() * 2.4;
-                this.facePoint(a, a.activeFaceTarget);
+                if (
+                  a.activeBreakSpot &&
+                  INDOOR_SERVICE_THEMES.has(a.activeBreakSpot.themeId)
+                ) {
+                  this.beginEnteringBuilding(
+                    a,
+                    {
+                      cubeId: a.activeBreakSpot.cubeId,
+                      themeId: a.activeBreakSpot.themeId,
+                      doorstep: a.activeBreakSpot.doorstep,
+                      faceTarget: a.activeBreakSpot.faceTarget,
+                    },
+                    'ON_BREAK',
+                    2.8 + Math.random() * 2.4
+                  );
+                } else {
+                  a.state = 'ON_BREAK';
+                  a.stateTimer = 2.8 + Math.random() * 2.4;
+                  this.facePoint(a, a.activeFaceTarget);
+                }
               } else if (a.state === 'TO_PRAYER') {
                 // V5 Prompt 2 Element 2: Arrived at mosque doorstep -> step into mosque door
                 a.state = 'ENTERING_MOSQUE';
@@ -2793,19 +2991,65 @@ export class PeopleAgentsManager {
                 a.prayerMosqueSpot = null;
                 a.prayerReturnTarget = null;
                 if (returnTarget === 'work') {
-                  a.state = 'WORKING';
-                  a.stateTimer = 5.2 + Math.random() * 3.5;
-                  a.workSpotSwitchTimer = 2.4 + Math.random() * 1.2;
-                  this.facePoint(a, a.activeFaceTarget);
+                  if (a.workSpot && INDOOR_SERVICE_THEMES.has(a.workSpot.themeId)) {
+                    this.beginEnteringBuilding(
+                      a,
+                      {
+                        cubeId: a.workSpot.cubeId,
+                        themeId: a.workSpot.themeId,
+                        doorstep: a.workSpot.doorstep,
+                        faceTarget: a.workSpot.faceTarget,
+                      },
+                      'WORKING',
+                      5.2 + Math.random() * 3.5
+                    );
+                  } else {
+                    a.state = 'WORKING';
+                    a.stateTimer = 5.2 + Math.random() * 3.5;
+                    a.workSpotSwitchTimer = 2.4 + Math.random() * 1.2;
+                    this.facePoint(a, a.activeFaceTarget);
+                  }
                 } else if (returnTarget === 'break') {
-                  a.state = 'ON_BREAK';
-                  a.stateTimer = 2.8 + Math.random() * 2.4;
-                  this.facePoint(a, a.activeFaceTarget);
+                  if (
+                    a.activeBreakSpot &&
+                    INDOOR_SERVICE_THEMES.has(a.activeBreakSpot.themeId)
+                  ) {
+                    this.beginEnteringBuilding(
+                      a,
+                      {
+                        cubeId: a.activeBreakSpot.cubeId,
+                        themeId: a.activeBreakSpot.themeId,
+                        doorstep: a.activeBreakSpot.doorstep,
+                        faceTarget: a.activeBreakSpot.faceTarget,
+                      },
+                      'ON_BREAK',
+                      2.8 + Math.random() * 2.4
+                    );
+                  } else {
+                    a.state = 'ON_BREAK';
+                    a.stateTimer = 2.8 + Math.random() * 2.4;
+                    this.facePoint(a, a.activeFaceTarget);
+                  }
                 } else if (returnTarget === 'school') {
-                  a.state = 'PLAYING';
                   a.playKind = 'school';
-                  a.stateTimer = 3.0 + Math.random() * 2.0;
-                  this.facePoint(a, a.activeFaceTarget);
+                  if (this.schoolSpots.length > 0) {
+                    const s = this.schoolSpots[a.id % this.schoolSpots.length];
+                    this.beginEnteringBuilding(
+                      a,
+                      {
+                        cubeId: s.cubeId,
+                        themeId: 'school',
+                        doorstep: s.doorstep,
+                        faceTarget: s.faceTarget,
+                      },
+                      'PLAYING',
+                      3.0 + Math.random() * 2.0
+                    );
+                  } else {
+                    a.state = 'PLAYING';
+                    a.stateTimer = 3.0 + Math.random() * 2.0;
+                    this.facePoint(a, a.activeFaceTarget);
+                  }
                 } else {
                   a.state = 'ENTERING_HOME';
                   a.enterDoorTimer = ENTER_DOOR_DURATION;
@@ -2819,8 +3063,23 @@ export class PeopleAgentsManager {
                 a.enterStartX = a.x;
                 a.enterStartZ = a.z;
               } else if (a.state === 'PLAYING') {
-                a.stateTimer = 1.2 + Math.random() * 1.5;
-                this.facePoint(a, a.activeFaceTarget);
+                if (a.playKind === 'school' && this.schoolSpots.length > 0) {
+                  const s = this.schoolSpots[a.id % this.schoolSpots.length];
+                  this.beginEnteringBuilding(
+                    a,
+                    {
+                      cubeId: s.cubeId,
+                      themeId: 'school',
+                      doorstep: s.doorstep,
+                      faceTarget: s.faceTarget,
+                    },
+                    'PLAYING',
+                    4.0 + Math.random() * 2.5
+                  );
+                } else {
+                  a.stateTimer = 1.2 + Math.random() * 1.5;
+                  this.facePoint(a, a.activeFaceTarget);
+                }
               } else if (a.state === 'PATROL') {
                 a.stateTimer = 1.4 + Math.random() * 1.5;
                 if (a.patrolAtPalace) {

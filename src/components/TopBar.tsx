@@ -65,7 +65,7 @@ export function TopBar({
   const isNight = isNightMinute(minuteOfDay);
   const nextPrayer = getNextPrayer(state);
   const nextPrayerLineAr = `الصلاة القادمة: ${nextPrayer.nameAr} ${formatClock(nextPrayer.minute)}`;
-  const clockTooltipAr = `اليوم في المملكة = 8 ساعات حقيقية — ${nextPrayerLineAr}`;
+  const clockTooltipAr = `اليوم في المملكة = ساعة حقيقية واحدة — ${nextPrayerLineAr}`;
   const dayProgressPct = Math.min(
     100,
     Math.round(
@@ -191,7 +191,7 @@ export function TopBar({
               role="tooltip"
               className="absolute left-0 top-full mt-1.5 z-40 px-2.5 py-1.5 rounded-lg bg-[#FBF3DF] border border-[#C9962E] text-[#2B2118] text-[11px] font-bold whitespace-nowrap shadow-md space-y-0.5"
             >
-              <div>اليوم في المملكة = 8 ساعات حقيقية</div>
+              <div>اليوم في المملكة = ساعة حقيقية واحدة</div>
               <div className="text-[#8A5F12] tabular-nums-latin">
                 {nextPrayerLineAr}
               </div>

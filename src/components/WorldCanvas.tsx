@@ -4,7 +4,6 @@ import {
   type ReactNode,
   useEffect,
   useImperativeHandle,
-  useMemo,
   useRef,
   useState,
 } from 'react';
@@ -33,6 +32,7 @@ interface WorldCanvasProps {
   population: number;
   satisfaction: number;
   selectedCubeId: number | null;
+  bulkSelectedCubeIds?: number[];
   selectedCitizenId: number | null;
   followCitizenId: number | null;
   activeBuildTheme: ThemeId | null;
@@ -66,6 +66,7 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
       population,
       satisfaction,
       selectedCubeId,
+      bulkSelectedCubeIds,
       selectedCitizenId,
       followCitizenId,
       activeBuildTheme,
@@ -180,6 +181,7 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
         population,
         satisfaction,
         selectedCubeId,
+        bulkSelectedCubeIds,
         selectedCitizenId,
         followCitizenId,
         activeBuildTheme,
@@ -203,6 +205,7 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
       population,
       satisfaction,
       selectedCubeId,
+      bulkSelectedCubeIds,
       selectedCitizenId,
       followCitizenId,
       activeBuildTheme,
@@ -221,22 +224,17 @@ export const WorldCanvas = forwardRef<WorldCanvasHandle, WorldCanvasProps>(
       gameDay,
     ]);
 
-    // Element 4.1: Smoothly refit camera ONLY when owned-cell count changes (purchases & village joins)
-    const ownedCount = useMemo(() => {
-      let count = 0;
-      for (let i = 0; i < cubes.length; i++) {
-        if (cubes[i].owner === 'player') count++;
-      }
-      return count;
-    }, [cubes]);
-
-    const prevOwnedCountRef = useRef(ownedCount);
+    // Amendment B1(a): Camera stays completely still on land purchases (BUY_CUBE / BUY_CUBES_BULK).
+    // Only refit on genuine village-join celebrations (lastJoinedVillageSeq increment) or explicit New Game reset.
+    const prevJoinedVillageSeqRef = useRef(lastJoinedVillageSeq);
     useEffect(() => {
-      if (ownedCount !== prevOwnedCountRef.current) {
-        prevOwnedCountRef.current = ownedCount;
+      if (lastJoinedVillageSeq > prevJoinedVillageSeqRef.current) {
+        prevJoinedVillageSeqRef.current = lastJoinedVillageSeq;
         engineRef.current?.frameOwnedTerritory(latestCubesRef.current, false);
+      } else if (lastJoinedVillageSeq < prevJoinedVillageSeqRef.current) {
+        prevJoinedVillageSeqRef.current = lastJoinedVillageSeq;
       }
-    }, [ownedCount]);
+    }, [lastJoinedVillageSeq]);
 
     // Reframe on explicit New Game reset
     const prevResetRef = useRef(resetSignal);

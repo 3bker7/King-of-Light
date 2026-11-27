@@ -339,7 +339,7 @@ export const STRINGS = {
     awayTitle: 'بينما كنت غائباً',
     awaySubtitle: (durationText: string) =>
       `استمرت مملكتك في العمل لمدة ${durationText}.`,
-    awayCappedNote: '(الحد الأقصى لمحاكاة الغياب هو 8 ساعات)',
+    awayCappedNote: '(الحد الأقصى لمحاكاة الغياب هو 90 يوماً في المملكة)',
     awayShopGold: 'ذهب من المحلات والمطاعم',
     awayResources: 'الموارد المنتجة',
     awayNoResources: 'لم تُنتج موارد إضافية أثناء الغياب.',

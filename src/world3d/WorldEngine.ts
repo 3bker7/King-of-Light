@@ -74,6 +74,7 @@ export interface WorldSyncPayload {
   population: number;
   satisfaction: number;
   selectedCubeId: number | null;
+  bulkSelectedCubeIds?: number[];
   selectedCitizenId: number | null;
   followCitizenId: number | null;
   activeBuildTheme: ThemeId | null;
@@ -470,6 +471,8 @@ export class WorldEngine {
   private readonly hoverDecalMat: THREE.MeshBasicMaterial;
   private readonly selectionRingMesh: THREE.Mesh;
   private readonly selectionRingMat: THREE.MeshBasicMaterial;
+  private readonly bulkSelectionGroup = new THREE.Group();
+  private readonly bulkSelectionMat: THREE.MeshBasicMaterial;
 
   private readonly buildingsMap = new Map<string, BuildingVisualHandle>();
   private readonly dustParticles: DustParticle[] = [];
@@ -709,6 +712,17 @@ export class WorldEngine {
     this.selectionRingMesh.visible = false;
     this.selectionRingMesh.renderOrder = 12;
 
+    this.bulkSelectionMat = new THREE.MeshBasicMaterial({
+      color: 0x2ee59d,
+      transparent: true,
+      opacity: 0.92,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -3,
+      polygonOffsetUnits: -3,
+    });
+
     // Element 3: Shared golden shimmer geometry & material for purchasable adjacent land
     this.purchasableShimmerGeo = new THREE.PlaneGeometry(9.6, 9.6);
     this.purchasableShimmerGeo.rotateX(-Math.PI / 2);
@@ -762,6 +776,7 @@ export class WorldEngine {
       this.fxGroup,
       this.hoverDecalMesh,
       this.selectionRingMesh,
+      this.bulkSelectionGroup,
       this.provinceHighlightRingMesh
     );
 
@@ -2211,6 +2226,29 @@ export class WorldEngine {
 
   private updateSelectionRing(): void {
     const state = this.latestState;
+    // Update bulk land-purchase highlight rings
+    while (this.bulkSelectionGroup.children.length > 0) {
+      this.bulkSelectionGroup.remove(this.bulkSelectionGroup.children[0]);
+    }
+    if (state && Array.isArray(state.bulkSelectedCubeIds) && state.bulkSelectedCubeIds.length > 0) {
+      for (let i = 0; i < state.bulkSelectedCubeIds.length; i++) {
+        const bCube = state.cubes[state.bulkSelectedCubeIds[i]];
+        if (!bCube) continue;
+        const bPos = cellToWorldCenter(bCube.row, bCube.col);
+        const bY = Math.max(
+          WATER_SURFACE_Y + 0.08,
+          getTerrainHeightAt(bPos.x, bPos.z, this.seaCoords) + 0.16
+        );
+        const ring = new THREE.Mesh(
+          this.selectionRingMesh.geometry,
+          this.bulkSelectionMat
+        );
+        ring.position.set(bPos.x, bY, bPos.z);
+        ring.renderOrder = 12;
+        this.bulkSelectionGroup.add(ring);
+      }
+    }
+
     if (!state || state.selectedCubeId === null) {
       this.selectionRingMesh.visible = false;
       return;
@@ -2965,6 +3003,7 @@ export class WorldEngine {
     this.hoverDecalMat.dispose();
     this.selectionRingMesh.geometry.dispose();
     this.selectionRingMat.dispose();
+    this.bulkSelectionMat.dispose();
     this.provinceHighlightRingMesh.geometry.dispose();
     this.provinceHighlightRingMat.dispose();
 

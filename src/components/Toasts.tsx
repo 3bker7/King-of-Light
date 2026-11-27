@@ -10,19 +10,17 @@ interface ToastsProps {
 
 export function Toasts({
   toasts,
-  hasOverlayCard = false,
   onDismiss,
   onFocusToast,
 }: ToastsProps) {
   if (toasts.length === 0) return null;
 
+  // Amendment B1(b): Top-center stack, at most 3 visible, newest first
+  const visibleToasts = toasts.slice(-3).reverse();
+
   return (
-    <div
-      className={`fixed bottom-[68px] lg:bottom-4 left-3 z-40 flex flex-col gap-2 max-w-xs w-[calc(100vw-1.5rem)] pointer-events-none transition-[left] duration-150 ${
-        hasOverlayCard ? 'lg:left-[320px]' : ''
-      }`}
-    >
-      {toasts.map((toast) => {
+    <div className="fixed top-14 left-1/2 -translate-x-1/2 z-40 flex flex-col gap-2 max-w-sm w-[calc(100vw-1.5rem)] pointer-events-none">
+      {visibleToasts.map((toast) => {
         const Icon =
           toast.tone === 'success'
             ? CheckCircle2

@@ -96,6 +96,8 @@ interface InspectorProps {
   onClose: () => void;
   onToggleFollowCitizen: () => void;
   onBuyCube: (cubeId: number) => void;
+  bulkBuyMode?: boolean;
+  onToggleBulkBuyMode?: (seedCubeId?: number) => void;
   onDemolishTheme: (cubeId: number, slot: SlotIndex) => void;
   onFixHint?: (themeId: ThemeId) => void;
   onBuyMaterials?: (items: Partial<Record<TradedResourceKey, number>>) => void;
@@ -408,6 +410,8 @@ export function Inspector({
   onClose,
   onToggleFollowCitizen,
   onBuyCube,
+  bulkBuyMode = false,
+  onToggleBulkBuyMode,
   onDemolishTheme,
   onFixHint,
   onBuyMaterials,
@@ -610,6 +614,19 @@ export function Inspector({
               <Coins className="w-3.5 h-3.5 text-[#F2CA6B]" />
               <span>{STRINGS.inspector.buyCubeAction(cubePrice)}</span>
             </button>
+            {onToggleBulkBuyMode && (
+              <button
+                type="button"
+                onClick={() => onToggleBulkBuyMode(cube.id)}
+                className={`w-full py-1.5 px-3 rounded-xl text-xs font-extrabold flex items-center justify-center gap-1.5 transition-colors border ${
+                  bulkBuyMode
+                    ? 'bg-[#C9962E] hover:bg-[#B88625] border-[#A87A1F] text-[#2B2118]'
+                    : 'bg-[#F4E7C8] hover:bg-[#EAD8AE] border-[#DFC996] text-[#2B2118]'
+                }`}
+              >
+                <span>{bulkBuyMode ? 'إلغاء الشراء المتعدد' : 'شراء متعدد'}</span>
+              </button>
+            )}
             <p className="text-[11px] text-[#6F5C43] leading-relaxed">
               {STRINGS.inspector.distancePriceNote(dist)}
             </p>

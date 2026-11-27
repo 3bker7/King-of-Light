@@ -609,7 +609,7 @@ export function simulateOfflineProgress(
 
   nextCitizenWealth = sumCitizenWealth(nextCitizens);
 
-  // Proportional day rollovers driven by the living clock (1 real sec = 3 game sec, capped at 90 game days)
+  // Proportional day rollovers driven by the living clock (1 real sec = 24 game sec, capped at 90 game days)
   const startClock = sanitizeClockOnHydrate(saved.clock);
   const offlineClockStep = advanceClock(startClock, elapsedSeconds);
   const nextClock = offlineClockStep.clock;
