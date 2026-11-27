@@ -215,6 +215,22 @@ export type CitizenAttrKey =
 
 export type CitizenAttrs = Record<CitizenAttrKey, number>;
 
+export type GenerosityTrait = 'generous' | 'balanced' | 'stingy';
+export type SociabilityTrait = 'social' | 'balanced' | 'loner';
+export type AmbitionTrait = 'ambitious' | 'balanced' | 'content';
+export type HonestyTrait = 'honest' | 'balanced' | 'sly';
+export type PietyTrait = 'devout' | 'balanced' | 'lax';
+
+export interface CitizenTraits {
+  generosity: GenerosityTrait;
+  sociability: SociabilityTrait;
+  ambition: AmbitionTrait;
+  honesty: HonestyTrait;
+  piety: PietyTrait;
+}
+
+export type CitizenTraitAxis = keyof CitizenTraits;
+
 export interface Citizen {
   id: number;
   name: string;
@@ -229,6 +245,8 @@ export interface Citizen {
   jobThemeId: ThemeId | null;
   wealth: number;
   attrs: CitizenAttrs;
+  // V5 Prompt 5 Element 1: Stable personality traits (separate from attrs)
+  traits: CitizenTraits;
   cvFiled: boolean;
   cvFiledMonth?: number | null;
   housingRequestMonth: number | null;

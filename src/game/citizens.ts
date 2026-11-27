@@ -1,5 +1,10 @@
 import { THEMES } from './constants';
 import { pickCitizenName } from './names';
+import {
+  generateTraits,
+  inheritTraits,
+  sanitizeTraitsOnHydrate,
+} from './personality';
 import type {
   Citizen,
   CitizenAttrKey,
@@ -224,11 +229,12 @@ export function generateInitialCitizens(
     const id = nextId++;
     const homeCubeId = spec.householdIdx === 1 ? home1 : home2;
     const isAdultCv = spec.age >= 14;
+    const birthMonth = totalMonths - spec.age;
     citizens.push({
       id,
       name: pickCitizenName(spec.gender, id * 7 + i * 3),
       gender: spec.gender,
-      birthMonth: totalMonths - spec.age,
+      birthMonth,
       householdId: spec.householdIdx,
       homeCubeId,
       spouseId: null,
@@ -238,6 +244,7 @@ export function generateInitialCitizens(
       jobThemeId: null,
       wealth: 0,
       attrs: generateBellAttrs(rng),
+      traits: generateTraits(id, birthMonth),
       cvFiled: isAdultCv,
       cvFiledMonth: isAdultCv ? totalMonths : null,
       housingRequestMonth: null,
@@ -245,7 +252,7 @@ export function generateInitialCitizens(
     });
   }
 
-  // Wire spouse & parent links cleanly for included seed citizens
+  // Wire spouse & parent links cleanly for included seed citizens (and inherit traits for founding children)
   for (let i = 0; i < baseCount; i++) {
     const spec = baseSpecs[i];
     if (spec.spouseSeedIdx !== undefined && spec.spouseSeedIdx < baseCount) {
@@ -257,10 +264,15 @@ export function generateInitialCitizens(
       spec.parentSeedIdxs[0] < baseCount &&
       spec.parentSeedIdxs[1] < baseCount
     ) {
-      citizens[i].parentIds = [
-        citizens[spec.parentSeedIdxs[0]].id,
-        citizens[spec.parentSeedIdxs[1]].id,
-      ];
+      const father = citizens[spec.parentSeedIdxs[0]];
+      const mother = citizens[spec.parentSeedIdxs[1]];
+      citizens[i].parentIds = [father.id, mother.id];
+      citizens[i].traits = inheritTraits(
+        citizens[i].id,
+        citizens[i].birthMonth,
+        mother,
+        father
+      );
     }
   }
 
@@ -282,12 +294,17 @@ export function generateInitialCitizens(
       const fAge = 24 + Math.floor(rng() * 14);
       const mAge = 22 + Math.floor(rng() * 12);
       const cAge = 4 + Math.floor(rng() * 9);
+      const fBirth = totalMonths - fAge;
+      const mBirth = totalMonths - mAge;
+      const cBirth = totalMonths - cAge;
+      const fTraits = generateTraits(fatherId, fBirth);
+      const mTraits = generateTraits(motherId, mBirth);
       citizens.push(
         {
           id: fatherId,
           name: pickCitizenName('m', fatherId * 5),
           gender: 'm',
-          birthMonth: totalMonths - fAge,
+          birthMonth: fBirth,
           householdId: hhId,
           homeCubeId,
           spouseId: motherId,
@@ -297,6 +314,7 @@ export function generateInitialCitizens(
           jobThemeId: null,
           wealth: 0,
           attrs: fatherAttrs,
+          traits: fTraits,
           cvFiled: true,
           cvFiledMonth: totalMonths,
           housingRequestMonth: homeCubeId === null ? totalMonths : null,
@@ -306,7 +324,7 @@ export function generateInitialCitizens(
           id: motherId,
           name: pickCitizenName('f', motherId * 5),
           gender: 'f',
-          birthMonth: totalMonths - mAge,
+          birthMonth: mBirth,
           householdId: hhId,
           homeCubeId,
           spouseId: fatherId,
@@ -316,6 +334,7 @@ export function generateInitialCitizens(
           jobThemeId: null,
           wealth: 0,
           attrs: motherAttrs,
+          traits: mTraits,
           cvFiled: true,
           cvFiledMonth: totalMonths,
           housingRequestMonth: null,
@@ -325,7 +344,7 @@ export function generateInitialCitizens(
           id: childId,
           name: pickCitizenName(childId % 2 === 0 ? 'f' : 'm', childId * 7),
           gender: childId % 2 === 0 ? 'f' : 'm',
-          birthMonth: totalMonths - cAge,
+          birthMonth: cBirth,
           householdId: hhId,
           homeCubeId,
           spouseId: null,
@@ -335,6 +354,7 @@ export function generateInitialCitizens(
           jobThemeId: null,
           wealth: 0,
           attrs: inheritAttrs(fatherAttrs, motherAttrs, rng),
+          traits: inheritTraits(childId, cBirth, mTraits, fTraits),
           cvFiled: cAge >= 14,
           cvFiledMonth: cAge >= 14 ? totalMonths : null,
           housingRequestMonth: null,
@@ -345,11 +365,12 @@ export function generateInitialCitizens(
       const id = nextId++;
       const gender: 'm' | 'f' = id % 2 === 0 ? 'f' : 'm';
       const age = 19 + Math.floor(rng() * 20);
+      const birthMonth = totalMonths - age;
       citizens.push({
         id,
         name: pickCitizenName(gender, id * 11),
         gender,
-        birthMonth: totalMonths - age,
+        birthMonth,
         householdId: hhId,
         homeCubeId,
         spouseId: null,
@@ -359,6 +380,7 @@ export function generateInitialCitizens(
         jobThemeId: null,
         wealth: 0,
         attrs: generateBellAttrs(rng),
+        traits: generateTraits(id, birthMonth),
         cvFiled: true,
         cvFiledMonth: totalMonths,
         housingRequestMonth: homeCubeId === null ? totalMonths : null,
@@ -484,6 +506,7 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
   const list: Citizen[] = input.citizens.map((c) => ({
     ...c,
     attrs: { ...c.attrs },
+    traits: c.traits ? { ...c.traits } : generateTraits(c.id, c.birthMonth),
     parentIds: c.parentIds ? ([c.parentIds[0], c.parentIds[1]] as [number, number]) : null,
   }));
   let nextId = Math.max(
@@ -545,11 +568,12 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
         14,
         Math.min(85, Number.isFinite(arrival.ageMonths) ? Math.trunc(arrival.ageMonths) : 24)
       );
+      const arrivalBirthMonth = totalMonths - safeAge;
       list.push({
         id,
         name: arrival.name,
         gender: arrival.gender === 'f' ? 'f' : 'm',
-        birthMonth: totalMonths - safeAge,
+        birthMonth: arrivalBirthMonth,
         householdId: hhId,
         homeCubeId: null,
         spouseId: null,
@@ -565,6 +589,7 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
           health: clampVisaAttr(arrival.attributes.health),
           intelligence: clampVisaAttr(arrival.attributes.intelligence),
         },
+        traits: generateTraits(id, arrivalBirthMonth),
         cvFiled: true,
         cvFiledMonth: totalMonths,
         housingRequestMonth: totalMonths,
@@ -598,6 +623,12 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
         jobThemeId: null,
         wealth: 0,
         attrs: inheritAttrs(birthCouple.father.attrs, birthCouple.mother.attrs, rng),
+        traits: inheritTraits(
+          id,
+          totalMonths,
+          birthCouple.mother,
+          birthCouple.father
+        ),
         cvFiled: false,
         cvFiledMonth: null,
         housingRequestMonth: null,
@@ -632,12 +663,18 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
       const mAttrs = generateBellAttrs(rng);
       const cGender: 'm' | 'f' = rng() < 0.5 ? 'm' : 'f';
 
+      const fBirth = totalMonths - fAge;
+      const mBirth = totalMonths - mAge;
+      const cBirth = totalMonths - cAge;
+      const fTraits = generateTraits(fId, fBirth);
+      const mTraits = generateTraits(mId, mBirth);
+
       list.push(
         {
           id: fId,
           name: pickCitizenName('m', fId * 7 + totalMonths),
           gender: 'm',
-          birthMonth: totalMonths - fAge,
+          birthMonth: fBirth,
           householdId: hhId,
           homeCubeId: null,
           spouseId: mId,
@@ -647,6 +684,7 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
           jobThemeId: null,
           wealth: 0,
           attrs: fAttrs,
+          traits: fTraits,
           cvFiled: true,
           cvFiledMonth: totalMonths,
           housingRequestMonth: totalMonths,
@@ -656,7 +694,7 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
           id: mId,
           name: pickCitizenName('f', mId * 7 + totalMonths),
           gender: 'f',
-          birthMonth: totalMonths - mAge,
+          birthMonth: mBirth,
           householdId: hhId,
           homeCubeId: null,
           spouseId: fId,
@@ -666,6 +704,7 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
           jobThemeId: null,
           wealth: 0,
           attrs: mAttrs,
+          traits: mTraits,
           cvFiled: true,
           cvFiledMonth: totalMonths,
           housingRequestMonth: null,
@@ -675,7 +714,7 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
           id: cId,
           name: pickCitizenName(cGender, cId * 7 + totalMonths),
           gender: cGender,
-          birthMonth: totalMonths - cAge,
+          birthMonth: cBirth,
           householdId: hhId,
           homeCubeId: null,
           spouseId: null,
@@ -685,6 +724,7 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
           jobThemeId: null,
           wealth: 0,
           attrs: inheritAttrs(fAttrs, mAttrs, rng),
+          traits: inheritTraits(cId, cBirth, mTraits, fTraits),
           cvFiled: false,
           cvFiledMonth: null,
           housingRequestMonth: null,
@@ -698,12 +738,14 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
       const mId = nextId++;
       const fAge = 18 + Math.floor(rng() * 23);
       const mAge = 18 + Math.floor(rng() * 23);
+      const fBirth = totalMonths - fAge;
+      const mBirth = totalMonths - mAge;
       list.push(
         {
           id: fId,
           name: pickCitizenName('m', fId * 11 + totalMonths),
           gender: 'm',
-          birthMonth: totalMonths - fAge,
+          birthMonth: fBirth,
           householdId: hhId,
           homeCubeId: null,
           spouseId: mId,
@@ -713,6 +755,7 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
           jobThemeId: null,
           wealth: 0,
           attrs: generateBellAttrs(rng),
+          traits: generateTraits(fId, fBirth),
           cvFiled: true,
           cvFiledMonth: totalMonths,
           housingRequestMonth: totalMonths,
@@ -722,7 +765,7 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
           id: mId,
           name: pickCitizenName('f', mId * 11 + totalMonths),
           gender: 'f',
-          birthMonth: totalMonths - mAge,
+          birthMonth: mBirth,
           householdId: hhId,
           homeCubeId: null,
           spouseId: fId,
@@ -732,6 +775,7 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
           jobThemeId: null,
           wealth: 0,
           attrs: generateBellAttrs(rng),
+          traits: generateTraits(mId, mBirth),
           cvFiled: true,
           cvFiledMonth: totalMonths,
           housingRequestMonth: null,
@@ -744,11 +788,12 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
       const id = nextId++;
       const gender: 'm' | 'f' = rng() < 0.5 ? 'm' : 'f';
       const age = 18 + Math.floor(rng() * 23);
+      const birthMonth = totalMonths - age;
       list.push({
         id,
         name: pickCitizenName(gender, id * 17 + totalMonths),
         gender,
-        birthMonth: totalMonths - age,
+        birthMonth,
         householdId: hhId,
         homeCubeId: null,
         spouseId: null,
@@ -758,6 +803,7 @@ export function reconcileCitizens(input: ReconcileInput): ReconcileResult {
         jobThemeId: null,
         wealth: 0,
         attrs: generateBellAttrs(rng),
+        traits: generateTraits(id, birthMonth),
         cvFiled: true,
         cvFiledMonth: totalMonths,
         housingRequestMonth: totalMonths,
@@ -1099,6 +1145,7 @@ export function sanitizeCitizensOnHydrate(
       prayerBuffUntil,
       wealth,
       attrs,
+      traits: sanitizeTraitsOnHydrate(raw.traits, id, birthMonth),
       cvFiled,
       cvFiledMonth,
       housingRequestMonth,
